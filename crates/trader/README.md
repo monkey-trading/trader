@@ -15,13 +15,20 @@ answer that fails the check is an error, never data, and one signed by another k
   `FrameVerifier`, refuses gaps, and resumes after the last message it read when a connection
   fails or falls silent
 - Startup reads of the market, the account's position and balance, and the market's marks history
-  to warm the strategy up; from then on the position follows the account's fills in the log
+  to warm the strategy up, at the widest resolution that tiles a bar; from then on the position
+  follows the account's fills in the log, and the balance is read again after each of them
+- Bars built only from moves of the mark, as the node's marks history records them, so bars warmed
+  up from the history and bars built live agree
 - Signed market orders toward the strategy's target, on the account's next nonce, quoted at the
-  last mark; a declined order is logged with the node's reason and retried on the next bar
-- On SIGINT or SIGTERM, a cancel of the account's resting orders and, when configured, a close of
-  its position
+  last mark; a declined order is logged with the node's reason and retried on the next bar. No
+  order goes out for a bar the stream is replaying from history, or before the log has passed the
+  last order's expiry, so an order's fill is always in the position before the next decision
+- On SIGINT or SIGTERM, once the last order can no longer enter the log, a cancel of the account's
+  resting orders and, when configured, a close of its position at the node's current mark; a stop
+  that leaves either behind, or cannot confirm it did not, exits non-zero with an alert
 - The account key from an encrypted Web3 Secret Storage keystore, or, in a dev build, a hex file;
-  held only as a signing key that zeroes its secret on drop, and never printed
+  held only as a signing key that zeroes its secret on drop, and never printed. A release build
+  refuses the keys whose private halves this repository publishes
 
 ## Repository Structure
 
@@ -43,6 +50,8 @@ answer that fails the check is an error, never data, and one signed by another k
 - `tests/common/mod.rs`: a local stand-in node that signs its answers and frames, with injected
   faults
 - `tests/node_answers.rs`, `tests/stream.rs`, `tests/bot.rs`: the binary against the stand-in
+- `tests/bot_halts.rs`: the bot against the stand-in when its market is relisted, the log cannot be
+  read, the node changes signer, or a stop cannot leave the account as it should
 
 ## Usage
 

@@ -2,23 +2,26 @@
 //! cancel of the account's resting orders and a close of its position. Each carries the account's
 //! next nonce, read just before it is signed, and an expiry counted from the node's signed time.
 
+use std::time::Duration;
+
 use engine_core::Fixed;
 use engine_core::auth::RequestAuth;
 use engine_core::command::{CancelAllRequest, CloseAllRequest, CloseEntry, OrderKind, OrderRequest};
 use engine_core::eip712::{cancel_all_hash, close_all_hash, order_hash};
 use engine_core::event::Event;
 use engine_core::types::Millis;
-use tracing::{Instrument, info, info_span, warn};
+use tracing::{Instrument, error, info, info_span, warn};
 use trader_core::bars::Bar;
 use trader_core::strategy::OrderIntent;
 
 use crate::bot::{Bot, Halt};
 use crate::node::CallError;
 
-/// How long after the node's time a signed request may still be sequenced. It is shorter than the
-/// shortest bar, so an order from one bar is in the log, or never will be, before the next bar
-/// closes, and the next decision sees its fill.
+/// How long after the node's time a signed request may still be sequenced: long enough to reach a
+/// node over a slow link, and shorter than the shortest bar, so a live bot's next bar is past it.
 const EXPIRES_IN_MS: Millis = 30_000;
+/// The longest the stop waits for the last order's expiry to pass in the node's time.
+const MAX_EXPIRY_WAIT: Duration = Duration::from_millis(EXPIRES_IN_MS as u64 + 5_000);
 
 impl Bot {
     /// Places a signed market order for `intent`, quoted at the last mark, under `bar`'s start as
@@ -47,11 +50,14 @@ impl Bot {
             };
             let hash = order_hash(&self.domain, &request, nonce, expires_at);
             request.auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
-            info!(side = ?intent.side, qty = %intent.qty, %quoted, reduce_only = intent.reduce_only, nonce, "placing a market order");
+            // Signed, the order can enter the log until it expires, whatever its answer says.
+            self.order_expires_at = Some(expires_at);
+            info!(side = ?intent.side, qty = %intent.qty, %quoted, reduce_only = intent.reduce_only, nonce, expires_at, "placing a market order");
             match self.node.place_order(&request).await {
                 Ok(answer) => log_order_events(&answer.body),
                 Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-                Err(e) => warn!("order declined: {e}"),
+                Err(e @ CallError::Refused { .. }) => warn!("order declined: {e}"),
+                Err(e) => warn!("no answer to the order, which may still enter the log until it expires: {e}"),
             }
             Ok(())
         }
@@ -60,12 +66,16 @@ impl Bot {
     }
 
     /// Cancels the account's resting orders and, when configured, closes its position in the
-    /// market, as a verified read of the account shows them, then reads it again to report what is
-    /// left. Without a read to rely on, it cancels anyway and closes the position the log gave.
+    /// market, as a verified read of the account shows them once the last order can no longer enter
+    /// the log, then reads the account again to confirm it. The close is quoted at the node's mark
+    /// as it stands. Without a read to rely on, it cancels anyway and closes the position the log
+    /// gave.
     /// Error cases:
     /// - an answer signed by another key than the signer
+    /// - orders still rest, or a position it was to close is still held, or neither can be confirmed
     pub(super) async fn stop(&mut self) -> Result<(), Halt> {
         let account = self.key.address();
+        let quoted = self.wait_out_last_order().await?.or(self.mark);
         let (resting, held) = match self.read_account().await {
             Ok(view) => (Some(view.orders.len()), view.positions.get(&self.market).map_or(Fixed::ZERO, |p| p.qty)),
             Err(Halt::WrongSigner) => return Err(Halt::WrongSigner),
@@ -82,11 +92,11 @@ impl Bot {
                 match self.node.cancel_all(&CancelAllRequest { account, auth }).await {
                     Ok(answer) => log_order_events(&answer.body),
                     Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-                    Err(e) => warn!(alert = "stop_cancel_failed", "the cancel failed: {e}"),
+                    Err(e) => warn!("the cancel failed: {e}"),
                 }
             }
         }
-        if let (true, false, Some(quoted)) = (self.close_on_stop, held.is_zero(), self.mark) {
+        if let (true, false, Some(quoted)) = (self.close_on_stop, held.is_zero(), quoted) {
             info!(position = %held, %quoted, "closing the position");
             if let Some((nonce, expires_at)) = self.next_nonce().await? {
                 let mut request = CloseAllRequest {
@@ -100,19 +110,53 @@ impl Bot {
                 match self.node.close_all(&request).await {
                     Ok(answer) => log_order_events(&answer.body),
                     Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-                    Err(e) => warn!(alert = "stop_close_failed", "the close failed: {e}"),
+                    Err(e) => warn!("the close failed: {e}"),
                 }
             }
         }
-        match self.read_account().await {
-            Ok(left) => {
-                let position = left.positions.get(&self.market).map_or(Fixed::ZERO, |p| p.qty);
-                info!(resting_orders = left.orders.len(), %position, "stopped");
-            }
+        let left = match self.read_account().await {
+            Ok(left) => left,
             Err(Halt::WrongSigner) => return Err(Halt::WrongSigner),
-            Err(e) => warn!(alert = "stop_unread", "stopped, but the account cannot be read to confirm it: {e}"),
+            Err(e) => return Err(incomplete(format!("the account cannot be read to confirm it: {e}"))),
+        };
+        let position = left.positions.get(&self.market).map_or(Fixed::ZERO, |p| p.qty);
+        if !left.orders.is_empty() || (self.close_on_stop && !position.is_zero()) {
+            return Err(incomplete(format!(
+                "{} resting orders and a position of {position} are left",
+                left.orders.len()
+            )));
         }
+        info!(resting_orders = 0, %position, "stopped");
         Ok(())
+    }
+
+    /// Waits until the node's time is past the last order's expiry, so that order is in the log or
+    /// never will be, and returns the market's mark as the node gives it then, if it gives one.
+    /// Error cases:
+    /// - an answer signed by another key than the signer
+    async fn wait_out_last_order(&self) -> Result<Option<Fixed>, Halt> {
+        let mut waited = false;
+        loop {
+            let markets = match self.node.markets().await {
+                Ok(markets) => markets,
+                Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
+                Err(e) => {
+                    warn!("the market's mark was not read: {e}");
+                    return Ok(None);
+                }
+            };
+            let mark = markets.body.iter().find(|m| m.spec.id == self.market).and_then(|m| m.mark);
+            let now = Millis::try_from(markets.time_ms).unwrap_or(Millis::MAX);
+            match self.order_expires_at {
+                Some(expires_at) if now <= expires_at && !waited => {
+                    let wait = Duration::from_millis(u64::try_from(expires_at - now).unwrap_or(0) + 1_000);
+                    info!(expires_at, "waiting until the last order can no longer enter the log");
+                    tokio::time::sleep(wait.min(MAX_EXPIRY_WAIT)).await;
+                    waited = true;
+                }
+                _ => return Ok(mark),
+            }
+        }
     }
 
     /// The account, verified.
@@ -146,6 +190,12 @@ impl Bot {
             }
         }
     }
+}
+
+/// A stop that left the account other than it was to leave it, with an alert.
+fn incomplete(reason: String) -> Halt {
+    error!(alert = "stop_incomplete", "{reason}");
+    Halt::StopIncomplete(reason)
 }
 
 /// Logs what an order request did: each refusal with the engine's reason, each fill, each accepted

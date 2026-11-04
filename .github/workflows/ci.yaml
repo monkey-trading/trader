@@ -237,9 +237,9 @@ jobs:
         run: ./scripts/check-file-loc-test.sh
 
   # The bot's dev scenario (scripts/dev-trade-one.sh): a dev node from the engine commit Cargo.lock
-  # pins, and the bot trading one account on it for fifteen minutes. The node and its tools are built
-  # once per engine commit and cached by it; a push to main that only refreshes caches builds them
-  # and runs nothing.
+  # pins, and the bot trading one account on it for fifteen minutes. The node, its tools and its dev
+  # config are built once per engine commit and cached by it; a push to main that only refreshes
+  # caches builds them and the bot, and runs nothing.
   dev-trade-one:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.cache == 'true'
@@ -260,15 +260,16 @@ jobs:
           echo "commit=$commit" | tee -a "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/monkeytrading-trader/engine/${{ steps.engine.outputs.commit }}/bin
+          path: ~/.cache/monkeytrading-trader/engine/${{ steps.engine.outputs.commit }}/dist
           key: engine-${{ runner.os }}-${{ steps.engine.outputs.commit }}
       - name: Build the engine at the pinned commit
         run: bash -c 'source scripts/dev-stack.sh && dev_stack_build'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        if: needs.changes.outputs.cache != 'true'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
+      - name: Build the bot
+        run: cargo build --locked -p trader
       - name: Run the dev scenario
         if: needs.changes.outputs.cache != 'true'
         env:

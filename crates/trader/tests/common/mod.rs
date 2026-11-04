@@ -16,6 +16,7 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use engine_core::eip712::{self, B256};
+use engine_core::types::AccountId;
 use engine_wire::{Connection, Deployment, FRAME_VERSION, SignedFrame, frame_digest, parse_challenge, response_digest};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
@@ -86,6 +87,11 @@ pub struct Inner {
     pub faults: BTreeMap<(usize, (u64, u32)), Fault>,
     /// The request target of each stream connection opened.
     pub connections: Vec<String>,
+    /// How many times an account was read.
+    pub account_reads: usize,
+    /// Whether a cancel-all clears the account's resting orders and a close-all its positions in
+    /// the markets it names, as the engine's do when they succeed.
+    pub settle: bool,
 }
 
 /// A running stand-in.
@@ -113,7 +119,12 @@ impl StandIn {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let stand_in = Arc::new(StandIn {
-            inner: Mutex::new(Inner { answers: Some(Answers::Signed), time_ms: 1_800_000_000_000, ..Inner::default() }),
+            inner: Mutex::new(Inner {
+                answers: Some(Answers::Signed),
+                time_ms: 1_800_000_000_000,
+                settle: true,
+                ..Inner::default()
+            }),
             appended: Notify::new(),
             signer: SigningKey::from_slice(&SIGNER_SECRET).unwrap(),
             other: SigningKey::from_slice(&OTHER_SECRET).unwrap(),
@@ -123,7 +134,7 @@ impl StandIn {
         let router = Router::new()
             .route("/v1/markets", get(markets))
             .route("/v1/markets/{id}/marks", get(marks))
-            .route("/v1/accounts/{address}", get(account))
+            .route("/v1/accounts/{address}", get(account_view_route))
             .route("/v1/accounts/{address}/nonce", get(nonce))
             .route("/v1/orders", post(record))
             .route("/v1/orders/cancel-all", post(record))
@@ -252,8 +263,12 @@ async fn marks(State(s): State<Arc<StandIn>>) -> Response {
         .into_response()
 }
 
-async fn account(State(s): State<Arc<StandIn>>, Path(address): Path<String>) -> Response {
-    match s.with(|i| i.accounts.get(&address.to_lowercase()).cloned()) {
+async fn account_view_route(State(s): State<Arc<StandIn>>, Path(address): Path<String>) -> Response {
+    let view = s.with(|i| {
+        i.account_reads += 1;
+        i.accounts.get(&address.to_lowercase()).cloned()
+    });
+    match view {
         Some(view) => axum::Json(view).into_response(),
         None => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": "not found" }))).into_response(),
     }
@@ -263,10 +278,23 @@ async fn nonce(State(s): State<Arc<StandIn>>) -> Response {
     axum::Json(json!({ "next_nonce": s.with(|i| i.nonce) })).into_response()
 }
 
-/// Records a POST and answers with the next scripted events.
+/// Records a POST, settles a cancel-all or close-all when `Inner::settle` says so, and answers
+/// with the next scripted events.
 async fn record(State(s): State<Arc<StandIn>>, uri: Uri, body: Bytes) -> Response {
     let body: Value = serde_json::from_slice(&body).unwrap();
     let reply = s.with(|i| {
+        let account = body["account"].as_str().unwrap_or_default().to_lowercase();
+        if let (true, Some(view)) = (i.settle, i.accounts.get_mut(&account)) {
+            match uri.path() {
+                "/v1/orders/cancel-all" => view["orders"] = json!({}),
+                "/v1/positions/close-all" => {
+                    for close in body["closes"].as_array().unwrap() {
+                        view["positions"].as_object_mut().unwrap().remove(&close["market"].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
         i.posts.push((uri.path().to_owned(), body));
         i.nonce += 1;
         i.replies.pop_front().unwrap_or_else(|| json!([]))
@@ -338,4 +366,83 @@ async fn serve_log(s: Arc<StandIn>, mut socket: WebSocket, connection: Connectio
             return;
         }
     }
+}
+
+// ── The bot against the stand-in ──
+
+/// The stand-in's time at start: a minute boundary.
+pub const T0: i64 = 1_800_000_000_000;
+pub const MINUTE: i64 = 60_000;
+
+/// The test account's address.
+pub fn account() -> AccountId {
+    eip712::address(SigningKey::from_slice(&ACCOUNT_SECRET).unwrap().verifying_key())
+}
+
+/// The domain the stand-in's deployment signs under.
+pub fn domain() -> eip712::Eip712Domain {
+    eip712::domain(CHAIN_ID, AccountId(VAULT))
+}
+
+/// A config for the stand-in, with the test account's key in a hex file in `dir`: BTC-USD, `bar`
+/// bars, a one-bar average over a two-bar one, one unit a side, closing on stop.
+pub fn config(stand_in: &StandIn, dir: &std::path::Path, bar: &str) -> trader::config::Config {
+    std::fs::write(dir.join("account.hex"), hex::encode(ACCOUNT_SECRET)).unwrap();
+    let text = format!(
+        r#"
+[node]
+url = "https://127.0.0.1:{port}"
+chain_id = {CHAIN_ID}
+vault = "0x{vault}"
+signer = "0x{signer}"
+tls_key_sha256 = "{pin}"
+stream_timeout = "30s"
+
+[account]
+key = {{ type = "hex_file", path = "account.hex" }}
+close_on_stop = true
+
+[strategy]
+market = "BTC-USD"
+bar = "{bar}"
+fast = 1
+slow = 2
+qty = "1"
+max_slippage_bps = 25
+"#,
+        port = stand_in.addr.port(),
+        vault = hex::encode(VAULT),
+        signer = hex::encode(stand_in.signer()),
+        pin = hex::encode(stand_in.pin),
+    );
+    let path = dir.join("bot.toml");
+    std::fs::write(&path, text).unwrap();
+    trader::config::Config::load(&path).unwrap()
+}
+
+/// Runs the bot until `stop`.
+pub async fn run(cfg: trader::config::Config, stop: impl Future<Output = ()> + Send + 'static) -> anyhow::Result<()> {
+    trader::bot::run(cfg, |_| None, stop).await
+}
+
+/// The `n`th POST, from 1, once the stand-in has it.
+pub async fn posted(stand_in: &StandIn, n: usize) -> (String, Value) {
+    for _ in 0..200 {
+        if let Some(post) = stand_in.with(|i| i.posts.get(n - 1).cloned()) {
+            return post;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no POST {n}: {:?}", stand_in.with(|i| i.posts.clone()));
+}
+
+/// An account view with `balance`, positions and resting orders.
+pub fn account_view(balance: &str, positions: Value, orders: Value) -> Value {
+    json!({ "balance": balance, "positions": positions, "orders": orders })
+}
+
+/// A resting limit order, as an account view lists it.
+pub fn resting_order(order_id: u64) -> Value {
+    json!({ "order_id": order_id, "client_id": 1, "market": 1, "side": "buy", "qty": "1",
+        "kind": { "kind": "limit", "price": "50" }, "reduce_only": false })
 }

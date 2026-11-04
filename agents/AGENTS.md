@@ -39,9 +39,11 @@ list.
   rooted), each under a fresh challenge and verified with `engine_wire::verify_received`;
   `stream/` reads the public log over one `signed=1` connection, verifying each frame with
   `FrameVerifier`, refusing gaps and resuming after the last message; `bot/` reads the market, the
-  account and the marks history at startup, follows the log into bars and decisions, signs market
-  orders on the next nonce, and on SIGINT or SIGTERM cancels resting orders and optionally closes the
-  position. An answer or frame signed by another key stops the bot. `tests/` runs it against a local
+  account and the marks history at startup, follows the log into bars (built from moves of the mark,
+  as the node's history is) and decisions, signs market orders on the next nonce (none for a bar the
+  stream replays, or before the last order's expiry has passed in the log), and on SIGINT or SIGTERM
+  cancels resting orders and optionally closes the position, exiting non-zero when it cannot confirm
+  both. An answer or frame signed by another key stops the bot. `tests/` runs it against a local
   stand-in node (`tests/common/`) that signs its answers and frames and injects faults. Its
   `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, which the config tests load.
@@ -84,7 +86,8 @@ list.
 - **scripts/** — `dev-stack.sh`, a dev node for the bot: it reads the engine commit from
   `Cargo.lock`, fetches it into a cache outside the repository (`TRADER_ENGINE_CACHE`, by default
   under `~/.cache/monkeytrading-trader/engine/`), builds the node and its scenario tools once per
-  commit (with `DEV_STACK_CARGO` as the cargo command, such as a build lock), and runs the
+  commit into its `dist/` with the commit's dev config (with `DEV_STACK_CARGO` as the cargo command,
+  such as a build lock), and runs the
   engine's `config/dev.toml` on free ports and private temporary data with its synthetic access
   source, printing the bot's `[node]` config; sourced, it gives scenarios functions to start and
   stop it, fund and declare an account, and sign admin commands. `dev-trade-one.sh`, the dev

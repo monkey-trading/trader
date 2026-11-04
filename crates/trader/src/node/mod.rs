@@ -67,21 +67,6 @@ impl Node {
         Self { tls, signer, deployment, timeout }
     }
 
-    /// The connections this node's calls use.
-    pub fn tls(&self) -> &Tls {
-        &self.tls
-    }
-
-    /// The configured signer.
-    pub fn signer(&self) -> [u8; 20] {
-        self.signer
-    }
-
-    /// The deployment the node's signatures name.
-    pub fn deployment(&self) -> Deployment {
-        self.deployment
-    }
-
     /// `GET path_and_query`, verified.
     /// Error cases:
     /// - see `CallError`

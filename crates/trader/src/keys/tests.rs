@@ -112,6 +112,41 @@ async fn hex_key_files_hold_the_key() {
     assert!(AccountKey::load(&KeySource::HexFile { path: write(&dir, "key", &zero) }, no_env).await.is_err());
 }
 
+/// An environment password is taken as it is, trailing newline included.
+#[test]
+fn environment_passwords_are_verbatim() {
+    for value in ["pw\n", "pw\r\n", " pw "] {
+        let env = |_: &str| Some(value.to_owned());
+        assert_eq!(read_password(&PasswordSource::Env("P".into()), env).unwrap().as_str(), value, "{value:?}");
+    }
+}
+
+/// Every key whose secret the repository publishes is refused outside a dev build, and taken in
+/// one; any other key is taken in both.
+#[test]
+fn published_keys_are_dev_only() {
+    let mut secrets: Vec<[u8; 32]> = [0x11, 0x51, 0x52, 0x42].map(|byte| [byte; 32]).into();
+    for hex in [
+        "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+        "7a28b5ba57c53603b0b07b56bba752f7784bf506fa95edc395f5cf6c7514fe9d",
+        &format!("{:064x}", 1),
+        &format!("{:064x}", 0x1234_5678_9abc_u64),
+    ] {
+        let mut secret = [0u8; 32];
+        hex::decode_to_slice(hex, &mut secret).unwrap();
+        secrets.push(secret);
+    }
+    assert_eq!(secrets.len(), PUBLISHED_ACCOUNTS.len());
+    for secret in secrets {
+        let account = AccountKey::from_secret(&secret).unwrap().address();
+        let err = refuse_published(account, false).unwrap_err();
+        assert!(err.to_string().contains("published for development"), "{account}: {err}");
+        refuse_published(account, true).unwrap();
+    }
+    let other = AccountKey::from_secret(&[0x77; 32]).unwrap().address();
+    refuse_published(other, false).unwrap();
+}
+
 /// A key prints as its address only, never its secret.
 #[tokio::test]
 async fn a_key_prints_only_its_address() {

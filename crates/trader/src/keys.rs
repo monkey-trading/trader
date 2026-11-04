@@ -13,6 +13,23 @@ use zeroize::Zeroizing;
 
 use crate::config::{KeySource, PasswordSource};
 
+/// The accounts whose private keys this repository publishes, for its dev scenario and its tests.
+/// Anyone can sign for them, so only a dev build takes them.
+const PUBLISHED_ACCOUNTS: [&str; 8] = [
+    // scripts/dev-trade-one.sh: Anvil's account 1.
+    "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+    // scripts/dev-stack.sh: the engine's dev operator key, 32 bytes of 0x42.
+    "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
+    // The tests' keys: 32 bytes of 0x11, 0x51 and 0x52, the secrets 1 and 0x123456789abc, and the
+    // Web3 Secret Storage test vectors' key.
+    "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+    "0xfa17c5b66a985f44bc249c8e8fabd64767f414b1",
+    "0x83279fae0994aa1a563377e889cc2a1d96adb3b1",
+    "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+    "0xa13d31fec618d56e347aa2b5e83258010548b03e",
+    "0x008aeeda4d805471df9b2a5b0f38a0c3bcba786b",
+];
+
 /// An account's signing key and its address.
 pub struct AccountKey {
     key: SigningKey,
@@ -27,8 +44,9 @@ impl AccountKey {
     /// - the key file or password cannot be read, or the password variable is unset
     /// - the keystore does not decrypt with the password
     /// - the bytes are not a valid secp256k1 secret key
+    /// - outside a dev build, the key is one this repository publishes
     pub async fn load(source: &KeySource, env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
-        match source {
+        let key = match source {
             KeySource::Keystore { path, password } => {
                 let password = read_password(password, env)?;
                 let path = path.clone();
@@ -39,10 +57,12 @@ impl AccountKey {
                 })
                 .await
                 .context("the keystore task")??;
-                Self::from_secret(&bytes)
+                Self::from_secret(&bytes)?
             }
-            KeySource::HexFile { path } => Self::from_secret(&*read_hex_key(path)?),
-        }
+            KeySource::HexFile { path } => Self::from_secret(&*read_hex_key(path)?)?,
+        };
+        refuse_published(key.address, cfg!(debug_assertions))?;
+        Ok(key)
     }
 
     /// The key whose secret is `bytes`.
@@ -72,24 +92,40 @@ impl fmt::Debug for AccountKey {
     }
 }
 
-/// The keystore password `source` names, without one trailing newline when read from a file.
+/// Refuses `account` outside a dev build (`dev_build`) when this repository publishes its key.
+/// Error cases:
+/// - `account` is in `PUBLISHED_ACCOUNTS` and `dev_build` is false
+fn refuse_published(account: AccountId, dev_build: bool) -> anyhow::Result<()> {
+    if !dev_build && PUBLISHED_ACCOUNTS.contains(&account.to_string().as_str()) {
+        bail!("{account}'s private key is published for development; only a dev build uses it");
+    }
+    Ok(())
+}
+
+/// The keystore password `source` names: a file's without one trailing newline, a variable's as
+/// it is.
 /// Error cases:
 /// - the file cannot be read, or is not UTF-8
 /// - the variable is unset
 fn read_password(source: &PasswordSource, env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Zeroizing<String>> {
-    let mut password = Zeroizing::new(match source {
+    match source {
         PasswordSource::File(path) => {
-            std::fs::read_to_string(path).with_context(|| format!("reading the password file {}", path.display()))?
+            let mut password = Zeroizing::new(
+                std::fs::read_to_string(path)
+                    .with_context(|| format!("reading the password file {}", path.display()))?,
+            );
+            if password.ends_with('\n') {
+                password.pop();
+                if password.ends_with('\r') {
+                    password.pop();
+                }
+            }
+            Ok(password)
         }
-        PasswordSource::Env(name) => env(name).with_context(|| format!("the password variable {name} is not set"))?,
-    });
-    if password.ends_with('\n') {
-        password.pop();
-        if password.ends_with('\r') {
-            password.pop();
+        PasswordSource::Env(name) => {
+            Ok(Zeroizing::new(env(name).with_context(|| format!("the password variable {name} is not set"))?))
         }
     }
-    Ok(password)
 }
 
 /// The 32 key bytes in `path`: 64 hex characters, with or without `0x`, around which whitespace is

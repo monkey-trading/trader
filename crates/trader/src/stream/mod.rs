@@ -32,6 +32,8 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 pub struct Frame {
     pub offset: Offset,
+    /// The node's time when it sent the frame, in milliseconds since the epoch, as it signed it.
+    pub time: u64,
     /// The message's JSON, as the node signed it.
     pub msg: String,
 }
@@ -109,7 +111,7 @@ impl Stream {
                 Ok(Some(offset)) => {
                     self.recovered();
                     self.last = Some(offset);
-                    return Ok(Frame { offset, msg: frame.msg });
+                    return Ok(Frame { offset, time: frame.time, msg: frame.msg });
                 }
                 Err(e) => self.drop_connection(&format!("{e:#}")).await,
             }

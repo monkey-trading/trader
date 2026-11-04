@@ -54,10 +54,10 @@ pub struct Quotes {
 }
 
 impl Offset {
-    /// Whether `next` is the next message a gap-free stream may carry after this one: a later entry
-    /// of the same seq, or the next seq's command.
+    /// Whether `next` is the next message a gap-free stream may carry after this one: the same seq's
+    /// next entry, or the next seq's command. The node numbers a seq's entries one after another.
     pub fn is_followed_by(self, next: Offset) -> bool {
-        (next.seq == self.seq && next.index > self.index)
+        (next.seq == self.seq && Some(next.index) == self.index.checked_add(1))
             || (Some(next.seq) == self.seq.checked_add(1) && next.index == 0)
     }
 }
@@ -125,14 +125,16 @@ mod tests {
         }
     }
 
-    /// After 5:0, the stream may carry 5:1 or 5:2 (withdrawals, then a checkpoint) or 6:0, and
-    /// nothing else: not 5:0 again, 6:1, or 7:0.
+    /// After 5:0, the stream may carry 5:1 (a withdrawal or a checkpoint) or 6:0, and nothing else:
+    /// not 5:0 again, 5:2, 6:1, or 7:0.
     #[test]
-    fn a_gap_free_stream_moves_to_a_later_entry_or_the_next_command() {
+    fn a_gap_free_stream_moves_to_the_next_entry_or_the_next_command() {
         let at = |seq, index| Offset { seq, index };
         assert!(at(5, 0).is_followed_by(at(5, 1)));
-        assert!(at(5, 0).is_followed_by(at(5, 2)));
+        assert!(at(5, 1).is_followed_by(at(5, 2)));
         assert!(at(5, 2).is_followed_by(at(6, 0)));
+        assert!(at(5, 0).is_followed_by(at(6, 0)));
+        assert!(!at(5, 0).is_followed_by(at(5, 2)));
         assert!(!at(5, 0).is_followed_by(at(5, 0)));
         assert!(!at(5, 1).is_followed_by(at(6, 1)));
         assert!(!at(5, 0).is_followed_by(at(7, 0)));

@@ -18,8 +18,8 @@ use crate::keys::AccountKey;
 use crate::node::{CallError, Node, Tls};
 use crate::stream::Stream;
 
-/// The width of the marks history's buckets.
-const BUCKET_MS: Millis = 60_000;
+/// The marks history's resolutions, widest first, with their bucket widths.
+const RESOLUTIONS: [(&str, Millis); 3] = [("1d", 86_400_000), ("1h", 3_600_000), ("1m", 60_000)];
 
 /// A future that completes on SIGINT or SIGTERM.
 /// Error cases:
@@ -74,7 +74,10 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
     // Bars that end by `live_from` come from the history; the log builds the rest.
     let live_from = BarBuilder::new(bar_ms, Millis::MIN).window_start(now);
     let history_from = live_from - bar_ms * i64::try_from(strategy_cfg.slow).context("slow period")?;
-    let buckets = node.marks(market_id, history_from, live_from - BUCKET_MS).await?;
+    // The widest buckets that tile a bar, which the node keeps longest; every bar is whole minutes.
+    let (resolution, bucket_ms) =
+        RESOLUTIONS.into_iter().find(|(_, width)| bar_ms % width == 0).expect("bars are whole minutes");
+    let buckets = node.marks(market_id, resolution, history_from, live_from - bucket_ms).await?;
     let mut history = BarBuilder::new(bar_ms, Millis::MIN);
     let mut bars = 0;
     let closes = buckets.iter().map(|bucket| (bucket.ts, Some(bucket.close))).chain([(live_from, None)]);
@@ -85,7 +88,7 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         }
     }
     let (fast, slow) = strategy.averages();
-    info!(bars, buckets = buckets.len(), ?fast, ?slow, "warmed up from the marks history");
+    info!(bars, buckets = buckets.len(), resolution, ?fast, ?slow, "warmed up from the marks history");
 
     let bot = Bot {
         domain: eip712::domain(node_cfg.chain_id, node_cfg.vault),
@@ -101,6 +104,7 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         position,
         balance: view.balance,
         mark: market.mark,
+        order_expires_at: None,
     };
     let stream = Stream::new(tls, node_cfg.signer.0, deployment, node_cfg.stream_timeout, head_seq + 1);
     Ok((bot, stream))

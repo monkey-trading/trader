@@ -1,7 +1,8 @@
 //! One account trading one market with an SMA crossover. At startup the bot reads the market, the
 //! account, and the market's recent marks from the node; from then on it follows the public log:
 //! each `Prices` command moves the index mark, each completed bar goes to the strategy, and the
-//! account's fills move its position. A target the position is not at sends a signed market order.
+//! account's fills move its position. A target the position is not at sends a signed market order,
+//! unless the bar is history the stream is replaying, or the last order could still enter the log.
 
 mod orders;
 mod startup;
@@ -13,17 +14,21 @@ use engine_core::eip712::Eip712Domain;
 use engine_core::event::Event;
 use engine_core::market::{MarketSpec, QuoteCurrency};
 use engine_core::session::Schedule;
-use engine_core::types::MarketId;
-use tracing::{debug, error, info};
+use engine_core::types::{MarketId, Millis};
+use tracing::{debug, error, info, warn};
 use trader_core::bars::{Bar, BarBuilder};
 use trader_core::marks::IndexMarks;
 use trader_core::strategy::{SmaCrossover, order_for};
 
 use crate::config::Config;
 use crate::keys::AccountKey;
-use crate::node::Node;
+use crate::node::{CallError, Node};
 use crate::stream::message::{CommandMessage, Head, Quotes};
 use crate::stream::{Frame, Stream};
+
+/// How far behind the node's time a bar may close and still be acted on; one further behind is
+/// history the stream is replaying, quoted at marks long gone.
+const REPLAY_LAG_MS: Millis = 30_000;
 
 /// Why the bot stopped on its own.
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +40,9 @@ pub enum Halt {
     /// The log holds what the bot cannot follow; it stops before acting on a view it cannot confirm.
     #[error("{0:#}")]
     Unfollowable(anyhow::Error),
+    /// Stopping left resting orders, or a position it was to close, or could not confirm it did not.
+    #[error("the stop is incomplete: {0}")]
+    StopIncomplete(String),
 }
 
 /// The bot's state between messages.
@@ -51,10 +59,13 @@ pub struct Bot {
     strategy: SmaCrossover,
     /// The account's signed position in the market.
     position: Fixed,
-    /// The account's balance from the startup read, moved by each fill's realised PnL and fee.
+    /// The account's balance, as the last verified read of the account gave it.
     balance: Fixed,
     /// The last index mark: the node's at startup, then the log's.
     mark: Option<Fixed>,
+    /// The expiry of the last order signed. Until the log passes it, that order may still enter the
+    /// log, so its fill may still be to come, and no other order is placed.
+    order_expires_at: Option<Millis>,
 }
 
 /// Runs the bot until `stop` completes, or until it halts on its own; then cancels the account's
@@ -112,7 +123,7 @@ impl Bot {
     /// Error cases:
     /// - a command or its events the pinned engine cannot read
     /// - a new listing makes the market one the bot does not trade
-    /// - an order call answered by another key than the signer
+    /// - an answer signed by another key than the signer
     async fn apply(&mut self, frame: &Frame) -> Result<(), Halt> {
         let unreadable =
             |e: anyhow::Error| Halt::Unfollowable(e.context(format!("the log message at {}", frame.offset)));
@@ -131,13 +142,22 @@ impl Bot {
             "admin" | "signed_admin" => self.relist(&message.command().map_err(unreadable)?, &events)?,
             _ => {}
         }
-        events.iter().for_each(|event| self.on_event(message.seq, event));
-        let mark = self.marks.mark(message.ts);
-        if mark.is_some() {
-            self.mark = mark;
+        let mut filled = false;
+        for event in &events {
+            filled |= self.on_event(message.seq, event);
         }
-        if let Some(bar) = self.bars.on_command(message.ts, mark) {
-            self.on_bar(bar).await?;
+        if filled {
+            self.refresh_balance().await?;
+        }
+        // Only a mark that moved goes into the bars, as the node's marks history records only moves,
+        // so bars built live and bars warmed up from the history are built alike.
+        let moved = self.marks.mark(message.ts).filter(|mark| Some(*mark) != self.mark);
+        if moved.is_some() {
+            self.mark = moved;
+        }
+        if let Some(bar) = self.bars.on_command(message.ts, moved) {
+            let lag = i64::try_from(frame.time).unwrap_or(Millis::MAX).saturating_sub(message.ts);
+            self.on_bar(bar, message.ts, lag).await?;
         }
         Ok(())
     }
@@ -161,13 +181,12 @@ impl Bot {
         Ok(())
     }
 
-    /// Follows the account's fills: the position in the market, and the balance.
-    fn on_event(&mut self, seq: u64, event: &Event) {
-        let Event::Fill(fill) = event else { return };
+    /// Follows the account's fills: the position in the market. Returns whether `event` is one.
+    fn on_event(&mut self, seq: u64, event: &Event) -> bool {
+        let Event::Fill(fill) = event else { return false };
         if fill.account != self.key.address() {
-            return;
+            return false;
         }
-        self.balance += fill.realised_pnl - fill.profit_fee;
         if fill.market == self.market {
             self.position = fill.position;
         }
@@ -182,20 +201,47 @@ impl Bot {
             profit_fee = %fill.profit_fee,
             liquidation = fill.liquidation,
             position = %self.position,
-            balance = %self.balance,
             "fill"
         );
+        true
     }
 
-    /// Hands a completed bar to the strategy, and orders toward its target.
+    /// Reads the balance again, verified, after the account's fills: fills, financing, fees and
+    /// transfers all move it, and the node's answer is the one figure that holds all of them.
+    /// Error cases:
+    /// - an answer signed by another key than the signer
+    async fn refresh_balance(&mut self) -> Result<(), Halt> {
+        match self.node.account(self.key.address()).await {
+            Ok(answer) => {
+                self.balance = answer.body.balance;
+                info!(balance = %self.balance, head_seq = answer.head_seq, "balance");
+            }
+            Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
+            Err(e) => warn!("the balance was not read: {e}"),
+        }
+        Ok(())
+    }
+
+    /// Hands a bar to the strategy, completed by a command at `ts` that the node sent `lag` ms after
+    /// it, and orders toward its target. A bar the stream is replaying from history, or one that
+    /// closes before the log has passed the last order's expiry, places no order: that order's
+    /// fill may not be in the position yet. The next bar decides again.
     /// Error cases:
     /// - an order call answered by another key than the signer
-    async fn on_bar(&mut self, bar: Bar) -> Result<(), Halt> {
+    async fn on_bar(&mut self, bar: Bar, ts: Millis, lag: Millis) -> Result<(), Halt> {
         let target = self.strategy.on_close(bar.close);
         let (fast, slow) = self.strategy.averages();
-        debug!(start = bar.start, close = %bar.close, ?fast, ?slow, ?target, "bar");
+        debug!(start = bar.start, close = %bar.close, ?fast, ?slow, ?target, lag, "bar");
         let Some(target) = target else { return Ok(()) };
         let Some(intent) = order_for(target, self.qty, self.position) else { return Ok(()) };
+        if lag > REPLAY_LAG_MS {
+            info!(?target, lag, "the bar is history the stream is replaying: no order");
+            return Ok(());
+        }
+        if let Some(expires_at) = self.order_expires_at.filter(|expires_at| ts <= *expires_at) {
+            info!(?target, expires_at, "the last order may still enter the log: no order");
+            return Ok(());
+        }
         info!(?target, position = %self.position, "moving to the target");
         self.place(intent, bar).await
     }

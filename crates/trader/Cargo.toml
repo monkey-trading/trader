@@ -38,7 +38,7 @@ webpki-roots = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-axum = { version = "0.8", features = ["ws"] }
+axum = { workspace = true }
 hyper = { workspace = true, features = ["server"] }
 hyper-util = { workspace = true, features = ["server", "service"] }
 rcgen = { workspace = true }

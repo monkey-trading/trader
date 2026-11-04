@@ -46,13 +46,15 @@ dev_stack_engine_commit() {
 }
 
 # Fetches the pinned commit and builds the node and the scenario tools once per commit, into
-# $dev_stack_bin.
+# $dev_stack_dist with the commit's dev config: all a dev node needs, so caching that directory alone
+# by commit (as CI does) is enough to run one.
 dev_stack_build() {
   local commit cache channel cargo_cmd target
   commit="$(dev_stack_engine_commit)"
   cache="${TRADER_ENGINE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/monkeytrading-trader/engine}/$commit"
-  dev_stack_bin="$cache/bin"
-  if [[ -x "$dev_stack_bin/engine" && -x "$dev_stack_bin/access_source" && -x "$dev_stack_bin/sign_request" ]]; then
+  dev_stack_dist="$cache/dist"
+  if [[ -x "$dev_stack_dist/engine" && -x "$dev_stack_dist/access_source" && -x "$dev_stack_dist/sign_request" \
+    && -f "$dev_stack_dist/dev.toml" ]]; then
     echo "==> engine $commit: built"
     return 0
   fi
@@ -76,11 +78,14 @@ dev_stack_build() {
     "${cargo_cmd[@]}" build -q --locked -p engine-core --example sign_request
   )
   target="${CARGO_TARGET_DIR:-$cache/src/target}"
-  mkdir -p "$dev_stack_bin.tmp"
+  rm -rf "$dev_stack_dist.tmp"
+  mkdir -p "$dev_stack_dist.tmp"
   cp "$target/debug/engine" "$target/debug/examples/access_source" "$target/debug/examples/sign_request" \
-    "$dev_stack_bin.tmp/"
-  rm -rf "$dev_stack_bin"
-  mv "$dev_stack_bin.tmp" "$dev_stack_bin"
+    "$cache/src/config/dev.toml" "$dev_stack_dist.tmp/"
+  rm -rf "$dev_stack_dist"
+  mv "$dev_stack_dist.tmp" "$dev_stack_dist"
+  # The binaries are kept per commit, so a private build directory is not needed again.
+  [[ -n "${CARGO_TARGET_DIR:-}" ]] || rm -rf "$cache/src/target"
 }
 
 # A free loopback port, never one a local demo uses.
@@ -104,11 +109,11 @@ dev_stack_start() {
   dev_stack_api="https://127.0.0.1:$api_port"
 
   printf '{"mode":"clear","jurisdictions":{},"sanctioned":[]}\n' > "$dev_stack_work/access-fixture.json"
-  "$dev_stack_bin/access_source" "127.0.0.1:$source_port" "$dev_stack_chain_id" "$dev_stack_vault" \
+  "$dev_stack_dist/access_source" "127.0.0.1:$source_port" "$dev_stack_chain_id" "$dev_stack_vault" \
     "$dev_stack_work/access-fixture.json" > "$dev_stack_work/access-source.log" 2>&1 &
   dev_stack_source_pid=$!
 
-  dev_toml="$(dirname "$dev_stack_bin")/src/config/dev.toml"
+  dev_toml="$dev_stack_dist/dev.toml"
   sed -e "s|127.0.0.1:8080|127.0.0.1:$api_port|" \
     -e "s|127.0.0.1:9464|127.0.0.1:$metrics_port|" \
     -e "s|data/dev|$dev_stack_work|g" \
@@ -130,7 +135,7 @@ CONFIG
     dev_stack_fail "the node config still names a port the local demo uses"
   fi
 
-  "$dev_stack_bin/engine" run --config "$dev_stack_work/node.toml" > "$dev_stack_work/node.log" 2>&1 &
+  "$dev_stack_dist/engine" run --config "$dev_stack_work/node.toml" > "$dev_stack_work/node.log" 2>&1 &
   dev_stack_node_pid=$!
   # The node stamps nothing before its first trusted time sample, which can take a Roughtime round.
   max_drift="$(awk -F'"' '/^max_drift = / { print $2 }' "$dev_toml")"
@@ -185,7 +190,7 @@ CONFIG
 # Signs and submits an admin command as the dev config's operator, such as
 # `init-emissions --start <time> --period-budget <units>`.
 dev_stack_admin() {
-  OPERATOR_KEY="$dev_stack_operator_key" "$dev_stack_bin/engine" admin --config "$dev_stack_work/node.toml" \
+  OPERATOR_KEY="$dev_stack_operator_key" "$dev_stack_dist/engine" admin --config "$dev_stack_work/node.toml" \
     --node "$dev_stack_api" --pin "$dev_stack_pin" "$@" > /dev/null
 }
 
@@ -202,7 +207,7 @@ dev_stack_declare() {
   local key="$1" account="$2" nonce expires_at body events
   nonce="$(curl -sfk --max-time 5 "$dev_stack_api/v1/accounts/$account/nonce" | jq -er .next_nonce)"
   expires_at="$(python3 -c 'import time; print(int(time.time() * 1000) + 60000)')"
-  body="$(SIGNER_KEY="${key#0x}" "$dev_stack_bin/sign_request" "$dev_stack_chain_id" "$dev_stack_vault" "$nonce" \
+  body="$(SIGNER_KEY="${key#0x}" "$dev_stack_dist/sign_request" "$dev_stack_chain_id" "$dev_stack_vault" "$nonce" \
     "$expires_at" eligibility "{\"account\":\"$account\",\"class\":\"professional\"}")"
   events="$(curl -sfk --max-time 10 "$dev_stack_api/v1/eligibility" -H 'content-type: application/json' -d "$body")" \
     || dev_stack_fail "the declaration for $account was refused"

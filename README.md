@@ -57,7 +57,7 @@ cargo run -p trader -- run --config bot.toml
 The bot reads the market, the account and the recent marks, then follows the public log: each
 completed bar goes to the strategy, and a target the position is not at sends a signed market
 order. On SIGINT or SIGTERM it cancels the account's resting orders and, with
-`close_on_stop = true`, closes its position. `./scripts/dev-trade-one.sh` runs the whole path for
+`close_on_stop = true`, closes its position, and exits non-zero if it cannot confirm both. `./scripts/dev-trade-one.sh` runs the whole path for
 fifteen minutes and checks the account's fills against the bot's log.
 
 The account key is read from an encrypted keystore, the file wallets export; a development build

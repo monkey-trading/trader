@@ -1,34 +1,27 @@
 //! The bot against the stand-in: it reads the market and the account, follows the log's prices into
 //! bars, orders toward the crossover's target with requests the engine's own hashes verify, takes
-//! its position from its fills in the log, retries a declined order on the next bar, and on stopping
-//! cancels resting orders and closes its position.
+//! its position from its fills in the log, retries a declined order on the next bar, holds orders
+//! while the stream replays history, and on stopping cancels resting orders and closes its position.
 
 mod common;
 
-use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
-use common::{ACCOUNT_SECRET, StandIn, btc_usd, command, prices};
+use common::{
+    MINUTE, StandIn, T0, account, account_view, btc_usd, command, config, domain, posted, prices, resting_order, run,
+};
 use engine_core::command::{CancelAllRequest, CloseAllRequest, OrderRequest};
-use engine_core::eip712::{self, cancel_all_hash, close_all_hash, order_hash, recover};
-use engine_core::types::AccountId;
-use k256::ecdsa::SigningKey;
+use engine_core::eip712::{cancel_all_hash, close_all_hash, order_hash, recover};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
-use trader::config::Config;
-
-/// The stand-in's time: a minute boundary.
-const T0: i64 = 1_800_000_000_000;
-const MINUTE: i64 = 60_000;
 
 #[tokio::test]
 async fn trades_toward_the_crossover_and_stops_clean() {
     let stand_in = StandIn::start().await;
     let account = account();
     stand_in.with(|i| {
-        i.markets = json!([btc_usd(Some("100"))]);
-        i.accounts.insert(account.to_string(), json!({ "balance": "1000", "positions": {}, "orders": {} }));
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account.to_string(), account_view("1000", json!({}), json!({})));
         i.head_seq = 10;
         i.nonce = 3;
         // The first order is declined for slippage; the rest fill.
@@ -47,31 +40,30 @@ async fn trades_toward_the_crossover_and_stops_clean() {
     stand_in.append((12, 0), command(12, T0 + 1_001, prices(1, "100", T0 + 1_001), json!([])));
     stand_in.append((13, 0), command(13, T0 + MINUTE, prices(1, "101", T0 + MINUTE), json!([])));
     stand_in.append((14, 0), command(14, T0 + 2 * MINUTE, prices(1, "102", T0 + 2 * MINUTE), json!([])));
-    let first = posted(&stand_in, 1).await;
-    check_order(&first, T0 + MINUTE, "buy", "1", "102", false, 3);
+    check_order(&order(&stand_in, 1).await, T0 + MINUTE, "buy", "1", "102", false, 3);
 
     // The declined order is retried at the next bar, still long.
     stand_in.append((15, 0), command(15, T0 + 3 * MINUTE, prices(1, "103", T0 + 3 * MINUTE), json!([])));
-    let second = posted(&stand_in, 2).await;
-    check_order(&second, T0 + 2 * MINUTE, "buy", "1", "103", false, 4);
+    check_order(&order(&stand_in, 2).await, T0 + 2 * MINUTE, "buy", "1", "103", false, 4);
 
-    // Its fill in the log makes the position long 1; at minute 4, 99 falls below the average of 103
-    // and 99, so the target is short and the bot sells 2.
-    let fill = json!({ "type": "fill", "account": account, "order_id": 1, "market": 1, "side": "buy", "qty": "1",
-        "price": "103", "index": "103", "spread_bps": 0, "realised_pnl": "0", "profit_fee": "0", "position": "1",
-        "liquidation": false });
-    stand_in.append((16, 0), command(16, T0 + 3 * MINUTE + 1, json!({ "type": "tick" }), json!([fill])));
+    // Its fill in the log makes the position long 1, and the bot reads the balance again; at
+    // minute 4, 99 falls below the average of 103 and 99, so the target is short and it sells 2.
+    let reads = stand_in.with(|i| i.account_reads);
+    stand_in.append((16, 0), command(16, T0 + 3 * MINUTE + 1, json!({ "type": "tick" }), json!([fill(1, "1")])));
     stand_in.append((17, 0), command(17, T0 + 4 * MINUTE, prices(1, "99", T0 + 4 * MINUTE), json!([])));
     stand_in.append((18, 0), command(18, T0 + 5 * MINUTE, prices(1, "98", T0 + 5 * MINUTE), json!([])));
-    let third = posted(&stand_in, 3).await;
-    check_order(&third, T0 + 4 * MINUTE, "sell", "2", "98", false, 5);
+    check_order(&order(&stand_in, 3).await, T0 + 4 * MINUTE, "sell", "2", "98", false, 5);
+    assert_eq!(stand_in.with(|i| i.account_reads), reads + 1, "one balance read for the one fill");
 
-    // Stopping reads the account: an order rests and a position is held, so it cancels and closes.
+    // Stopping, once the node's time is past the last order's expiry, reads the account: an order
+    // rests and a position is held, so it cancels, and closes quoted at the node's mark as it stands.
     stand_in.with(|i| {
-        let view = json!({ "balance": "1000", "positions": { "1": { "qty": "-1", "entry": "98" } },
-            "orders": { "9": { "order_id": 9, "client_id": 1, "market": 1, "side": "buy", "qty": "1",
-                "kind": { "kind": "limit", "price": "50" }, "reduce_only": false } } });
-        i.accounts.insert(account.to_string(), view);
+        i.accounts.insert(
+            account.to_string(),
+            account_view("1000", json!({ "1": { "qty": "-1", "entry": "98" } }), json!({ "9": resting_order(9) })),
+        );
+        i.markets = json!([btc_usd(Some("97.5"))]);
+        i.time_ms = (T0 + 10 * MINUTE) as u64;
     });
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
@@ -88,7 +80,7 @@ async fn trades_toward_the_crossover_and_stops_clean() {
     );
     let (path, body) = &posts[4];
     assert_eq!(path, "/v1/positions/close-all");
-    assert_eq!(body["closes"], json!([{ "market": 1, "quoted": "98" }]));
+    assert_eq!(body["closes"], json!([{ "market": 1, "quoted": "97.5" }]));
     assert_eq!(body["max_slippage_bps"], 25);
     let close: CloseAllRequest = serde_json::from_value(body.clone()).unwrap();
     let auth = close.auth.clone().unwrap();
@@ -104,7 +96,7 @@ async fn stopping_flat_sends_nothing() {
     let stand_in = StandIn::start().await;
     stand_in.with(|i| {
         i.markets = json!([btc_usd(Some("100"))]);
-        i.accounts.insert(account().to_string(), json!({ "balance": "5", "positions": {}, "orders": {} }));
+        i.accounts.insert(account().to_string(), account_view("5", json!({}), json!({})));
     });
     let dir = tempfile::tempdir().unwrap();
     run(config(&stand_in, dir.path(), "1m"), async {}).await.unwrap();
@@ -122,7 +114,7 @@ async fn startup_refusals() {
     assert!(err.to_string().contains("never credited"), "{err:#}");
 
     stand_in.with(|i| {
-        i.accounts.insert(account().to_string(), json!({ "balance": "5", "positions": {}, "orders": {} }));
+        i.accounts.insert(account().to_string(), account_view("5", json!({}), json!({})));
         let mut weekly = btc_usd(Some("100"));
         weekly["schedule"] = json!({ "kind": "weekly", "tz": "America/New_York", "windows": [] });
         i.markets = json!([weekly]);
@@ -148,10 +140,9 @@ async fn startup_refusals() {
 #[tokio::test]
 async fn warms_up_from_the_marks_history() {
     let stand_in = StandIn::start().await;
-    let account = account();
     stand_in.with(|i| {
         i.markets = json!([btc_usd(Some("100"))]);
-        i.accounts.insert(account.to_string(), json!({ "balance": "1000", "positions": {}, "orders": {} }));
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
         i.head_seq = 10;
         // Three one-minute buckets: the two-minute bars before T0 close at 105 and at 100.
         let bucket = |ts: i64, close: &str| {
@@ -169,81 +160,136 @@ async fn warms_up_from_the_marks_history() {
     // average of 100 and 99, so the target is short at once.
     stand_in.append((11, 0), command(11, T0, prices(1, "99", T0), json!([])));
     stand_in.append((12, 0), command(12, T0 + 1_001, prices(1, "99", T0 + 1_001), json!([])));
-    stand_in.append((13, 0), command(13, T0 + 2 * MINUTE, prices(1, "99", T0 + 2 * MINUTE), json!([])));
-    let order = posted(&stand_in, 1).await;
-    check_order(&order, T0, "sell", "1", "99", false, 0);
+    stand_in.append((13, 0), command(13, T0 + 2 * MINUTE, prices(1, "98", T0 + 2 * MINUTE), json!([])));
+    check_order(&order(&stand_in, 1).await, T0, "sell", "1", "98", false, 0);
+    stand_in.with(|i| i.time_ms = (T0 + 10 * MINUTE) as u64);
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+}
+
+/// Bars the stream replays from history, more than half a minute behind the node's time, update
+/// the strategy but place no order; the first bar closed live does.
+#[tokio::test]
+async fn replayed_bars_place_no_order() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
+        _ = stopped.await;
+    }));
+    // Once the bot has read the account and opened its stream, the node's time is ten minutes on:
+    // minute 1's close at 101 above minute 0's targets long, but the command that closes it is
+    // eight minutes old, so nothing is ordered.
+    while stand_in.with(|i| i.connections.is_empty()) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    stand_in.with(|i| i.time_ms = (T0 + 10 * MINUTE) as u64);
+    stand_in.append((11, 0), command(11, T0, prices(1, "100", T0), json!([])));
+    stand_in.append((12, 0), command(12, T0 + 1_001, prices(1, "100", T0 + 1_001), json!([])));
+    stand_in.append((13, 0), command(13, T0 + MINUTE, prices(1, "101", T0 + MINUTE), json!([])));
+    stand_in.append((14, 0), command(14, T0 + 2 * MINUTE, prices(1, "102", T0 + 2 * MINUTE), json!([])));
+    // Minute 2's bar closes live, and is still long: the bot orders now, quoted at the live mark.
+    stand_in.append((15, 0), command(15, T0 + 10 * MINUTE, prices(1, "103", T0 + 10 * MINUTE), json!([])));
+    let first = order(&stand_in, 1).await;
+    assert_eq!(first["client_id"], T0 + 2 * MINUTE, "{first}");
+    assert_eq!(first["kind"]["quoted"], "103");
+    stand_in.with(|i| i.time_ms = (T0 + 20 * MINUTE) as u64);
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+    assert_eq!(stand_in.with(|i| i.posts.len()), 1);
+}
+
+/// A window in which the mark does not move makes no bar, as the node's marks history keeps none
+/// for it: after a long at 101, a quiet minute is not a second 101 that would make the target flat
+/// and close the position; the move down to 100 makes it short.
+#[tokio::test]
+async fn only_moves_of_the_mark_make_bars() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
+        _ = stopped.await;
+    }));
+    stand_in.append((11, 0), command(11, T0, prices(1, "100", T0), json!([])));
+    stand_in.append((12, 0), command(12, T0 + 1_001, prices(1, "100", T0 + 1_001), json!([])));
+    stand_in.append((13, 0), command(13, T0 + MINUTE, prices(1, "101", T0 + MINUTE), json!([])));
+    stand_in.append((14, 0), command(14, T0 + 2 * MINUTE, prices(1, "101", T0 + 2 * MINUTE), json!([])));
+    check_order(&order(&stand_in, 1).await, T0 + MINUTE, "buy", "1", "101", false, 0);
+    stand_in.append((15, 0), command(15, T0 + 2 * MINUTE + 1, json!({ "type": "tick" }), json!([fill(1, "1")])));
+    stand_in.append((16, 0), command(16, T0 + 3 * MINUTE, prices(1, "101", T0 + 3 * MINUTE), json!([])));
+    stand_in.append((17, 0), command(17, T0 + 4 * MINUTE, prices(1, "100", T0 + 4 * MINUTE), json!([])));
+    stand_in.append((18, 0), command(18, T0 + 5 * MINUTE, prices(1, "100", T0 + 5 * MINUTE), json!([])));
+    check_order(&order(&stand_in, 2).await, T0 + 4 * MINUTE, "sell", "2", "100", false, 1);
+    stand_in.with(|i| i.time_ms = (T0 + 10 * MINUTE) as u64);
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+}
+
+/// While the log has not passed the last order's expiry, that order's fill may still be to come,
+/// so a bar closing before then places no order and the next bar decides again. A bar half a
+/// minute behind the node's time is still live.
+#[tokio::test]
+async fn an_order_holds_the_next_until_it_expires() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
+        _ = stopped.await;
+    }));
+    while stand_in.with(|i| i.connections.is_empty()) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The node's time is half a minute past minute 2, so the order minute 1's close sends expires
+    // at minute 3, and the bar minute 3's command closes is held.
+    stand_in.with(|i| i.time_ms = (T0 + 2 * MINUTE + 30_000) as u64);
+    for (seq, ts, mid) in
+        [(11, T0, "100"), (12, T0 + 1_001, "100"), (13, T0 + MINUTE, "101"), (14, T0 + 2 * MINUTE, "102")]
+    {
+        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
+    }
+    assert_eq!(order(&stand_in, 1).await["client_id"], T0 + MINUTE);
+    stand_in.append((15, 0), command(15, T0 + 3 * MINUTE, prices(1, "103", T0 + 3 * MINUTE), json!([])));
+    stand_in.append((16, 0), command(16, T0 + 4 * MINUTE, prices(1, "104", T0 + 4 * MINUTE), json!([])));
+    assert_eq!(order(&stand_in, 2).await["client_id"], T0 + 3 * MINUTE);
+    stand_in.with(|i| i.time_ms = (T0 + 10 * MINUTE) as u64);
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
 }
 
 // ── Helpers ──
 
-/// The test account's address.
-fn account() -> AccountId {
-    eip712::address(SigningKey::from_slice(&ACCOUNT_SECRET).unwrap().verifying_key())
+/// The `n`th POST, which must be an order.
+async fn order(stand_in: &StandIn, n: usize) -> Value {
+    let (path, body) = posted(stand_in, n).await;
+    assert_eq!(path, "/v1/orders", "{body}");
+    body
 }
 
-/// The domain the stand-in's deployment signs under.
-fn domain() -> eip712::Eip712Domain {
-    eip712::domain(common::CHAIN_ID, AccountId(common::VAULT))
-}
-
-/// Writes a config for the stand-in, with the test account's key in a hex file, and loads it.
-fn config(stand_in: &StandIn, dir: &Path, bar: &str) -> Config {
-    std::fs::write(dir.join("account.hex"), hex::encode(ACCOUNT_SECRET)).unwrap();
-    let text = format!(
-        r#"
-[node]
-url = "https://127.0.0.1:{port}"
-chain_id = {chain_id}
-vault = "0x{vault}"
-signer = "0x{signer}"
-tls_key_sha256 = "{pin}"
-stream_timeout = "30s"
-
-[account]
-key = {{ type = "hex_file", path = "account.hex" }}
-close_on_stop = true
-
-[strategy]
-market = "BTC-USD"
-bar = "{bar}"
-fast = 1
-slow = 2
-qty = "1"
-max_slippage_bps = 25
-"#,
-        port = stand_in.addr.port(),
-        chain_id = common::CHAIN_ID,
-        vault = hex::encode(common::VAULT),
-        signer = hex::encode(stand_in.signer()),
-        pin = hex::encode(stand_in.pin),
-    );
-    let path = dir.join("bot.toml");
-    std::fs::write(&path, text).unwrap();
-    Config::load(&path).unwrap()
-}
-
-/// Runs the bot until `stop`.
-async fn run(cfg: Config, stop: impl Future<Output = ()> + Send + 'static) -> anyhow::Result<()> {
-    trader::bot::run(cfg, |_| None, stop).await
-}
-
-/// The `n`th POST once the stand-in has it.
-async fn posted(stand_in: &Arc<StandIn>, n: usize) -> Value {
-    for _ in 0..200 {
-        if let Some((path, body)) = stand_in.with(|i| i.posts.get(n - 1).cloned()) {
-            assert_eq!(path, "/v1/orders");
-            return body;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("no POST {n}: {:?}", stand_in.with(|i| i.posts.clone()));
+/// A fill of the test account in BTC-USD that leaves `position`.
+fn fill(order_id: u64, position: &str) -> Value {
+    json!({ "type": "fill", "account": account(), "order_id": order_id, "market": 1, "side": "buy", "qty": "1",
+        "price": "100", "index": "100", "spread_bps": 0, "realised_pnl": "0", "profit_fee": "0",
+        "position": position, "liquidation": false })
 }
 
 /// Checks a posted order's fields and that its signature is the account's over the engine's hash.
 fn check_order(body: &Value, client_id: i64, side: &str, qty: &str, quoted: &str, reduce_only: bool, nonce: u64) {
-    assert_eq!(body["client_id"], client_id);
+    assert_eq!(body["client_id"], client_id, "{body}");
     assert_eq!(
         (body["market"].as_u64(), body["side"].as_str(), body["qty"].as_str()),
         (Some(1), Some(side), Some(qty))

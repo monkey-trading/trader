@@ -39,7 +39,7 @@ pub struct NonceView {
     pub next_nonce: u64,
 }
 
-/// One one-minute bucket of a market's index marks: its start and its last mark.
+/// One bucket of a market's index marks: its start and its last mark.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub struct MarkBucket {
     pub ts: Millis,
@@ -76,17 +76,25 @@ impl Node {
         self.get(&format!("/v1/accounts/{account}/nonce")).await
     }
 
-    /// `market`'s one-minute mark buckets that start in [`from_ms`, `to_ms`], oldest first, each
-    /// page verified.
+    /// `market`'s mark buckets at `resolution` (`1m`, `1h` or `1d`) that start in [`from_ms`,
+    /// `to_ms`], oldest first, each page verified. The node keeps a bucket for each window in which
+    /// the mark moved.
     /// Error cases:
     /// - see `CallError`
     /// - a page whose `next` does not move past the window it answered
-    pub async fn marks(&self, market: MarketId, from_ms: Millis, to_ms: Millis) -> Result<Vec<MarkBucket>, CallError> {
+    pub async fn marks(
+        &self,
+        market: MarketId,
+        resolution: &str,
+        from_ms: Millis,
+        to_ms: Millis,
+    ) -> Result<Vec<MarkBucket>, CallError> {
         let mut buckets = Vec::new();
         let mut from = from_ms;
         loop {
-            let path =
-                format!("/v1/markets/{market}/marks?resolution=1m&from_ms={from}&to_ms={to_ms}&limit={MARKS_PAGE}");
+            let path = format!(
+                "/v1/markets/{market}/marks?resolution={resolution}&from_ms={from}&to_ms={to_ms}&limit={MARKS_PAGE}"
+            );
             let page: MarksPage = self.get(&path).await?.body;
             buckets.extend(page.entries.into_iter().filter(|b| (from..=to_ms).contains(&b.ts)));
             match page.next {
