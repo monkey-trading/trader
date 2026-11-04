@@ -4,9 +4,13 @@ import { vi } from "vitest";
 
 import type { Api, Outcome } from "@/api/client";
 import { detailBody, summaryBody } from "@/api/fixtures";
+import { fundingBody } from "@/api/funding-fixtures";
+import { readFunding } from "@/api/funding-parsers";
+import { FundingStore } from "@/api/funding-store";
 import { LiveStore, type FeedHandlers } from "@/api/live-store";
 import { readAccount, readAccountList } from "@/api/parsers";
 import { SessionStore } from "@/api/session-store";
+import type { FundingRead } from "@/api/funding-types";
 import type { AccountRead } from "@/api/types";
 import { App } from "@/App";
 import { AppContext } from "@/components/app-context";
@@ -19,6 +23,7 @@ export function stubApi(): { [K in keyof Api]: ReturnType<typeof vi.fn<Api[K]>> 
     status: "ok",
     value: readAccount({ seq: 10, account: detailBody(overrides) }),
   });
+  const funded = (): Outcome<FundingRead> => ({ status: "ok", value: readFunding(fundingBody()) });
   const nothing: Outcome<null> = { status: "ok", value: null };
   return {
     session: vi.fn<Api["session"]>(() => Promise.resolve(nothing)),
@@ -32,6 +37,11 @@ export function stubApi(): { [K in keyof Api]: ReturnType<typeof vi.fn<Api[K]>> 
     flatten: vi.fn<Api["flatten"]>(() => Promise.resolve(read({ positions: [], openPositions: 0 }))),
     setStrategyRunning: vi.fn<Api["setStrategyRunning"]>(() => Promise.resolve(read())),
     setParams: vi.fn<Api["setParams"]>(() => Promise.resolve(read())),
+    funding: vi.fn<Api["funding"]>(() => Promise.resolve(funded())),
+    declare: vi.fn<Api["declare"]>(() => Promise.resolve(funded())),
+    deposit: vi.fn<Api["deposit"]>(() => Promise.resolve(funded())),
+    claim: vi.fn<Api["claim"]>(() => Promise.resolve(funded())),
+    withdraw: vi.fn<Api["withdraw"]>(() => Promise.resolve(funded())),
   };
 }
 
@@ -59,8 +69,16 @@ export function mount(api: ReturnType<typeof stubApi>, path = "/") {
     random: () => 0,
     onUnauthenticated: () => { session.expire(); },
   });
+  const funding = new FundingStore({
+    api,
+    timeout: (callback, ms) => {
+      const id = window.setTimeout(callback, ms);
+      return () => { window.clearTimeout(id); };
+    },
+    onUnauthenticated: () => { session.expire(); },
+  });
   const view = render(
-    <AppContext value={{ api, live, session }}>
+    <AppContext value={{ api, funding, live, session }}>
       <App />
     </AppContext>,
   );

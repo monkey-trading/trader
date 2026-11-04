@@ -19,7 +19,8 @@ function harness(api: Partial<Api> = {}) {
   const store = new LiveStore({
     api: {
       session: unused, login: unused, logout: unused, setAccountRunning: unused, flatten: unused,
-      setStrategyRunning: unused, setParams: unused,
+      setStrategyRunning: unused, setParams: unused, funding: unused, declare: unused, deposit: unused, claim: unused,
+      withdraw: unused,
       accounts: () => Promise.resolve(list),
       account: () => Promise.resolve(detail),
       ...api,

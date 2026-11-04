@@ -1,4 +1,6 @@
 /** The console's only door to the bot: every route, request and response check lives here. */
+import { readFunding } from "./funding-parsers";
+import type { DeclarationOption, FundingRead } from "./funding-types";
 import { parseWith, readAccount, readAccountList, readErrorMessage, type Parsed } from "./parsers";
 import type { AccountList, AccountRead } from "./types";
 
@@ -20,6 +22,15 @@ export interface Api {
   flatten(address: string): Promise<Outcome<AccountRead>>;
   setStrategyRunning(address: string, strategyId: string, running: boolean): Promise<Outcome<AccountRead>>;
   setParams(address: string, strategyId: string, params: Readonly<Record<string, string | number>>): Promise<Outcome<AccountRead>>;
+  funding(): Promise<Outcome<FundingRead>>;
+  /** Records `declaration` for `accounts`; its statement is sent back so the bot checks it is the text the user read. */
+  declare(accounts: readonly string[], declaration: DeclarationOption): Promise<Outcome<FundingRead>>;
+  /** Deposits `amount` USDC from each account's own wallet into its own account. */
+  deposit(accounts: readonly string[], amount: string): Promise<Outcome<FundingRead>>;
+  /** Claims each account's MONKEY, minted to the account itself. */
+  claim(accounts: readonly string[]): Promise<Outcome<FundingRead>>;
+  /** Withdraws `amount` USDC from each account to the account's own wallet. */
+  withdraw(accounts: readonly string[], amount: string): Promise<Outcome<FundingRead>>;
 }
 
 /** The routes of the bot's console API, the one place their paths are written. */
@@ -35,6 +46,8 @@ export const routes = {
     `/api/accounts/${encodeURIComponent(address)}/strategies/${encodeURIComponent(id)}/${action}`,
   strategyParams: (address: string, id: string) =>
     `/api/accounts/${encodeURIComponent(address)}/strategies/${encodeURIComponent(id)}/params`,
+  funding: "/api/funding",
+  fundingAction: (action: "declare" | "deposit" | "claim" | "withdraw") => `/api/funding/${action}`,
   /** The live feed's path, on the page's own origin. */
   feed: "/api/live",
 } as const;
@@ -94,6 +107,8 @@ const nothing = (): null => null;
 export function createApi(fetchFn: Fetch): Api {
   const account = (method: "GET" | "POST" | "PUT", path: string, body?: unknown) =>
     call(fetchFn, method, path, body, readAccount);
+  const funds = (action: "declare" | "deposit" | "claim" | "withdraw", body: unknown) =>
+    call(fetchFn, "POST", routes.fundingAction(action), body, readFunding);
   return {
     session: () => call(fetchFn, "GET", routes.session, undefined, nothing),
     login: (password) => call(fetchFn, "POST", routes.login, { password }, nothing),
@@ -105,5 +120,11 @@ export function createApi(fetchFn: Fetch): Api {
     setStrategyRunning: (address, id, running) =>
       account("POST", routes.strategyRun(address, id, running ? "start" : "stop"), {}),
     setParams: (address, id, params) => account("PUT", routes.strategyParams(address, id), { params }),
+    funding: () => call(fetchFn, "GET", routes.funding, undefined, readFunding),
+    declare: (accounts, declaration) =>
+      funds("declare", { accounts, class: declaration.class, statement: declaration.statement }),
+    deposit: (accounts, amount) => funds("deposit", { accounts, amount }),
+    claim: (accounts) => funds("claim", { accounts }),
+    withdraw: (accounts, amount) => funds("withdraw", { accounts, amount }),
   };
 }

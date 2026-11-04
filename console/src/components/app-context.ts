@@ -2,12 +2,14 @@
 import { createContext, use, useSyncExternalStore } from "react";
 
 import type { Api } from "@/api/client";
+import type { FundingSnapshot, FundingStore } from "@/api/funding-store";
 import type { LiveSnapshot, LiveStore } from "@/api/live-store";
 import type { SessionStatus, SessionStore } from "@/api/session-store";
 
 /** Everything a component may need from outside React. */
 export interface AppServices {
   readonly api: Api;
+  readonly funding: FundingStore;
   readonly live: LiveStore;
   readonly session: SessionStore;
 }
@@ -35,4 +37,10 @@ export function useLive(): LiveSnapshot {
 export function useSession(): SessionStatus {
   const { session } = useServices();
   return useSyncExternalStore(session.subscribe, session.getSnapshot);
+}
+
+/** The funding book, re-rendering the caller only when a new snapshot is published. */
+export function useFunding(): FundingSnapshot {
+  const { funding } = useServices();
+  return useSyncExternalStore(funding.subscribe, funding.getSnapshot);
 }

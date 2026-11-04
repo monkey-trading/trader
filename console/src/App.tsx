@@ -6,7 +6,9 @@ import { useServices, useSession } from "@/components/app-context";
 import { ConnectionStatus } from "@/components/ConnectionStatus";
 import { Link } from "@/components/Link";
 import { useRoute } from "@/components/use-route";
+import { FUNDING_PATH } from "@/lib/route";
 import { AccountPage } from "@/pages/AccountPage";
+import { FundingPage } from "@/pages/FundingPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { OverviewPage } from "@/pages/OverviewPage";
 
@@ -16,6 +18,8 @@ function Pages() {
   switch (route.name) {
     case "overview":
       return <OverviewPage />;
+    case "funding":
+      return <FundingPage />;
     case "account":
       return <AccountPage key={route.address} address={route.address} />;
     case "not-found":
@@ -36,6 +40,10 @@ function SignedIn() {
     <>
       <div className="flex flex-wrap items-center justify-between gap-2 pb-4">
         <ConnectionStatus />
+        <nav aria-label="Pages" className="flex gap-4">
+          <Link to="/">Accounts</Link>
+          <Link to={FUNDING_PATH}>Funding</Link>
+        </nav>
         <button
           type="button"
           className={BUTTON_CLASS}

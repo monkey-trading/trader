@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 
 import { createApi } from "@/api/client";
 import { openBrowserFeed } from "@/api/feed";
+import { FundingStore } from "@/api/funding-store";
 import { LiveStore } from "@/api/live-store";
 import { SessionStore } from "@/api/session-store";
 import { App } from "@/App";
@@ -19,6 +20,18 @@ if (root === null) {
 
 const api = createApi((input, init) => fetch(input, init));
 const session = new SessionStore(api);
+const funding = new FundingStore({
+  api,
+  timeout: (callback, ms) => {
+    const id = window.setTimeout(callback, ms);
+    return () => {
+      window.clearTimeout(id);
+    };
+  },
+  onUnauthenticated: () => {
+    session.expire();
+  },
+});
 const live = new LiveStore({
   api,
   openFeed: openBrowserFeed,
@@ -42,7 +55,7 @@ const live = new LiveStore({
 
 createRoot(root).render(
   <StrictMode>
-    <AppContext value={{ api, live, session }}>
+    <AppContext value={{ api, funding, live, session }}>
       <App />
     </AppContext>
   </StrictMode>,
