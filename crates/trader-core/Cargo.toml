@@ -5,3 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Indicators, strategies, sizing and risk limits for the monkeytrading bot, with no IO"
+
+# No IO: no clocks, randomness, files, environment, network, threads or async. engine-core is
+# deterministic too, so a recorded log replays through this crate to the same decisions.
+[dependencies]
+engine-core = { workspace = true }
+thiserror = { workspace = true }

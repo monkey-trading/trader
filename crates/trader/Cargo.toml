@@ -7,4 +7,39 @@ repository.workspace = true
 description = "The monkeytrading bot: runs strategies against the engine's node and serves its console"
 
 [dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
 clap = { workspace = true }
+engine-core = { workspace = true }
+engine-wire = { workspace = true }
+eth-keystore = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+http-body-util = { workspace = true }
+humantime-serde = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+k256 = { workspace = true }
+rand = { workspace = true }
+rustls = { workspace = true }
+rustls-webpki = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-tungstenite = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+trader-core = { workspace = true }
+webpki-roots = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["ws"] }
+hyper = { workspace = true, features = ["server"] }
+hyper-util = { workspace = true, features = ["server", "service"] }
+rcgen = { workspace = true }
+tempfile = { workspace = true }

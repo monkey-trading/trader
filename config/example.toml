@@ -1,0 +1,43 @@
+# An example config for `trader run --config <file>`: one account trading one market with an SMA
+# crossover. Every section refuses keys it does not know. Relative paths are read from this file's
+# directory. `scripts/dev-stack.sh` prints the [node] values of a local dev node.
+
+[node]
+# The node's API, https://host:port.
+url = "https://127.0.0.1:18610"
+# The custody chain and vault every signature names: the node's [custody] chain_id and vault.
+chain_id = 31337
+vault = "0x0000000000000000000000000000000000000000"
+# The enclave key's address, from the node's attestation (`enclave_address`). Every answer and
+# stream frame must carry its signature.
+signer = "0x0000000000000000000000000000000000000000"
+# The SHA-256 of the node's TLS key, from its attestation (`tls_public_key_sha256`), for a node
+# whose certificate no public CA signs, as a dev node's. Leave it out to require a public CA.
+tls_key_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+# How long one call may take, and the longest silence on the stream before it reconnects.
+request_timeout = "10s"
+stream_timeout = "30s"
+
+[account]
+# An encrypted Web3 Secret Storage keystore, as wallets export it, with its password from a file
+# (password = { file = "..." }) or an environment variable (password = { env = "..." }).
+# A dev build also takes { type = "hex_file", path = "..." }: a file holding the key in hex.
+key = { type = "keystore", path = "keys/account.json", password = { env = "TRADER_KEY_PASSWORD" } }
+# Whether stopping the bot closes the strategy's position. It always cancels resting orders.
+close_on_stop = false
+
+[strategy]
+# The market, by symbol: a USD market priced from spot quotes that never closes.
+market = "BTC-USD"
+# Bars of whole minutes, from 1m to 1d, aligned to the Unix epoch.
+bar = "1m"
+# Long while the fast average of bar closes is above the slow one, short while below.
+fast = 5
+slow = 20
+# The position size, long or short, in the market's units.
+qty = "0.01"
+# How far from the quoted mark a market order may fill, in bps.
+max_slippage_bps = 25
+
+[logging]
+level = "info"

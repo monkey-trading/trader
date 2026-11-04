@@ -9,7 +9,47 @@ license = "Apache-2.0"
 repository = "https://github.com/monkey-trading/trader"
 
 [workspace.dependencies]
-clap = { version = "4", features = ["derive"] }
+trader-core = { path = "crates/trader-core", version = "0.1.0" }
+
+# The engine's crates, pinned to one commit so the bot signs and verifies exactly what that node
+# release checks. A bump moves both together and names the node releases it supports in the README.
+engine-core = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721b0062e48ee944ab063205f3dbccb01ae6", version = "0.1.0" }
+engine-wire = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721b0062e48ee944ab063205f3dbccb01ae6", version = "0.1.0" }
+
+anyhow = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+# Web3 Secret Storage keystores, the encrypted key files wallets export.
+eth-keystore = "0.5"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+hex = "0.4"
+http-body-util = "0.1"
+humantime-serde = "1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+# The same curve crate engine-core signs with, so a key loads straight into its signing type.
+k256 = { version = "0.14.0", default-features = false, features = ["ecdsa"] }
+rand = "0.8"
+# TLS on ring alone, as the node uses, so no OpenSSL or aws-lc build.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "signal"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# The stream runs over the TLS connection the bot opens itself, so no TLS feature is needed here.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+webpki-roots = "1"
+zeroize = "1"
+
+# Tests only: a self-signed certificate for the local stand-in node, and scratch files.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

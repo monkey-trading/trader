@@ -345,7 +345,7 @@ import grouping.
 - Declare `#[cfg(test)] mod tests;` at the bottom of the parent, where the inline module sat.
 - `tests.rs` starts with `use super::*;` plus what it needs; helpers go below the tests under a
   `// ── Helpers ──` divider.
-- Strategy behaviour tests drive `trader-core` through its public API in `crates/core/tests/`
+- Strategy behaviour tests drive `trader-core` through its public API in `crates/trader-core/tests/`
   with recorded bar sequences and known answers. The binary's tests run against local stand-ins for
   the node. An integration-test file over the cap splits by behaviour area, with the shared
   harness in `tests/common/mod.rs`.
