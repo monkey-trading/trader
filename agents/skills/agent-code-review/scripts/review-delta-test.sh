@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks review-delta.sh on a scratch repository: an unrelated change on main, a changed line, a
+# Checks review-delta.sh on a scratch repository: a change on main above the PR's hunk, a changed line, a
 # line moved between methods, binary fixtures (also under a text conversion), a caller in a
 # subdirectory under an inherited diff.relative, bad arguments, and failures. Prints one line per
 # case and exits 1 if any case fails.
@@ -10,9 +10,10 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 cd "$tmp"
 git init -q . && git config user.name test && git config user.email test@example.com
 
-strategy() { # the method that sizes a position
+strategy() { # the method that sizes a position; a second argument adds lines above it
   mkdir -p crates/core/src
   {
+    [ -z "${2:-}" ] || printf '// %s\n' "$2" "$2 again"
     echo "impl Sma {"
     echo "    pub fn target(&mut self) {"
     echo "        self.common();"
@@ -33,8 +34,9 @@ strategy none; other base; base=$(commit base)
 strategy target; reviewed=$(commit reviewed)
 strategy flatten; moved=$(commit moved)
 from "$reviewed"; strategy target; echo "// extra" >> crates/core/src/sma.rs; changed=$(commit changed)
-from "$base"; other main; main=$(commit main)
-strategy target; rebased=$(commit rebased)
+# main adds lines above the PR's hunk, so the rebased patch has other blob ids and line numbers.
+from "$base"; other main; strategy none header; main=$(commit main)
+strategy target header; rebased=$(commit rebased)
 from "$base"; printf '\0\1AAAA' > blob.bin; blob_a=$(commit blob-a)
 from "$base"; printf '\0\1BBBB' > blob.bin; blob_b=$(commit blob-b)
 from "$main"; printf '\0\1AAAA' > blob.bin; blob_a_on_main=$(commit blob-a-on-main)
@@ -50,7 +52,8 @@ check identical 0 "$base" "$reviewed" "$base" "$reviewed"
 check rebase-onto-changed-main 0 "$base" "$reviewed" "$main" "$rebased"
 # A base that is not the merge-base: main moved on after the branch forked, with no rebase.
 check unrebased-against-advanced-main 0 "$base" "$reviewed" "$main" "$reviewed"
-check unrebased-reviewed-base-advanced 0 "$main" "$rebased" "$main" "$rebased"
+# A reviewed base that is not the merge-base of the reviewed head.
+check unrebased-reviewed-base-advanced 0 "$main" "$reviewed" "$base" "$reviewed"
 check unrebased-new-patch-changed 1 "$base" "$reviewed" "$main" "$changed"
 check line-moved-between-methods 1 "$base" "$reviewed" "$base" "$moved"
 check line-added 1 "$base" "$reviewed" "$base" "$changed"
