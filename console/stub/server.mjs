@@ -8,6 +8,7 @@ import { extname, join, normalize } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { act, createFunding, read as readFunding } from "./funding.mjs";
 import { createModel, detail, flatten, live, summary, tick, units } from "./model.mjs";
 import { accept } from "./websocket.mjs";
 
@@ -23,6 +24,7 @@ const SECURITY_HEADERS = {
 };
 
 const model = createModel(() => Date.now());
+const funding = createFunding(model);
 const sessions = new Set();
 const feeds = new Set();
 let failedLogins = 0;
@@ -118,6 +120,17 @@ async function control(request, response, parts) {
   return send(response, 200, read(item));
 }
 
+async function fundingRoute(request, response, parts) {
+  if (request.method === "GET" && parts.length === 0) {
+    return send(response, 200, readFunding(funding));
+  }
+  if (request.method === "POST" && parts.length === 1 && ["declare", "deposit", "claim", "withdraw"].includes(parts[0])) {
+    const answer = act(funding, parts[0], await readJson(request));
+    return send(response, answer.status, answer.body);
+  }
+  return send(response, 404, { error: "not found" });
+}
+
 async function api(request, response, url) {
   if (request.method !== "GET" && request.headers.origin !== `http://${request.headers.host}`) {
     return send(response, 403, { error: "foreign origin" });
@@ -135,6 +148,9 @@ async function api(request, response, url) {
   if (parts[0] === "logout") {
     sessions.clear();
     return send(response, 200, {}, { "Set-Cookie": "session=; Max-Age=0; Path=/" });
+  }
+  if (parts[0] === "funding") {
+    return fundingRoute(request, response, parts.slice(1));
   }
   if (parts[0] === "accounts" && parts.length === 1) {
     return send(response, 200, { seq: model.seq, accounts: model.accounts.map((item) => summary(model, item)) });
