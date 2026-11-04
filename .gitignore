@@ -3,3 +3,9 @@ agents/.processes/
 
 # Claude Code local project dir
 .claude/
+
+# Build output
+/target/
+console/node_modules/
+console/dist/
+.env*

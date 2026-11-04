@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/trader-core", "crates/trader"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/monkey-trading/trader"
+
+[workspace.dependencies]
+trader-core = { path = "crates/trader-core", version = "0.1.0" }
+
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# Money code: an overflow must halt the bot, never wrap silently.
+overflow-checks = true
+
+[profile.dev]
+opt-level = 2
+lto = "thin"

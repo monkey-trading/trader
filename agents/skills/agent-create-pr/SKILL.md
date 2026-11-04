@@ -6,7 +6,8 @@ description: >
   preconditions for marking it ready (including a multi-agent agent-code-review at medium or
   higher, except for a bug fix), the issue blocker check, the `[scopes] Title` and the body in squashed-commit format
   ending with `Closes #12` or `Part of #12`, watching the checks after it opens, and, on the
-  owner's go-ahead in chat, posting `merge-approved` and queueing the PR to merge. Every feature
+  owner's go-ahead in chat, posting `merge-approved` and queueing the PR in the merge queue, which
+  merges it once `ci-passed` and `merge-approved` pass on its merge group. Every feature
   PR ends `Closes #12`; `Part of #12` is only for a supporting PR that does not finish its issue.
   Does not review or approve.
 ---
@@ -38,8 +39,7 @@ changed — the body exists to say *why*. Branches, commits, local checks, and p
 ## Before a PR is ready for review
 
 A draft may skip these and say in its overview what is unfinished; a ready PR, or a draft being
-marked ready, may not. Until the CI feature lands there is no CI: where this skill names CI or
-`ci-passed`, [AGENTS.md](../../AGENTS.md#repo-facts) says what stands in.
+marked ready, may not.
 
 - **Work finished.** No "fix it in review" leftovers.
 - **Feature complete.** A feature PR delivers its issue's whole acceptance list, its dev scenario
@@ -64,7 +64,7 @@ marked ready, may not. Until the CI feature lands there is no CI: where this ski
   round, and any other change gets one round on the residual and the change itself, or on the full
   diff when either changes behaviour beyond resolving a conflict.
 - **Local checks** for the affected crates passed, per git-workflow; CI runs every job
-  the PR's paths affect.
+  the PR's paths affect, and `ci-passed` is green on the head being marked ready.
 
 ## Title
 
@@ -106,23 +106,15 @@ checklist, no restatement of the diff.
 
 ## Merging
 
-Until the CI feature lands, the ruleset on `main` allows no deletion, no force-push, and only
-linear history, and requires a pull request, squash merges only, and one status check,
-`merge-approved`; there is no `ci-passed` and no merge queue
-([AGENTS.md](../../AGENTS.md#repo-facts)). The merge then follows the approval below, and the
-session squash-merges instead of queueing:
-
-```bash
-set -e
-cd "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"  # the main checkout
-[ "$(gh pr view "$PR" --json headRefOid --jq .headRefOid)" = "$SHA" ]  # the approved commit, full
-gh api --method POST "repos/{owner}/{repo}/statuses/$SHA" -f state=success -f context=merge-approved
-gh pr merge "$PR" --squash --match-head-commit "$SHA" --subject "$TITLE" --body-file "$BODY"
-```
-
-`$TITLE` and `$BODY` are the PR's title and body ([Body](#body)). Then it cleans up the branch as
-below. The rest of this section applies once the CI feature adds `ci-passed` and the merge queue
-to the ruleset.
+`main` merges only through GitHub's merge queue, and branch rules require two checks: `ci-passed`,
+which CI sets, and `merge-approved`, the owner's go-ahead. A PR enters the queue only when both pass
+on its head. The queue then builds a merge group, the PR's squashed changes on top of `main` and of
+the PRs queued ahead of it, and merges it only when both pass on the group's commit too: CI runs
+every job there, and the `merge-approved` job of
+[merge-approval.yaml](../../../.github/workflows/merge-approval.yaml) passes only if the latest
+`merge-approved` status on the head of every PR in the group is `success` from the owner's account.
+The ruleset also allows no deletion and no force-push of `main`, only linear history, and only
+squash merges, and every change goes through a pull request; none of these is temporary.
 
 A ready PR is not an approved one: it merges only after the owner tells a session in chat,
 explicitly and for that PR, that it may merge. The approval covers one commit: the PR head that
@@ -164,7 +156,7 @@ gh api graphql -F owner='{owner}' -F name='{repo}' -F pr="$PR" -f query='
 means the queue removed it — its merge group failed or timed out, or someone removed it — and the
 session reports the reason the PR's timeline gives, and stops.
 
-After the PR merges, in the main checkout, the session cleans up its head branch
+After the queue merges the PR, in the main checkout, the session cleans up its head branch
 (`headRefName`, here `$BRANCH`):
 
 - **On `origin`**, only for a PR from this repository (`isCrossRepository` is false), with a lease
@@ -192,5 +184,5 @@ If GitHub or git refuses any step, the session reports why and stops.
   [the review loop](../agent-code-review/SKILL.md#the-review-loop) files for Mediums from round 3
   on.
 - No AI signatures anywhere — title, body, or commits.
-- Never approve or dismiss reviews. Post `merge-approved` and queue a PR only as
-  [Merging](#merging) describes.
+- Never approve or dismiss reviews. Post `merge-approved` and queue a PR in the merge queue only
+  as [Merging](#merging) describes.

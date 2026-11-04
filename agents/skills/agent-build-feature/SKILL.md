@@ -55,9 +55,6 @@ a bug fix or a refactor that is not a feature goes straight through
 
 ## Before review
 
-Until the CI feature lands there is no CI: where this skill names CI, [AGENTS.md](../../AGENTS.md#repo-facts)
-says what stands in.
-
 - Run the local checks per git-workflow.
 - Self-review with [agent-code-review](../agent-code-review/SKILL.md), multi-agent at `medium` or
   higher: fix every accepted Critical, High, and Medium finding by class

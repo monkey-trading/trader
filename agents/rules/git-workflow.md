@@ -61,17 +61,14 @@ and a push to `main`, run every job.
 
 - Take the validation commands of the `.github/workflows/` jobs the changed paths trigger — format
   check, build or lint, and the tests covering the change — and run them scoped to the affected
-  crates, each exiting zero. Run formatters as checkers, never as writers. The workflows land
-  with the CI feature; once `.github/workflows/ci.yaml` exists, those are
+  crates, each exiting zero. Run formatters as checkers, never as writers. Those are
   `cargo fmt --all -- --check`, `./scripts/check-file-loc.sh`,
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test -p <crate>` for each
   affected crate, `cargo deny check` when dependencies change, and the console's lint, type
   check, and tests (`npm run lint`, `npm run typecheck`, `npm test` in `console/`) when
   `console/` changes. A change under `agents/` runs `./scripts/check-agent-links.sh`, and a change
   to a script runs its test: `./scripts/check-agent-links-test.sh`, or
-  `agents/skills/agent-code-review/scripts/review-delta-test.sh` for the review-delta script. Until
-  the CI feature lands, these local checks are the whole check of a PR
-  ([AGENTS.md](../AGENTS.md#repo-facts)).
+  `agents/skills/agent-code-review/scripts/review-delta-test.sh` for the review-delta script.
 - A push to a draft PR may carry failing or skipped checks when the PR says which; `ci-passed`
   passes before the PR is marked ready. The first failed job cancels the rest of the PR's run, so
   a push carrying a known failure gets no result from the jobs it cancels.
