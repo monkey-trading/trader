@@ -233,6 +233,8 @@ jobs:
           persist-credentials: false
       - name: Test the path classifier and the ci-passed predicate
         run: ./scripts/ci-test.sh
+      - name: Test the line cap
+        run: ./scripts/check-file-loc-test.sh
 
   # Each job above but `changes` has a `cancel-` companion that runs only on a pull request or a
   # merge group, and only when that job itself fails (`failure()` alone is also true for a failed

@@ -25,8 +25,9 @@ areas() {
 
 every="agent_docs agent_scripts ci_scripts console merge_approval rust"
 check "a Rust source file" "rust" "$(areas crates/trader/src/lib.rs)"
-check "the manifests, lockfile, toolchain, policy and line cap" "rust" \
-  "$(areas Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml deny.toml scripts/check-file-loc.sh)"
+check "the manifests, lockfile, toolchain and policy" "rust" \
+  "$(areas Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml deny.toml)"
+check "the line cap feeds the Rust jobs and its test" "ci_scripts rust" "$(areas scripts/check-file-loc.sh)"
 check "a crate README reads nothing" "" "$(areas crates/trader/README.md)"
 check "a console file" "console" "$(areas console/src/App.tsx console/package-lock.json)"
 check "the README, SECURITY.md and LICENSE feed the link checker" "agent_docs" \
@@ -37,7 +38,8 @@ check "the review-delta scripts feed their test and the link checker" "agent_doc
   "$(areas agents/skills/agent-code-review/scripts/review-delta.sh)"
 check "the merge gate" "merge_approval" \
   "$(areas scripts/check-merge-approved.sh scripts/check-merge-approved-test.sh)"
-check "the CI scripts" "ci_scripts" "$(areas scripts/ci-areas.sh scripts/check-ci-passed.sh scripts/ci-test.sh)"
+check "the CI scripts and the line cap's test" "ci_scripts" \
+  "$(areas scripts/ci-areas.sh scripts/check-ci-passed.sh scripts/ci-test.sh scripts/check-file-loc-test.sh)"
 check "several areas" "console rust" "$(areas crates/trader/src/main.rs console/index.html)"
 check "a workflow change selects every area" "$every" "$(areas .github/workflows/ci.yaml)"
 check "an unlisted path selects every area" "$every" "$(areas .gitignore)"
@@ -45,24 +47,29 @@ check "an unlisted path among listed ones selects every area" "$every" "$(areas 
 check "an empty diff selects every area" "$every" "$(areas '')"
 check "--all lists every area" "$every" "$(./scripts/ci-areas.sh --all | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')"
 
-# needs <changes-outputs-json> <jobs-json> : the predicate's exit status.
+# predicate <changes-outputs-json> <jobs-json> [changes-result] : the predicate's exit status.
 predicate() {
   local needs
-  needs=$(jq -cn --argjson outputs "$1" --argjson jobs "$2" \
-    '{changes: {result: "success", outputs: $outputs}} + ($jobs | map_values({result: .}))')
+  needs=$(jq -cn --argjson outputs "$1" --argjson jobs "$2" --arg result "${3:-success}" \
+    '{changes: {result: $result, outputs: $outputs}} + ($jobs | map_values({result: .}))')
   if NEEDS=$needs ./scripts/check-ci-passed.sh >/dev/null 2>&1; then echo pass; else echo fail; fi
 }
 none='{"rust":"false","console":"false"}'
 rust='{"rust":"true","console":"false"}'
+ok='{"fmt":"success","console":"success"}'
+# Each rejection case leaves one cause: every other job succeeded, and the classifier's outputs
+# would admit a skip, so a predicate that ignores the cause under test passes the fixture.
 check "every job succeeded" pass "$(predicate "$rust" '{"fmt":"success","console":"skipped"}')"
 check "a job skipped with its area false" pass "$(predicate "$none" '{"fmt":"skipped","console":"skipped"}')"
-check "a job skipped with its area true" fail "$(predicate "$rust" '{"fmt":"skipped"}')"
-check "a failed job" fail "$(predicate "$rust" '{"fmt":"failure"}')"
-check "a cancelled job" fail "$(predicate "$rust" '{"fmt":"cancelled"}')"
-check "a skipped job missing from the area map" fail "$(predicate "$none" '{"unknown-job":"skipped"}')"
-check "a skipped job when the classifier gave no outputs" fail "$(predicate '{}' '{"fmt":"skipped"}')"
-check "a failed classifier" fail "$(NEEDS='{"changes":{"result":"failure","outputs":{}},"fmt":{"result":"skipped"}}' \
-  ./scripts/check-ci-passed.sh >/dev/null 2>&1 && echo pass || echo fail)"
+check "a job skipped with its area true" fail "$(predicate "$rust" '{"fmt":"skipped","console":"success"}')"
+check "a failed job" fail "$(predicate "$none" '{"fmt":"failure","console":"success"}')"
+check "a cancelled job" fail "$(predicate "$none" '{"fmt":"cancelled","console":"success"}')"
+check "a skipped job missing from the area map" fail "$(predicate "$none" '{"fmt":"success","unknown-job":"skipped"}')"
+check "a skipped job when the classifier gave no outputs" fail "$(predicate '{}' '{"fmt":"skipped","console":"success"}')"
+check "a classifier that succeeded with every other job" pass "$(predicate "$none" "$ok")"
+check "a failed classifier" fail "$(predicate "$none" "$ok" failure)"
+check "a cancelled classifier" fail "$(predicate "$none" "$ok" cancelled)"
+check "a skipped classifier" fail "$(predicate "$none" "$ok" skipped)"
 
 # Every job but the classifier, the aggregate and the cancel companions is gated by its own area:
 # it is in ci-passed's needs, the predicate's map names the area its `if` reads, and it has a

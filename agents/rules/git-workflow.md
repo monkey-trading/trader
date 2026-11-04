@@ -71,7 +71,8 @@ which only refreshes the Rust caches.
   to a script runs its test: `./scripts/check-agent-links-test.sh`, or
   `agents/skills/agent-code-review/scripts/review-delta-test.sh` for the review-delta script,
   `./scripts/check-merge-approved-test.sh` for the merge approval gate, or `./scripts/ci-test.sh`
-  for the CI path classifier and `ci-passed` predicate.
+  for the CI path classifier and `ci-passed` predicate, or `./scripts/check-file-loc-test.sh` for the
+  line cap.
 - A push to a draft PR may carry failing or skipped checks when the PR says which; `ci-passed`
   passes before the PR is marked ready. The first failed job cancels the rest of the PR's run, so
   a push carrying a known failure gets no result from the jobs it cancels.
