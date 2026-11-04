@@ -9,13 +9,14 @@ workspace with `trader-core` (indicators, strategies, sizing and risk limits, wi
 `trader` (the binary: the node's API and stream, signing, keys, chain calls, and the console
 server), and `console/`, a Vite, React and TypeScript app built to static files that the binary
 will embed. The engine's own crates (`engine-core`, `engine-wire`, and later `engine-verify`) will
-be Cargo git dependencies pinned by one `rev`. This file is an index: load only the rule whose hint matches
-the current action. Links in this file are relative to `agents/`; commands run from the repository
+be Cargo git dependencies pinned by one `rev`. This file is an index: load only the rule whose hint
+matches the current action. Links in this file are relative to `agents/`; commands run from the repository
 root.
 
 ## Structure
 
-What exists now; each PR that adds a crate, a console file, a workflow, or a script updates this list.
+What exists now; each PR that adds a crate, a console file, a workflow, or a script updates this
+list.
 
 - **agents/** — this index, `rules/`, and `skills/`; root `AGENTS.md` / `CLAUDE.md` symlink to
   `agents/AGENTS.md`. The gitignored `agents/.processes/` holds local runs — reviews, plans, and dev
@@ -37,7 +38,7 @@ What exists now; each PR that adds a crate, a console file, a workflow, or a scr
 - **Cargo.toml** — workspace manifest, shared dependencies, and the Cargo profiles (release keeps
   overflow checks on); `Cargo.lock` is committed.
 - **rust-toolchain.toml** — the one stable toolchain for local builds and CI.
-- **rustfmt.toml** — `max_width = 120`.
+- **rustfmt.toml** — `max_width = 120` and `use_small_heuristics = "Max"`.
 - **deny.toml** — `cargo-deny` policy: advisories, allowed licenses, bans, and sources, with the
   engine repository as the one allowed git source.
 - **README.md**, **SECURITY.md**, **LICENSE** — the public introduction, the security policy (the

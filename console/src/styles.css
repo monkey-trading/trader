@@ -2,6 +2,8 @@
 @import "tailwindcss" source("./");
 
 @theme {
+  /* Only the tokens below make colour utilities, so no colour escapes the contrast check. */
+  --color-*: initial;
   --color-ink: #111827;
   --color-paper: #f9fafb;
   --color-muted: #4b5563;

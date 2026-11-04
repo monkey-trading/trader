@@ -1,5 +1,5 @@
 # The one stable toolchain for local builds and CI. A bump is its own change.
 [toolchain]
-channel = "1.96.0"
+channel = "1.99.1"
 profile = "minimal"
 components = ["clippy", "rustfmt"]

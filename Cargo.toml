@@ -9,8 +9,6 @@ license = "Apache-2.0"
 repository = "https://github.com/monkey-trading/trader"
 
 [workspace.dependencies]
-trader-core = { path = "crates/trader-core", version = "0.1.0" }
-
 clap = { version = "4", features = ["derive"] }
 
 [profile.release]

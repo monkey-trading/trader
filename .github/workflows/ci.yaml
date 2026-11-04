@@ -57,8 +57,8 @@ jobs:
           areas=$all
           cache=false
           # The queue lands the commit its merge group tested, so a push to main whose commit passed a
-          # group has already run every check on it. That push then only refreshes the caches: it runs
-          # the jobs that save one, compiling without the tests, and no area. A commit with no passed
+          # group has already run every check on it. That push then only refreshes the Rust caches: it
+          # runs the jobs that save one, compiling without the tests, and no area. A commit with no passed
           # group, or an API error, runs every job.
           if [[ "$EVENT" == push ]]; then
             tested=$(gh api "repos/$GH_REPO/actions/workflows/ci.yaml/runs?head_sha=$SHA&event=merge_group&status=success&per_page=1" \
@@ -73,15 +73,16 @@ jobs:
             while IFS= read -r file; do
               case "$file" in
                 # The review-delta helper and its test.
-                agents/skills/agent-code-review/scripts/*) areas+=" agent_scripts" ;;
+                # Markdown links to them are checked too.
+                agents/skills/agent-code-review/scripts/*) areas+=" agent_scripts agent_docs" ;;
                 # The merge queue's approval gate and its test.
                 scripts/check-merge-approved.sh | scripts/check-merge-approved-test.sh) areas+=" merge_approval" ;;
-                # The link checker, its test, and the Markdown it reads.
-                agents/* | AGENTS.md | CLAUDE.md | README.md | SECURITY.md | scripts/check-agent-links.sh \
-                  | scripts/check-agent-links-test.sh)
+                # The link checker, its test, the Markdown it reads, and the LICENSE the README links.
+                agents/* | AGENTS.md | CLAUDE.md | README.md | SECURITY.md | LICENSE \
+                  | scripts/check-agent-links.sh | scripts/check-agent-links-test.sh)
                   areas+=" agent_docs" ;;
                 # Read by no build, test, or script.
-                LICENSE | crates/*/README.md) ;;
+                crates/*/README.md) ;;
                 crates/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | deny.toml \
                   | scripts/check-file-loc.sh)
                   areas+=" rust" ;;
@@ -182,8 +183,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: console/.nvmrc
-          cache: npm
-          cache-dependency-path: console/package-lock.json
       - name: Install from the lockfile
         working-directory: console
         run: npm ci

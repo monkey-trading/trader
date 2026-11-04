@@ -25,8 +25,7 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "CC0-1.0",
-    # webpki-roots and webpki-root-certs: Mozilla's CA bundle, compiled in so the bot's TLS clients
-    # never trust the host's roots.
+    # webpki-roots and webpki-root-certs: Mozilla's CA bundle.
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",

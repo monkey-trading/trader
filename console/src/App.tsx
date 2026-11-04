@@ -6,7 +6,7 @@ export function App() {
     <>
       <a
         href="#main"
-        className="sr-only focus-visible:not-sr-only focus-visible:absolute focus-visible:p-2 focus-visible:outline-2"
+        className="sr-only focus-visible:not-sr-only focus-visible:absolute focus-visible:top-2 focus-visible:left-2 focus-visible:z-10 focus-visible:bg-paper focus-visible:p-2 focus-visible:text-ink focus-visible:outline-2"
       >
         Skip to content
       </a>

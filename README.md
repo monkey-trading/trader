@@ -13,11 +13,11 @@ host's address.
 
 - `crates/trader-core` is a library with no IO: indicators, strategies, sizing and risk limits. Time
   and prices arrive as arguments, so strategies are tested and benchmarked without a network.
-- `crates/trader` is the binary. It does the IO: the node's API and stream, signing, keys, chain
+- `crates/trader` is the binary. It will do the IO: the node's API and stream, signing, keys, chain
   calls, and the console server.
 - `console/` is the web console, a Vite, React and TypeScript app built to static files that the
   binary will embed.
-- The engine's own crates are Cargo git dependencies on
+- The engine's own crates will be Cargo git dependencies on
   `https://github.com/monkey-trading/engine`, pinned by one `rev`, so the bot signs exactly what the
   node checks. The repository has no git submodules.
 
@@ -41,8 +41,8 @@ npm run dev     # Vite's dev server on 127.0.0.1
 
 ## Checks
 
-CI runs these on every pull request, merge group and push to `main`; `ci-passed` is the one check
-a merge requires.
+On a pull request, CI runs the checks the changed paths affect; a merge group runs all of them.
+`ci-passed` is the one CI check a merge requires, and a merge also needs the maintainer's approval.
 
 ```bash
 cargo fmt --all -- --check

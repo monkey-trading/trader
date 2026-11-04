@@ -57,7 +57,8 @@ Load on request before creating a branch, committing, pushing, or opening or upd
 
 Before a push that opens or updates a PR, check only what the change affects. On the PR, CI runs
 every job the changed paths can affect, and skips the rest; the PR's merge group in the merge queue,
-and a push to `main`, run every job.
+and a push to `main` runs every job, but for one whose commit already passed a merge group, which
+only refreshes the Rust caches.
 
 - Take the validation commands of the `.github/workflows/` jobs the changed paths trigger — format
   check, build or lint, and the tests covering the change — and run them scoped to the affected
@@ -68,7 +69,8 @@ and a push to `main`, run every job.
   check, and tests (`npm run lint`, `npm run typecheck`, `npm test` in `console/`) when
   `console/` changes. A change under `agents/` runs `./scripts/check-agent-links.sh`, and a change
   to a script runs its test: `./scripts/check-agent-links-test.sh`, or
-  `agents/skills/agent-code-review/scripts/review-delta-test.sh` for the review-delta script.
+  `agents/skills/agent-code-review/scripts/review-delta-test.sh` for the review-delta script, or
+  `./scripts/check-merge-approved-test.sh` for the merge approval gate.
 - A push to a draft PR may carry failing or skipped checks when the PR says which; `ci-passed`
   passes before the PR is marked ready. The first failed job cancels the rest of the PR's run, so
   a push carrying a known failure gets no result from the jobs it cancels.

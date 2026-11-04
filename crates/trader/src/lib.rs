@@ -14,9 +14,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use clap::error::ErrorKind;
     use clap::{CommandFactory, Parser};
 
-    use super::Cli;
+    use crate::Cli;
 
     /// The command definition is internally consistent.
     #[test]
@@ -28,7 +29,7 @@ mod tests {
     #[test]
     fn version_flag_reports_the_package_version() {
         let err = Cli::try_parse_from(["trader", "--version"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
         assert_eq!(err.to_string(), format!("trader {}\n", env!("CARGO_PKG_VERSION")));
     }
 
@@ -36,6 +37,6 @@ mod tests {
     #[test]
     fn unknown_argument_is_refused() {
         let err = Cli::try_parse_from(["trader", "--bogus"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 }
