@@ -45,7 +45,7 @@ pub enum Decision {
     Order(OrderIntent),
     /// The position is already where the target wants it.
     AtTarget,
-    /// The day's loss limit is reached with positions open: close them all and cancel resting orders.
+    /// The day's loss limit is reached with positions open: close them all.
     Flatten,
     /// No order, for this reason.
     Refused(Refusal),
@@ -147,12 +147,13 @@ impl Controls {
         let Some((equity, _)) = equity_and_margin(account.balance, account.holdings) else {
             return Decision::Refused(Refusal::Unvalued);
         };
-        if let DayStatus::Stopped { .. } = self.day.observe(bar.ts, equity) {
-            let open = account.holdings.iter().any(|holding| !holding.qty.is_zero());
-            return if open { Decision::Flatten } else { Decision::Refused(Refusal::DailyLossStopped) };
-        }
+        let stopped = matches!(self.day.observe(bar.ts, equity), DayStatus::Stopped { .. });
         if !is_open(&bar.spec.schedule, bar.ts) {
             return Decision::Refused(Refusal::MarketClosed);
+        }
+        if stopped {
+            let open = account.holdings.iter().any(|holding| !holding.qty.is_zero());
+            return if open { Decision::Flatten } else { Decision::Refused(Refusal::DailyLossStopped) };
         }
         if bar.gap {
             return Decision::Refused(Refusal::GapBar);

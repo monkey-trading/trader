@@ -1,5 +1,5 @@
-# An example config for `trader run --config <file>`: one account trading one market with an SMA
-# crossover. Every section refuses keys it does not know. Relative paths are read from this file's
+# An example config for `trader run --config <file>`: one account trading one market with a strategy,
+# sized and held to risk limits. Every section refuses keys it does not know. Relative paths are read from this file's
 # directory. `scripts/dev-stack.sh` prints the [node] values of a local dev node.
 
 [node]
@@ -28,19 +28,57 @@ key = { type = "keystore", path = "keys/account.json", password = { env = "TRADE
 # calls of up to request_timeout each, and more while a position too large for one close stays
 # open, for up to a minute; give a supervisor's stop a longer grace period.
 close_on_stop = false
+# Where the bot keeps the day's loss across restarts, so a restart does not hand a stopped account a
+# new day. One file per account.
+state_dir = "state"
 
 [strategy]
-# The market, by symbol: a USD market priced from spot quotes that never closes.
+# The market, by symbol: a USD market priced from spot quotes. A market with trading hours is
+# traded only while it is open.
 market = "BTC-USD"
 # Bars of whole minutes, from 1m to 1d, aligned to the Unix epoch.
 bar = "1m"
-# Long while the fast average of bar closes is above the slow one, short while below.
-fast = 5
-slow = 20
-# The position size, long or short, in the market's units.
-qty = "0.01"
 # How far from the quoted mark a market order may fill, in bps.
 max_slippage_bps = 25
+# The strategy, by kind, each taking its parameters in bars of the length above:
+#   sma_crossover        fast, slow: long while the fast average of closes is above the slow one,
+#                        short while below
+#   ema_crossover        fast, slow: the same with exponential averages
+#   macd                 fast, slow, signal (12, 26, 9): long while the MACD line is above its signal
+#   rsi_reversion        period, oversold, exit, overbought (14, 30, 50, 70): long when the index
+#                        falls to oversold, short when it rises to overbought, flat at exit
+#   bollinger_reversion  period, width (20, 2): long on a close below the lower band, short above the
+#                        upper, flat at the middle band; width is in standard deviations
+#   donchian_breakout    entry, exit (20, 10): long on a close above the last entry closes' highest,
+#                        short below their lowest, flat on a close beyond the last exit closes
+# Decimal values are strings, such as width = "1.5".
+kind = "sma_crossover"
+fast = 5
+slow = 20
+
+[sizing]
+# How large a new position is: by = "fixed_notional" with notional in USD, or by = "equity_fraction"
+# with bps of the account's equity. A position on the strategy's side keeps its size.
+by = "fixed_notional"
+notional = "1000"
+# The most leverage the account takes on, as notional over equity. It must be below the market's
+# own, which its first margin tier sets.
+max_leverage = "5"
+
+[risk]
+# The limits hold for the account across its markets.
+max_open_positions = 1
+# The most the positions' notional may add up to, in USD.
+max_total_notional = "5000"
+# At this loss in a UTC day the account is flattened and stopped until the next day: { usd = "..." },
+# or { equity_bps = ... } of the day's opening equity.
+daily_loss = { usd = "100" }
+# No order adds to a position unless equity stays this many bps of the margin requirement above it.
+# The engine closes positions when equity falls below half the requirement.
+margin_buffer_bps = 10000
+# A position is held this long before a strategy closes it. The default, an hour, stands in until the
+# engine's holding-time profit fee is set (monkey-trading/engine#614).
+min_hold = "1h"
 
 [logging]
 level = "info"

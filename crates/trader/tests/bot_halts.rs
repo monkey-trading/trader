@@ -12,8 +12,7 @@ use common::{
     warm,
 };
 use engine_core::command::{AdminCommand, Command};
-use engine_core::market::{MarketSpec, PriceRules};
-use engine_core::session::Schedule;
+use engine_core::market::{MarketSpec, PriceRules, QuoteCurrency};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
@@ -52,11 +51,11 @@ async fn relistings_change_the_rules_or_halt() {
     assert_eq!((path.as_str(), &first["client_id"]), ("/v1/orders", &json!(T0 + 2 * MINUTE)), "{first}");
 
     stand_in.with(|i| i.time_ms = (T0 + 10 * MINUTE) as u64);
-    let weekly = MarketSpec { schedule: weekly(), ..btc_spec() };
-    stand_in.append((18, 0), relisting(18, T0 + 5 * MINUTE + 1, weekly.clone(), false));
-    stand_in.append((19, 0), relisting(19, T0 + 5 * MINUTE + 2, weekly, true));
+    let yen = MarketSpec { quote_currency: QuoteCurrency::Jpy { fx_market: 9 }, ..btc_spec() };
+    stand_in.append((19, 0), relisting(19, T0 + 5 * MINUTE + 1, yen.clone(), false));
+    stand_in.append((20, 0), relisting(20, T0 + 5 * MINUTE + 2, yen, true));
     let err = tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap_err();
-    assert!(err.to_string().contains("never closes"), "{err:#}");
+    assert!(err.to_string().contains("not a USD market priced from spot quotes"), "{err:#}");
     // The halt leaves the account as it is: its resting order stays.
     let posts = stand_in.with(|i| i.posts.clone());
     assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/orders"]);
@@ -276,11 +275,6 @@ fn btc_spec() -> MarketSpec {
         view.as_object_mut().unwrap().remove(field);
     }
     serde_json::from_value(view).unwrap()
-}
-
-/// A weekly schedule with no open window.
-fn weekly() -> Schedule {
-    serde_json::from_value(json!({ "kind": "weekly", "tz": "America/New_York", "windows": [] })).unwrap()
 }
 
 /// An admin command at `seq` listing `spec`, applied or rejected.

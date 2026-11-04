@@ -8,9 +8,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
-use engine_core::Fixed;
 use engine_core::types::AccountId;
 use serde::Deserialize;
+use trader_core::risk::RiskParams;
+use trader_core::sizing::Sizing;
+use trader_core::strategies::StrategyParams;
 
 /// The default time a call to the node may take, connection included.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -24,6 +26,8 @@ pub struct Config {
     pub node: NodeSection,
     pub account: AccountSection,
     pub strategy: StrategySection,
+    pub sizing: Sizing,
+    pub risk: RiskParams,
     #[serde(default)]
     pub logging: LoggingSection,
 }
@@ -69,6 +73,9 @@ pub struct AccountSection {
     /// Whether stopping the bot also closes the strategy's position.
     #[serde(default)]
     pub close_on_stop: bool,
+    /// Where the bot keeps the day's loss across restarts, one file named for the account.
+    #[serde(default = "default_state_dir")]
+    pub state_dir: PathBuf,
 }
 
 /// Where the account key comes from.
@@ -91,22 +98,20 @@ pub enum PasswordSource {
     Env(String),
 }
 
-/// The SMA crossover and the orders it places.
+/// The strategy, the market and bars it reads, and the orders it places.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct StrategySection {
     /// The market's symbol, such as `BTC-USD`.
     pub market: String,
     /// The bar length: whole minutes, from one minute to one day.
     #[serde(with = "humantime_serde")]
     pub bar: Duration,
-    /// The fast and slow averages' periods, in bars.
-    pub fast: usize,
-    pub slow: usize,
-    /// The position size in the market's units, long or short.
-    pub qty: Fixed,
     /// How far, in bps, a market order may fill from the mark it was quoted at.
     pub max_slippage_bps: i64,
+    /// The strategy by `kind`, with its parameters. Not `deny_unknown_fields`, which serde cannot
+    /// combine with `flatten`: the strategy's own section refuses a key it does not know.
+    #[serde(flatten)]
+    pub params: StrategyParams,
 }
 
 /// Log output.
@@ -156,6 +161,7 @@ impl Config {
                 *path = dir.join(&*path);
             }
         };
+        resolve(&mut self.account.state_dir);
         match &mut self.account.key {
             KeySource::Keystore { path, password } => {
                 resolve(path);
@@ -166,6 +172,11 @@ impl Config {
             KeySource::HexFile { path } => resolve(path),
         }
     }
+}
+
+/// The directory of the day's state, beside the config.
+fn default_state_dir() -> PathBuf {
+    PathBuf::from("state")
 }
 
 /// `DEFAULT_REQUEST_TIMEOUT`, for serde.

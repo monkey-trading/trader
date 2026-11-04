@@ -37,11 +37,10 @@ pub enum Sizing {
 }
 
 impl Sizing {
-    /// Checks the section against itself and against `spec`, the market it sizes: the leverage cap
-    /// must be below what the market's first margin tier allows.
+    /// Checks the section against itself: every figure in range.
     /// Error cases:
     /// - see `SizingError`
-    pub fn validate(&self, spec: &MarketSpec) -> Result<(), SizingError> {
+    pub fn check(&self) -> Result<(), SizingError> {
         match *self {
             Self::FixedNotional { notional, .. } if !notional.is_positive() || notional > Fixed::MAX_INPUT => {
                 return Err(SizingError::Notional);
@@ -55,6 +54,16 @@ impl Sizing {
         if !cap.is_positive() || cap > Fixed::from_int(MAX_LEVERAGE) {
             return Err(SizingError::Leverage);
         }
+        Ok(())
+    }
+
+    /// Checks the section against itself and against `spec`, the market it sizes: the leverage cap
+    /// must be below what the market's first margin tier allows.
+    /// Error cases:
+    /// - see `SizingError`
+    pub fn validate(&self, spec: &MarketSpec) -> Result<(), SizingError> {
+        self.check()?;
+        let cap = self.max_leverage();
         match market_leverage(spec) {
             Some(market) if cap >= market => Err(SizingError::AboveMarket { cap, market }),
             _ => Ok(()),

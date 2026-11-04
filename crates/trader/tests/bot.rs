@@ -42,20 +42,24 @@ async fn trades_toward_the_crossover_and_stops_clean() {
     stand_in.append((12, 0), command(12, T0 + 1_001, prices(1, "100", T0 + 1_001), json!([])));
     stand_in.append((13, 0), command(13, T0 + MINUTE, prices(1, "101", T0 + MINUTE), json!([])));
     stand_in.append((14, 0), command(14, T0 + 2 * MINUTE, prices(1, "102", T0 + 2 * MINUTE), json!([])));
-    check_order(&order(&stand_in, 1).await, T0 + MINUTE, "buy", "1", "102", false, 3);
+    check_order(&order(&stand_in, 1).await, T0 + MINUTE, "buy", "0.980392156", "102", false, 3);
 
     // The declined order is retried at the next bar, still long.
     stand_in.append((15, 0), command(15, T0 + 3 * MINUTE, prices(1, "103", T0 + 3 * MINUTE), json!([])));
     let second = order(&stand_in, 2).await;
-    check_order(&second, T0 + 2 * MINUTE, "buy", "1", "103", false, 4);
+    check_order(&second, T0 + 2 * MINUTE, "buy", "0.970873786", "103", false, 4);
 
     // Its fill in the log makes the position long 1, and the bot reads the balance again; at
     // minute 4, 99 falls below the average of 103 and 99, so the target is short and it sells 2.
     let reads = stand_in.with(|i| i.account_reads);
+    stand_in.with(|i| {
+        let position = json!({ "1": { "qty": "1", "entry": "103" } });
+        i.accounts.insert(account.to_string(), account_view("1000", position, json!({})));
+    });
     stand_in.append((16, 0), own_fill(16, T0 + 3 * MINUTE + 1, &second, "1"));
     stand_in.append((17, 0), command(17, T0 + 4 * MINUTE, prices(1, "99", T0 + 4 * MINUTE), json!([])));
     stand_in.append((18, 0), command(18, T0 + 5 * MINUTE, prices(1, "98", T0 + 5 * MINUTE), json!([])));
-    check_order(&order(&stand_in, 3).await, T0 + 4 * MINUTE, "sell", "2", "98", false, 5);
+    check_order(&order(&stand_in, 3).await, T0 + 4 * MINUTE, "sell", "2.020408163", "98", false, 5);
     assert_eq!(stand_in.with(|i| i.account_reads), reads + 1, "one balance read for the one fill");
 
     // Stopping, once the node's time is past the last order's expiry, reads the account: an order
@@ -120,12 +124,12 @@ async fn startup_refusals() {
 
     stand_in.with(|i| {
         i.accounts.insert(account().to_string(), account_view("5", json!({}), json!({})));
-        let mut weekly = btc_usd(Some("100"));
-        weekly["schedule"] = json!({ "kind": "weekly", "tz": "America/New_York", "windows": [] });
-        i.markets = json!([weekly]);
+        let mut yen = btc_usd(Some("100"));
+        yen["quote_currency"] = json!({ "currency": "jpy", "fx_market": 9 });
+        i.markets = json!([yen]);
     });
     let err = run(config(&stand_in, dir.path(), "1m"), async {}).await.unwrap_err();
-    assert!(err.to_string().contains("never closes"), "{err:#}");
+    assert!(err.to_string().contains("not a USD market priced from spot quotes"), "{err:#}");
 
     stand_in.with(|i| i.markets = json!([]));
     let err = run(config(&stand_in, dir.path(), "1m"), async {}).await.unwrap_err();
@@ -195,7 +199,7 @@ async fn only_moves_of_the_mark_make_bars() {
     stand_in.append((13, 0), command(13, T0 + MINUTE, prices(1, "101", T0 + MINUTE), json!([])));
     stand_in.append((14, 0), command(14, T0 + 2 * MINUTE, prices(1, "101", T0 + 2 * MINUTE), json!([])));
     let first = order(&stand_in, 1).await;
-    check_order(&first, T0 + MINUTE, "buy", "1", "101", false, 0);
+    check_order(&first, T0 + MINUTE, "buy", "0.990099009", "101", false, 0);
     stand_in.append((15, 0), own_fill(15, T0 + 2 * MINUTE + 1, &first, "1"));
     stand_in.append((16, 0), command(16, T0 + 3 * MINUTE, prices(1, "101", T0 + 3 * MINUTE), json!([])));
     stand_in.append((17, 0), command(17, T0 + 4 * MINUTE, prices(1, "100", T0 + 4 * MINUTE), json!([])));

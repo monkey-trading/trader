@@ -163,6 +163,11 @@ fn the_daily_loss_limit_flattens_and_stops_until_the_next_day() {
         controls.decide(&account("900", &[]), &bar(&market, "90", Target::Long)),
         Decision::Refused(Refusal::DailyLossStopped)
     );
+    // A market shut at the time has the flatten wait for it to open.
+    let mut shut = spec(1);
+    shut.schedule = exchange();
+    let closed = BarTarget { ts: MONDAY + 3 * HOUR, ..bar(&shut, "90", Target::Long) };
+    assert_eq!(controls.decide(&account("1000", &down), &closed), Decision::Refused(Refusal::MarketClosed));
     // The next day's first reading opens a new day.
     let next = BarTarget { ts: TS + DAY, ..bar(&market, "90", Target::Long) };
     assert_eq!(controls.decide(&account("900", &[]), &next), order(Side::Buy, "11.111111111", false));

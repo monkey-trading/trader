@@ -28,10 +28,14 @@ list.
     `pull.sh` (downloads a pack on demand into a directory its own `.gitignore` excludes) and
     `sources.md`.
 - **crates/trader-core/** — `trader-core`, a library with no IO: a market's index mark derived from
-  the log's `Prices` commands with the engine's `compute_index` (`marks.rs`, USD spot markets that
-  never close), bars of marks (`bars.rs`), the moving average (`sma.rs`), and the SMA crossover and
-  the order that moves a position to its target (`strategy.rs`); `tests/` drives it from marks to
-  orders. Its `README.md` lists every file.
+  the log's `Prices` commands with the engine's `compute_index` (`marks.rs`, USD spot markets, with
+  their trading hours), bars of marks (`bars.rs`), the indicators (`sma.rs`, `ema.rs`, `rsi.rs`,
+  `bands.rs`, `extremes.rs`), the six strategies (the SMA crossover and the order that moves a
+  position to its target in `strategy.rs`, the others and their `[strategy]` section in
+  `strategies/`), and the controls on an account's orders: sizing (`sizing/`), the risk limits and
+  daily loss (`risk/`), equity and margin as the engine works them out (`margin/`), market hours
+  (`hours/`), and `controls/`, which turns a target into an order or a reason for none; `tests/`
+  drives it from marks to orders. Its `README.md` lists every file.
 - **crates/trader/** — `trader`, the binary (`main.rs` over `lib.rs`): `trader run --config` trades
   one account in one market. `config/` loads and checks the TOML config; `keys.rs` unlocks the
   account key (a Web3 Secret Storage keystore, or a hex file in a dev build) into a signing key that
@@ -97,7 +101,9 @@ list.
   source, printing the bot's `[node]` config; sourced, it gives scenarios functions to start and
   stop it, fund and declare an account, and sign admin commands. `dev-trade-one.sh`, the dev
   scenario on it: one account trading BTC-USD for fifteen minutes, checked against its history and
-  emissions; `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
+  emissions; `dev-strategies.sh`, the strategies' scenario: seven accounts on the six strategies and
+  a tiny daily loss limit for fifteen minutes, checked against their limits and history;
+  `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
   `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
@@ -121,7 +127,8 @@ Run from the repo root:
 - Dev node: `./scripts/dev-stack.sh` (needs git, cargo, python3, curl and jq, and the public
   Roughtime servers the engine's dev config names); dev scenario: `./scripts/dev-trade-one.sh`
   (about seventeen minutes; `TRADE_SECONDS` shortens the run, `TRADER_BIN` uses a built bot,
-  `SCENARIO_ARTIFACTS` keeps the logs)
+  `SCENARIO_ARTIFACTS` keeps the logs); the strategies' scenario: `./scripts/dev-strategies.sh`
+  (about twenty minutes, the same variables)
 - Test one crate: `cargo test -p trader-core` or `cargo test -p trader`; the workspace:
   `cargo test --workspace --locked`
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`

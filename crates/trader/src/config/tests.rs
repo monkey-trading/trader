@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use trader_core::risk::LossLimit;
+
 use super::*;
 
 /// The committed example, which the README and the dev stack point to.
@@ -14,8 +16,15 @@ fn the_example_loads() {
     assert_eq!(cfg.node.tls_key_sha256, Some(TlsPin([0; 32])));
     assert_eq!(cfg.node.request_timeout, Duration::from_secs(10));
     assert_eq!(cfg.strategy.market, "BTC-USD");
-    assert_eq!((cfg.strategy.fast, cfg.strategy.slow), (5, 20));
-    assert_eq!(cfg.strategy.qty, "0.01".parse().unwrap());
+    assert_eq!(cfg.strategy.params, StrategyParams::SmaCrossover { fast: 5, slow: 20 });
+    assert_eq!(
+        cfg.sizing,
+        Sizing::FixedNotional { notional: "1000".parse().unwrap(), max_leverage: "5".parse().unwrap() }
+    );
+    assert_eq!(cfg.risk.max_open_positions, 1);
+    assert_eq!(cfg.risk.daily_loss, LossLimit::Usd("100".parse().unwrap()));
+    assert_eq!(cfg.risk.min_hold, Duration::from_secs(3600));
+    assert_eq!(cfg.account.state_dir, Path::new(EXAMPLE).parent().unwrap().join("state"));
     let KeySource::Keystore { path, password: PasswordSource::Env(name) } = &cfg.account.key else {
         panic!("the example names a keystore and a password variable");
     };
@@ -30,6 +39,8 @@ fn unknown_keys_are_refused() {
         ("\n[node]\n", "\n[node]\nbogus = 1\n"),
         ("\n[account]\n", "\n[account]\nbogus = 1\n"),
         ("\n[strategy]\n", "\n[strategy]\nbogus = 1\n"),
+        ("\n[sizing]\n", "\n[sizing]\nbogus = 1\n"),
+        ("\n[risk]\n", "\n[risk]\nbogus = 1\n"),
         ("\n[logging]\n", "\n[logging]\nbogus = 1\n"),
         ("\n[logging]\n", "\n[bogus]\n[logging]\n"),
         ("path = \"keys/account.json\", password", "path = \"keys/account.json\", bogus = 1, password"),
@@ -48,7 +59,10 @@ fn unknown_keys_are_refused() {
 /// A missing required key fails the load, naming it.
 #[test]
 fn required_keys_are_required() {
-    for key in ["signer = ", "chain_id = ", "market = ", "qty = ", "max_slippage_bps = "] {
+    let keys = ["signer = ", "chain_id = ", "market = ", "max_slippage_bps = ", "kind = ", "by = ", "notional = "];
+    for key in
+        keys.into_iter().chain(["max_leverage = ", "max_open_positions = ", "max_total_notional = ", "daily_loss = "])
+    {
         let text: String = example().lines().filter(|l| !l.starts_with(key)).collect::<Vec<_>>().join("\n");
         let err = parse(&text).expect_err(key);
         assert!(format!("{err:#}").contains(key.trim_end_matches(" = ")), "{key}: {err:#}");
@@ -92,9 +106,18 @@ fn strategy_values_are_checked() {
         ("bar = \"1m\"", "bar = \"59s\""),
         ("bar = \"1m\"", "bar = \"90s\""),
         ("bar = \"1m\"", "bar = \"1d 1m\""),
-        ("qty = \"0.01\"", "qty = \"0\""),
-        ("qty = \"0.01\"", "qty = \"-1\""),
-        ("qty = \"0.01\"", "qty = \"1000000000.000000001\""),
+        ("notional = \"1000\"", "notional = \"0\""),
+        ("notional = \"1000\"", "notional = \"-1\""),
+        ("notional = \"1000\"", "notional = \"1000000000.000000001\""),
+        ("max_leverage = \"5\"", "max_leverage = \"0\""),
+        ("max_leverage = \"5\"", "max_leverage = \"1001\""),
+        ("max_open_positions = 1", "max_open_positions = 0"),
+        ("max_total_notional = \"5000\"", "max_total_notional = \"0\""),
+        ("daily_loss = { usd = \"100\" }", "daily_loss = { usd = \"0\" }"),
+        ("daily_loss = { usd = \"100\" }", "daily_loss = { equity_bps = 10001 }"),
+        ("margin_buffer_bps = 10000", "margin_buffer_bps = -1"),
+        ("min_hold = \"1h\"", "min_hold = \"169h\""),
+        ("kind = \"sma_crossover\"", "kind = \"sma_crosover\""),
         ("max_slippage_bps = 25", "max_slippage_bps = -1"),
         ("max_slippage_bps = 25", "max_slippage_bps = 10001"),
         ("level = \"info\"", "level = \"[\""),
@@ -107,7 +130,11 @@ fn strategy_values_are_checked() {
     let accepted = [
         ("bar = \"1m\"", "bar = \"1d\""),
         ("bar = \"1m\"", "bar = \"15m\""),
-        ("qty = \"0.01\"", "qty = \"1000000000\""),
+        ("notional = \"1000\"", "notional = \"1000000000\""),
+        ("max_leverage = \"5\"", "max_leverage = \"1000\""),
+        ("daily_loss = { usd = \"100\" }", "daily_loss = { equity_bps = 10000 }"),
+        ("min_hold = \"1h\"", "min_hold = \"0s\""),
+        ("min_hold = \"1h\"", "min_hold = \"7d\""),
         ("max_slippage_bps = 25", "max_slippage_bps = 0"),
         ("max_slippage_bps = 25", "max_slippage_bps = 10000"),
         ("fast = 5", "fast = 19"),
@@ -115,6 +142,33 @@ fn strategy_values_are_checked() {
     for (from, to) in accepted {
         parse(&example().replacen(from, to, 1)).unwrap_or_else(|e| panic!("{to}: {e:#}"));
     }
+}
+
+/// The strategy kinds the example's comment lists each load with their own parameters, and a key one kind
+/// does not take is refused.
+#[test]
+fn every_strategy_kind_loads() {
+    let kinds = [
+        "kind = \"ema_crossover\"\nfast = 3\nslow = 9",
+        "kind = \"macd\"",
+        "kind = \"rsi_reversion\"\nperiod = 7\noversold = 25",
+        "kind = \"bollinger_reversion\"\nwidth = \"1.5\"",
+        "kind = \"donchian_breakout\"\nentry = 30",
+    ];
+    for kind in kinds {
+        let text = example().replacen("kind = \"sma_crossover\"\nfast = 5\nslow = 20", kind, 1);
+        parse(&text).unwrap_or_else(|e| panic!("{kind}: {e:#}"));
+    }
+    let typo = example().replacen("fast = 5", "fasst = 5", 1);
+    assert!(parse(&typo).is_err(), "a key the strategy does not take was accepted");
+    let other = example().replacen("kind = \"sma_crossover\"\nfast = 5\nslow = 20", "kind = \"macd\"\nfast = 5", 1);
+    assert!(parse(&other).is_ok());
+    let wrong = example().replacen(
+        "kind = \"sma_crossover\"\nfast = 5\nslow = 20",
+        "kind = \"donchian_breakout\"\nfast = 5",
+        1,
+    );
+    assert!(parse(&wrong).is_err(), "a key another kind takes was accepted");
 }
 
 /// Relative key and password paths resolve against the config's directory; absolute ones stay.

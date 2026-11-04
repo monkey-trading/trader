@@ -2,23 +2,40 @@
 //! and a check that every fill after this start comes from an order this process signed.
 
 use anyhow::anyhow;
+use engine_core::Fixed;
 use engine_core::command::Command;
 use engine_core::event::Event;
-use tracing::{error, info, warn};
+use engine_core::types::Millis;
+use tracing::{debug, error, info, warn};
 
 use crate::bot::{Bot, Halt};
 use crate::node::CallError;
 use crate::stream::message::CommandMessage;
 
 impl Bot {
-    /// Follows the account's fills: the position in the market. Returns whether `event` is one.
-    pub(super) fn on_event(&mut self, seq: u64, event: &Event) -> bool {
+    /// Follows the account's fills: the position in the market, and when it opened. Returns whether
+    /// `event` is one, or moves the account's cash or the position without a fill, as a dividend or
+    /// a split does.
+    pub(super) fn on_event(&mut self, seq: u64, ts: Millis, event: &Event) -> bool {
+        match event {
+            Event::CorporateDividend { account, .. } | Event::CorporateCashInLieu { account, .. }
+                if *account == self.key.address() =>
+            {
+                return true;
+            }
+            Event::CorporateSplit { market, .. } if *market == self.market => {
+                self.resync_position = true;
+                return true;
+            }
+            _ => {}
+        }
         let Event::Fill(fill) = event else { return false };
         if fill.account != self.key.address() {
             return false;
         }
         if fill.market == self.market {
-            self.position = fill.position;
+            let before = std::mem::replace(&mut self.position, fill.position);
+            self.controls.on_fill(ts, fill.market, before, fill.position);
         }
         info!(
             seq,
@@ -57,6 +74,9 @@ impl Bot {
             Ok(Command::PlaceOrder(request) | Command::AccessOrder { request, .. }) if request.account == account => {
                 request.auth.as_ref().is_some_and(|auth| self.signed_orders.contains(&auth.signature))
             }
+            Ok(Command::AccessCloseAll { request, .. }) if request.account == account => {
+                request.auth.as_ref().is_some_and(|auth| self.signed_orders.contains(&auth.signature))
+            }
             _ => false,
         };
         if signed_here {
@@ -67,18 +87,37 @@ impl Bot {
         Err(Halt::Unfollowable(anyhow!("{reason}")))
     }
 
-    /// Reads the balance again, verified, after the account's fills: fills, financing, fees and
-    /// transfers all move it, and the node's answer is the one figure that holds all of them.
+    /// Reads the account again, verified, after the account's fills: fills, financing, fees and
+    /// transfers all move the balance, and the node's answer is the one figure that holds all of them;
+    /// it also gives the position's entry price. A read whose position is not the log's is behind it,
+    /// and gives neither figure until a later read agrees; after a split, which moves the position
+    /// without a fill, the position is the read's own.
     /// Error cases:
     /// - an answer signed by another key than the signer
     pub(super) async fn refresh_balance(&mut self) -> Result<(), Halt> {
         match self.node.account(self.key.address()).await {
             Ok(answer) => {
+                let held = answer.body.positions.get(&self.market);
+                let read = held.map_or(Fixed::ZERO, |position| position.qty);
+                if std::mem::take(&mut self.resync_position) {
+                    self.position = read;
+                    info!(position = %self.position, "the position after a split");
+                }
+                if read != self.position {
+                    self.account_behind = true;
+                    debug!(read = %read, position = %self.position, "the account read is behind the log");
+                    return Ok(());
+                }
+                self.account_behind = false;
                 self.balance = answer.body.balance;
+                self.entry = held.map_or(Fixed::ZERO, |position| position.entry);
                 info!(balance = %self.balance, head_seq = answer.head_seq, "balance");
             }
             Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-            Err(e) => warn!("the balance was not read: {e}"),
+            Err(e) => {
+                self.account_behind = true;
+                warn!("the balance was not read: {e}");
+            }
         }
         Ok(())
     }

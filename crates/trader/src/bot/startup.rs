@@ -11,9 +11,12 @@ use engine_wire::Deployment;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{info, warn};
 use trader_core::bars::BarBuilder;
+use trader_core::controls::{Account, Controls};
+use trader_core::hours::GapTracker;
 use trader_core::marks::IndexMarks;
-use trader_core::strategy::SmaCrossover;
+use trader_core::strategies::is_valid_close;
 
+use crate::bot::day::{DayFile, holding};
 use crate::bot::{Bot, Halt, orders, supported};
 use crate::config::Config;
 use crate::keys::AccountKey;
@@ -86,28 +89,56 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         Err(e) => return Err(e.into()),
     };
     let (now, view) = (view.time_ms, view.body);
-    let position = view.positions.get(&market_id).map_or(Fixed::ZERO, |p| p.qty);
+    let held = view.positions.get(&market_id);
+    let position = held.map_or(Fixed::ZERO, |p| p.qty);
     info!(%account, market = market_id, %position, balance = %view.balance, head_seq, "account read");
 
     let bar_ms = Millis::try_from(strategy_cfg.bar.as_millis()).context("bar length")?;
     let now = Millis::try_from(now).context("node time")?;
+    let strategy = strategy_cfg.params.build()?;
+    let day_file = DayFile::new(&cfg.account.state_dir, account);
+    let restored = day_file.load().await?;
+    let mut controls = Controls::new(cfg.risk.clone(), cfg.sizing.clone(), restored)?;
+    controls.check_market(&market.spec).with_context(|| format!("sizing for {}", strategy_cfg.market))?;
+    if let Some(mark) = market.mark {
+        // The day's opening equity is the account's now, unless a restart finds today's already kept.
+        let entry = held.map_or(Fixed::ZERO, |p| p.entry);
+        let holding = held.and_then(|p| holding(&market.spec, market_id, p.qty, entry, mark));
+        let holdings = holding.as_slice();
+        controls.observe(now, &Account { balance: view.balance, holdings });
+    }
+    let saved_day = controls.day_state();
+    if saved_day != restored
+        && let Some(state) = saved_day
+    {
+        day_file.save(state).await.context("keeping the day's state")?;
+    }
     let bot = Bot {
         domain: eip712::domain(node_cfg.chain_id, node_cfg.vault),
         node,
         key,
         market: market_id,
-        qty: strategy_cfg.qty,
+        marks: IndexMarks::scheduled(market.spec.price_rules, market.spec.schedule.clone()),
+        spec: market.spec,
         max_slippage_bps: strategy_cfg.max_slippage_bps,
         close_on_stop: cfg.account.close_on_stop,
-        marks: IndexMarks::new(market.spec.price_rules),
         bar_ms,
-        history_bars: i64::try_from(strategy_cfg.slow).context("slow period")?,
+        history_bars: i64::try_from(strategy_cfg.params.warm_up_bars()).context("warm-up bars")?,
         bars: None,
         warm_up_after: Millis::MIN,
-        strategy: SmaCrossover::new(strategy_cfg.fast, strategy_cfg.slow)?,
+        strategy,
+        controls,
+        gaps: GapTracker::new(),
+        day_file,
+        saved_day,
+        day_unsaved: false,
+        cash_alert: false,
+        resync_position: false,
+        account_behind: false,
         close_first: false,
         signed_orders: VecDeque::with_capacity(SIGNED_ORDERS),
         position,
+        entry: held.map_or(Fixed::ZERO, |p| p.entry),
         balance: view.balance,
         mark: market.mark,
         exact_mark: None,
@@ -170,12 +201,14 @@ impl Bot {
         let past = logged.iter().filter(|bucket| bucket.ts < live_from).map(|bucket| (bucket.ts, Some(bucket.close)));
         for (at, close) in past.chain([(live_from, None)]) {
             if let Some(bar) = history.on_command(at, close) {
-                self.strategy.on_close(bar.close);
+                self.gaps.on_bar(&self.spec.schedule, bar.start);
+                if is_valid_close(bar.close) {
+                    self.strategy.on_close(bar.close);
+                }
                 bars += 1;
             }
         }
-        let (fast, slow) = self.strategy.averages();
-        info!(bars, seeded = seeded.len(), resolution, live_from, ?fast, ?slow, "warmed up from the marks history");
+        info!(bars, seeded = seeded.len(), resolution, live_from, "warmed up from the marks history");
         // With no exact value yet, moves start from the node's last mark in the history.
         if self.exact_mark.is_none() {
             self.exact_mark = logged.last().map(|bucket| bucket.close);
