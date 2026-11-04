@@ -41,7 +41,7 @@ impl Bot {
     /// another order means another process, or a person, trades the account, and the position the
     /// bot decides on is not its own: it stops.
     /// Error cases:
-    /// - a fill of the account from an order with a nonce this process did not sign
+    /// - a fill of the account from an order whose signature this process did not make
     pub(super) fn check_own_fills(&self, message: &CommandMessage<'_>, events: &[Event]) -> Result<(), Halt> {
         if message.ts <= self.trading_from {
             return Ok(());
@@ -55,7 +55,7 @@ impl Bot {
         }
         let signed_here = match message.command() {
             Ok(Command::PlaceOrder(request) | Command::AccessOrder { request, .. }) if request.account == account => {
-                request.auth.as_ref().is_some_and(|auth| self.signed_nonces.contains(&auth.nonce))
+                request.auth.as_ref().is_some_and(|auth| self.signed_orders.contains(&auth.signature))
             }
             _ => false,
         };

@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 
 use engine_core::Fixed;
 use engine_core::command::{AdminCommand, Command};
-use engine_core::eip712::Eip712Domain;
+use engine_core::eip712::{Eip712Domain, Signature};
 use engine_core::event::Event;
 use engine_core::market::{MarketSpec, QuoteCurrency};
 use engine_core::session::Schedule;
@@ -69,14 +69,21 @@ pub struct Bot {
     strategy: SmaCrossover,
     /// Whether the next reversal is only a close: the engine refused the last one whole.
     close_first: bool,
-    /// The nonces of the last orders this process signed, to tell its fills from others'.
-    signed_nonces: VecDeque<u64>,
+    /// The signatures of the last orders this process signed, to tell its fills from others': a
+    /// signature is over the whole request, so no other request carries one of them.
+    signed_orders: VecDeque<Signature>,
     /// The account's signed position in the market.
     position: Fixed,
     /// The account's balance, as the last verified read of the account gave it.
     balance: Fixed,
-    /// The last index mark: the node's at startup, then the log's.
+    /// The last index mark: the node's at startup, then the log's, which orders are quoted at.
     mark: Option<Fixed>,
+    /// The last exact index mark the bot derived, which a move is a change of.
+    exact_mark: Option<Fixed>,
+    /// The time of the first command at which the index was exact.
+    exact_from: Option<Millis>,
+    /// The moves of the index from `exact_from` until the warm-up, which go into the bars then.
+    pending_moves: Vec<(Millis, Fixed)>,
     /// The expiry of the last order signed. Until the log passes it, that order may still enter the
     /// log, so its fill may still be to come, and no other order is placed.
     order_expires_at: Option<Millis>,
@@ -87,8 +94,8 @@ pub struct Bot {
     log_ts: Millis,
 }
 
-/// Runs the bot until `stop` completes, or until it halts on its own; then cancels the account's
-/// resting orders and, when configured, closes its position, unless the node signs with another key.
+/// Runs the bot until `stop` completes, then cancels the account's resting orders and, when
+/// configured, closes its position; or until it halts on its own, leaving the account as it is.
 /// Error cases:
 /// - the key or the startup reads fail (see `startup::start`)
 /// - the bot halts (see `Halt`)
@@ -108,19 +115,20 @@ pub async fn run(
             return Err(e);
         }
     };
-    let halt = match bot.follow(&mut stream, stop).await {
+    let result = match bot.follow(&mut stream, stop).await {
+        Ok(()) => bot.stop(&mut stream).await,
+        // What the bot saw is not what it trades on: it changes nothing, and leaves the account to
+        // the user.
         Err(Halt::WrongSigner) => Err(Halt::WrongSigner),
-        followed => {
-            if let Err(halt) = &followed {
-                error!(alert = "bot_halted", "{halt}");
-            }
-            bot.stop(&mut stream).await.and(followed)
+        Err(halt) => {
+            error!(alert = "bot_halted", "{halt}; the account is left as it is");
+            Err(halt)
         }
     };
-    if let Err(Halt::WrongSigner) = &halt {
+    if let Err(Halt::WrongSigner) = &result {
         error!(alert = "node_signer_mismatch", "{}", Halt::WrongSigner);
     }
-    Ok(halt?)
+    Ok(result?)
 }
 
 impl Bot {
@@ -181,15 +189,17 @@ impl Bot {
             self.check_own_fills(&message, &events)?;
             self.refresh_balance().await?;
         }
-        // Only a mark that moved goes into the bars, as the node's marks history records only moves,
-        // so bars built live and bars warmed up from the history are built alike.
-        let moved = self.marks.mark(message.ts).filter(|mark| Some(*mark) != self.mark);
-        if moved.is_some() {
-            self.mark = moved;
+        // Only a move of the exact index goes into the bars, as the node's marks history records only
+        // moves, so bars built live and bars warmed up from the history are built alike. The first
+        // exact value is where moves start from; the history holds what came before it.
+        let mark = self.marks.mark(message.ts);
+        let moved = mark.filter(|mark| self.exact_mark.is_some_and(|last| last != *mark));
+        if mark.is_some() {
+            (self.mark, self.exact_mark) = (mark, mark);
         }
         let node_time = Millis::try_from(frame.time).unwrap_or(Millis::MAX);
-        if self.bars.is_none() && !self.warm_up(message.ts, node_time).await? {
-            return Ok(());
+        if self.bars.is_none() {
+            return self.warm_up(message.ts, moved, node_time).await;
         }
         if let Some(bar) = self.bars.as_mut().and_then(|bars| bars.on_command(message.ts, moved)) {
             self.on_bar(bar, message.ts, node_time.saturating_sub(message.ts)).await?;

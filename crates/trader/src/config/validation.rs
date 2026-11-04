@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use anyhow::{bail, ensure};
+use anyhow::{anyhow, bail, ensure};
 use engine_core::Fixed;
 use serde::{Deserialize, Deserializer};
 use tracing_subscriber::EnvFilter;
@@ -32,7 +32,7 @@ impl Config {
             bail!("account.key: a plain hex key is accepted only in a dev build; use a keystore");
         }
         let strategy = &self.strategy;
-        SmaCrossover::new(strategy.fast, strategy.slow).map_err(|e| anyhow::anyhow!("strategy: {e}"))?;
+        SmaCrossover::new(strategy.fast, strategy.slow).map_err(|e| anyhow!("strategy: {e}"))?;
         let bar = strategy.bar;
         ensure!(
             (MIN_BAR..=MAX_BAR).contains(&bar) && bar.as_millis().is_multiple_of(MIN_BAR.as_millis()),
@@ -47,7 +47,7 @@ impl Config {
             (0..=MAX_SLIPPAGE_BPS).contains(&strategy.max_slippage_bps),
             "strategy.max_slippage_bps: from 0 to {MAX_SLIPPAGE_BPS}"
         );
-        EnvFilter::try_new(&self.logging.level).map_err(|e| anyhow::anyhow!("logging.level: {e}"))?;
+        EnvFilter::try_new(&self.logging.level).map_err(|e| anyhow!("logging.level: {e}"))?;
         ensure!(!self.node.request_timeout.is_zero(), "node.request_timeout: above zero");
         ensure!(!self.node.stream_timeout.is_zero(), "node.stream_timeout: above zero");
         Ok(())

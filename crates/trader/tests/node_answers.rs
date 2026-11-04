@@ -84,6 +84,34 @@ async fn without_a_pin_a_self_signed_node_is_refused() {
     assert!(format!("{err}").contains("certificate"), "{err}");
 }
 
+/// The marks history is read page by page through its window, each page verified, until the node
+/// says the window is done.
+#[tokio::test]
+async fn the_marks_history_pages_through_its_window() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.marks = (0..5).map(|minute| common::bucket(common::T0 + minute * common::MINUTE, "100")).collect();
+        i.marks_page = Some(2);
+    });
+    let (from, to) = (common::T0 + common::MINUTE, common::T0 + 3 * common::MINUTE);
+    let buckets = node(&stand_in).marks(1, "1m", from, to).await.unwrap();
+    let starts: Vec<_> = buckets.iter().map(|bucket| bucket.ts).collect();
+    assert_eq!(starts, [from, from + common::MINUTE, to]);
+    assert_eq!(stand_in.with(|i| i.marks_reads), 2);
+}
+
+/// A page whose `next` does not move past the window it answered is refused, not followed.
+#[tokio::test]
+async fn a_marks_page_that_does_not_move_on_is_refused() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.marks = vec![common::bucket(common::T0, "100")];
+        i.marks_next = Some(common::T0);
+    });
+    let err = node(&stand_in).marks(1, "1m", common::T0, common::T0 + common::MINUTE).await.unwrap_err();
+    assert!(err.to_string().contains("outside"), "{err}");
+}
+
 // ── Helpers ──
 
 const TIMEOUT: Duration = Duration::from_secs(5);

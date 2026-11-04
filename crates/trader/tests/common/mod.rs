@@ -14,13 +14,14 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use engine_core::eip712::{self, B256};
 use engine_wire::{Connection, Deployment, FRAME_VERSION, SignedFrame, frame_digest, parse_challenge, response_digest};
+use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use k256::ecdsa::SigningKey;
@@ -74,6 +75,8 @@ pub enum Fault {
 pub struct Inner {
     pub answers: Option<Answers>,
     pub time_ms: u64,
+    /// How far the log head moves after each answer.
+    pub head_step: u64,
     /// The time stream frames are signed with, when it is not `time_ms`.
     pub frame_time: Option<u64>,
     pub head_seq: u64,
@@ -81,7 +84,12 @@ pub struct Inner {
     /// Account views by lower-case address; an absent one answers 404.
     pub accounts: BTreeMap<String, Value>,
     pub nonce: u64,
+    /// The marks history, served by window and page as the node serves it.
     pub marks: Vec<Value>,
+    /// The most buckets one page holds, below the request's limit; and a `next` to answer with
+    /// instead of the right one.
+    pub marks_page: Option<usize>,
+    pub marks_next: Option<i64>,
     /// Every POST, by path, with its body.
     pub posts: Vec<(String, Value)>,
     /// The events each POST answers with, in turn; `[]` once none are left.
@@ -97,6 +105,9 @@ pub struct Inner {
     pub faults: BTreeMap<(usize, (u64, u32)), Fault>,
     /// The request target of each stream connection opened.
     pub connections: Vec<String>,
+    /// The latest message the bot has applied: it answers the ping sent after a message only once
+    /// it reads on past that message.
+    pub applied: Option<(u64, u32)>,
     /// How many times an account, and its nonce, were read.
     pub account_reads: usize,
     pub nonce_reads: usize,
@@ -189,10 +200,24 @@ impl StandIn {
         edit(&mut self.inner.lock().unwrap())
     }
 
-    /// Appends a `Tick` command at `ts` as the log's next seq, after the last message or the head.
-    pub fn tick(&self, ts: i64) {
+    /// Appends a `Tick` command at `ts` as the log's next seq, after the last message or the head;
+    /// its offset.
+    pub fn tick(&self, ts: i64) -> (u64, u32) {
         let seq = self.with(|i| i.log.last().map_or(i.head_seq, |((seq, _), _)| *seq) + 1);
         self.append((seq, 0), command(seq, ts, json!({ "type": "tick" }), json!([])));
+        (seq, 0)
+    }
+
+    /// Waits until the bot has applied the message at `offset` and read on, so whatever applying
+    /// it does is done.
+    pub async fn applied(&self, offset: (u64, u32)) {
+        for _ in 0..500 {
+            if self.with(|i| i.applied >= Some(offset)) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the bot did not read on past {offset:?}");
     }
 
     /// Appends a message at `offset` to the log, waking the open connections.
@@ -246,7 +271,11 @@ async fn sign_answers(State(s): State<Arc<StandIn>>, req: Request, next: Next) -
     let response = next.run(Request::from_parts(parts, Body::from(request_body.clone()))).await;
     let (mut parts, body) = response.into_parts();
     let mut body = to_bytes(body, usize::MAX).await.unwrap();
-    let (answers, time_ms, head_seq) = s.with(|i| (i.answers.unwrap(), i.time_ms, i.head_seq));
+    let (answers, time_ms, head_seq) = s.with(|i| {
+        let head = i.head_seq;
+        i.head_seq += i.head_step;
+        (i.answers.unwrap(), i.time_ms, head)
+    });
     if answers != Answers::Unsigned {
         let response = engine_wire::Response {
             challenge,
@@ -281,13 +310,21 @@ async fn markets(State(s): State<Arc<StandIn>>) -> Response {
     axum::Json(markets).into_response()
 }
 
-async fn marks(State(s): State<Arc<StandIn>>) -> Response {
-    let entries = s.with(|i| {
+async fn marks(State(s): State<Arc<StandIn>>, Query(query): Query<BTreeMap<String, String>>) -> Response {
+    let number = |key: &str| query.get(key).and_then(|v| v.parse::<i64>().ok());
+    let (from, to) = (number("from_ms").unwrap_or(i64::MIN), number("to_ms").unwrap_or(i64::MAX));
+    let limit = number("limit").map_or(500, |limit| limit as usize);
+    let (entries, next) = s.with(|i| {
         i.marks_reads += 1;
-        i.marks.clone()
+        let window: Vec<Value> =
+            i.marks.iter().filter(|b| (from..=to).contains(&b["ts"].as_i64().unwrap())).cloned().collect();
+        let page = limit.min(i.marks_page.unwrap_or(limit));
+        let next = (window.len() > page).then(|| window[page - 1]["ts"].as_i64().unwrap() + 1);
+        (window.into_iter().take(page).collect::<Vec<_>>(), i.marks_next.or(next))
     });
-    axum::Json(json!({ "market": 1, "resolution": "1m", "entries": entries, "next": null, "max_limit": 2000 }))
-        .into_response()
+    axum::Json(json!({ "market": 1, "resolution": query.get("resolution"), "entries": entries, "next": next,
+        "max_limit": 2000 }))
+    .into_response()
 }
 
 async fn account_view_route(State(s): State<Arc<StandIn>>, Path(address): Path<String>) -> Response {
@@ -371,8 +408,21 @@ async fn stream(State(s): State<Arc<StandIn>>, uri: Uri, ws: WebSocketUpgrade) -
 }
 
 /// Sends the log's messages at or after `start` in signed frames, with the faults set for the
-/// connection at `place`.
-async fn serve_log(s: Arc<StandIn>, mut socket: WebSocket, connection: Connection, start: (u64, u32), place: usize) {
+/// connection at `place`, each frame followed by a ping naming its offset. The bot's client answers
+/// a ping when it next reads, which it does only once it has applied the frame before it.
+async fn serve_log(s: Arc<StandIn>, socket: WebSocket, connection: Connection, start: (u64, u32), place: usize) {
+    let (mut socket, mut replies) = socket.split();
+    let pongs = Arc::clone(&s);
+    tokio::spawn(async move {
+        while let Some(Ok(reply)) = replies.next().await {
+            let Message::Pong(payload) = reply else { continue };
+            let offset = std::str::from_utf8(&payload).ok().and_then(|text| {
+                let (seq, index) = text.split_once(':')?;
+                Some((seq.parse::<u64>().ok()?, index.parse::<u32>().ok()?))
+            });
+            pongs.with(|i| i.applied = i.applied.max(offset));
+        }
+    });
     let (mut n, mut previous) = (0u64, [0u8; 32]);
     let mut next = 0;
     loop {
@@ -383,7 +433,7 @@ async fn serve_log(s: Arc<StandIn>, mut socket: WebSocket, connection: Connectio
                 (offset, msg, i.faults.remove(&(place, offset)), i.frame_time.unwrap_or(i.time_ms))
             })
         });
-        let Some((_, msg, fault, time)) = entry else {
+        let Some((offset, msg, fault, time)) = entry else {
             appended.await;
             continue;
         };
@@ -407,6 +457,9 @@ async fn serve_log(s: Arc<StandIn>, mut socket: WebSocket, connection: Connectio
         let frame = SignedFrame { v: FRAME_VERSION, n, time, msg, sig };
         (n, previous) = (n + 1, digest);
         if socket.send(Message::Text(serde_json::to_string(&frame).unwrap().into())).await.is_err() {
+            return;
+        }
+        if socket.send(Message::Ping(format!("{}:{}", offset.0, offset.1).into())).await.is_err() {
             return;
         }
     }

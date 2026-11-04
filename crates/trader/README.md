@@ -14,13 +14,18 @@ answer that fails the check is an error, never data, and one signed by another k
 - One signed stream connection that reads the public log, verifies each frame with
   `FrameVerifier`, refuses gaps, and resumes after the last message it read when a connection
   fails or falls silent; a frame or message it cannot read stops the bot
+- A halt, for an answer or frame signed by another key, a log message or listing the bot cannot
+  follow, or someone else's fill, changes nothing: no cancel and no close, so the account is left
+  as it is for its user, with a Critical alert and a non-zero exit
 - Startup reads of the market and the account's position and balance; from then on the position
   follows the account's fills in the log, and the balance is read again after each of them. A
   fill from an order this process did not sign, once orders signed before it started have
-  expired, means someone else trades the account, and stops the bot
-- Once the index the bot derives from the log is exact, a warm-up from the node's log-derived marks
-  history, at the widest resolution that tiles a bar: bars before the current one from the
-  history, and the current one started from the history's buckets in its window
+  expired, means someone else trades the account, and stops the bot. A fill is the bot's when the
+  command that made it carries one of the signatures it made
+- Five seconds of log after the index the bot derives is exact, a warm-up from the node's
+  log-derived marks history, at the widest resolution that tiles a bar: bars before the one the
+  index became exact in come from the history, that one starts from the history's bucket in its
+  window, and the moves the bot saw since follow
 - Bars built only from moves of the mark, as the node's marks history records them, so bars warmed
   up from the history and bars built live agree
 - Signed market orders toward the strategy's target, on the account's next nonce, quoted at the
@@ -60,13 +65,16 @@ answer that fails the check is an error, never data, and one signed by another k
 - `src/bot/orders.rs`: the signed market order
 - `src/bot/stop.rs`: the stop: the wait for the log, the signed cancel and close, and the check
 - `tests/common/mod.rs`: a local stand-in node that signs its answers and frames, with injected
-  faults
-- `tests/common/bot.rs`: the bot's config, run, and the log and account the tests script
+  faults, and pings after each frame, so a test can wait until the bot has applied it
+- `tests/common/bot.rs`: the bot's config, run, the log and account the tests script, and the
+  orders they check
 - `tests/node_answers.rs`, `tests/stream.rs`, `tests/bot.rs`: the binary against the stand-in
 - `tests/bot_halts.rs`: the bot against the stand-in when its market is relisted, the log cannot be
   read, the node changes signer, or a stop cannot leave the account as it should
 - `tests/bot_orders.rs`: the bot's orders when one is refused, goes unanswered, or is a reversal the
   engine refuses whole, and when someone else trades the account
+- `tests/bot_warm_up.rs`: the warm-up from the marks history, which moves of the mark make bars,
+  and where the stream starts
 
 ## Usage
 

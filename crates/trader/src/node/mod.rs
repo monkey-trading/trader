@@ -8,7 +8,7 @@ pub use tls::Tls;
 
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use bytes::Bytes;
 use engine_wire::{
     CHALLENGE_HEADER, Deployment, Error as WireError, Received, ReceivedError, SEQ_HEADER, SIGNATURE_HEADER,
@@ -102,7 +102,7 @@ impl Node {
         rand::rngs::OsRng.fill_bytes(&mut challenge);
         let answer = timeout(self.timeout, self.exchange(&method, path, &body, &challenge))
             .await
-            .map_err(|_| anyhow::anyhow!("no answer within {:?}", self.timeout))
+            .map_err(|_| anyhow!("no answer within {:?}", self.timeout))
             .and_then(|answer| answer)
             .map_err(|source| CallError::Failed { target: target.clone(), source })?;
         let header = |name: &str| answer.headers.get(name).and_then(|value| value.to_str().ok());
@@ -153,7 +153,7 @@ impl Node {
         let answer = async move {
             let response = sender.send_request(request).await?;
             let (parts, body) = response.into_parts();
-            let body = Limited::new(body, MAX_ANSWER_BYTES).collect().await.map_err(|e| anyhow::anyhow!(e))?;
+            let body = Limited::new(body, MAX_ANSWER_BYTES).collect().await.map_err(|e| anyhow!(e))?;
             anyhow::Ok(Answer { status: parts.status.as_u16(), headers: parts.headers, body: body.to_bytes() })
         };
         let (answer, _) = tokio::join!(answer, connection);

@@ -5,7 +5,7 @@
 use std::fmt;
 use std::path::Path;
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 use engine_core::eip712::{self, B256, Signature};
 use engine_core::types::AccountId;
 use k256::ecdsa::SigningKey;
@@ -70,7 +70,7 @@ impl AccountKey {
     /// Error cases:
     /// - `bytes` is not 32 bytes of a valid secp256k1 secret key
     fn from_secret(bytes: &[u8]) -> anyhow::Result<Self> {
-        let key = SigningKey::from_slice(bytes).map_err(|_| anyhow::anyhow!("not a valid secp256k1 secret key"))?;
+        let key = SigningKey::from_slice(bytes).map_err(|_| anyhow!("not a valid secp256k1 secret key"))?;
         let address = eip712::address(key.verifying_key());
         Ok(Self { key, address })
     }

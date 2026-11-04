@@ -3,7 +3,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use engine_core::eip712;
+use engine_core::command::OrderRequest;
+use engine_core::eip712::{self, order_hash, recover};
 use engine_core::types::AccountId;
 use k256::ecdsa::SigningKey;
 use serde_json::{Value, json};
@@ -78,15 +79,23 @@ pub async fn posted(stand_in: &StandIn, n: usize) -> (String, Value) {
     panic!("no POST {n}: {:?}", stand_in.with(|i| i.posts.clone()));
 }
 
-/// Appends prices of 100 at T0 and T0 + 1.001 s as seqs 11 and 12, which make the bot's index exact,
-/// and waits until the bot has warmed up from the marks history, so the node's time can move on.
+/// Appends prices of 100 at T0 and T0 + 1.001 s as seqs 11 and 12, which make the bot's index
+/// exact, and a tick 5 s later as seq 13, when it reads the marks history, whose minute 0 is 100;
+/// waits until it has, so the node's time can move on.
 pub async fn warm(stand_in: &StandIn) {
+    stand_in.with(|i| i.marks = vec![bucket(T0, "100")]);
     for (seq, ts) in [(11, T0), (12, T0 + 1_001)] {
         stand_in.append((seq, 0), command(seq, ts, prices(1, "100", ts), json!([])));
     }
+    stand_in.append((13, 0), command(13, T0 + 6_001, json!({ "type": "tick" }), json!([])));
     while stand_in.with(|i| i.marks_reads) == 0 {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// A log-derived one-minute bucket of marks starting at `ts` and closing at `close`.
+pub fn bucket(ts: i64, close: &str) -> Value {
+    json!({ "ts": ts, "open": close, "high": close, "low": close, "close": close, "provenance": "log_derived" })
 }
 
 /// The command that placed the posted order `body`, with its fill leaving `position`.
@@ -108,4 +117,28 @@ pub fn account_view(balance: &str, positions: Value, orders: Value) -> Value {
 pub fn resting_order(order_id: u64) -> Value {
     json!({ "order_id": order_id, "client_id": 1, "market": 1, "side": "buy", "qty": "1",
         "kind": { "kind": "limit", "price": "50" }, "reduce_only": false })
+}
+
+/// The `n`th POST, which must be an order.
+pub async fn order(stand_in: &StandIn, n: usize) -> Value {
+    let (path, body) = posted(stand_in, n).await;
+    assert_eq!(path, "/v1/orders", "{body}");
+    body
+}
+
+/// Checks a posted order's fields and that its signature is the account's over the engine's hash.
+pub fn check_order(body: &Value, client_id: i64, side: &str, qty: &str, quoted: &str, reduce_only: bool, nonce: u64) {
+    assert_eq!(body["client_id"], client_id, "{body}");
+    assert_eq!(
+        (body["market"].as_u64(), body["side"].as_str(), body["qty"].as_str()),
+        (Some(1), Some(side), Some(qty))
+    );
+    assert_eq!(body["kind"], json!({ "kind": "market", "quoted": quoted, "max_slippage_bps": 25 }));
+    assert_eq!(body["reduce_only"], reduce_only);
+    let order: OrderRequest = serde_json::from_value(body.clone()).unwrap();
+    let auth = order.auth.clone().unwrap();
+    assert_eq!(auth.nonce, nonce);
+    assert_eq!(auth.expires_at, T0 + 30_000, "the expiry counts from the node's signed time");
+    let hash = order_hash(&domain(), &order, auth.nonce, auth.expires_at);
+    assert_eq!(recover(&hash, &auth.signature), Some(account()));
 }

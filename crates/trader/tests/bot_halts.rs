@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    MINUTE, StandIn, T0, account, account_view, btc_usd, command, config, posted, prices, resting_order, run, warm,
+    MINUTE, StandIn, T0, account, account_view, btc_usd, bucket, command, config, posted, prices, resting_order, run,
+    warm,
 };
 use engine_core::command::{AdminCommand, Command};
 use engine_core::market::{MarketSpec, PriceRules};
@@ -28,6 +29,7 @@ async fn relistings_change_the_rules_or_halt() {
         i.markets = json!([btc_usd(Some("99"))]);
         i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({ "9": resting_order(9) })));
         i.head_seq = 10;
+        i.marks = vec![bucket(T0, "100")];
     });
     let dir = tempfile::tempdir().unwrap();
     let (_stop, stopped) = oneshot::channel::<()>();
@@ -41,30 +43,27 @@ async fn relistings_change_the_rules_or_halt() {
     stand_in.append((14, 0), command(14, T0 + MINUTE, prices(1, "101", T0 + MINUTE), json!([])));
     stand_in.append((15, 0), command(15, T0 + 2 * MINUTE, prices(1, "102", T0 + 2 * MINUTE), json!([])));
     stand_in.append((16, 0), relisting(16, T0 + 2 * MINUTE + 1, btc_spec(), true));
-    for (seq, minute, mid) in [(17, 3, "103"), (18, 4, "104")] {
-        stand_in.append((seq, 0), command(seq, T0 + minute * MINUTE, prices(1, mid, T0 + minute * MINUTE), json!([])));
-    }
-    // The first bars are minutes 2 and 3, after the rules are back: under the first rules, minutes
-    // 0 and 1 would have ordered at minute 2.
+    stand_in.append((17, 0), command(17, T0 + 3 * MINUTE, prices(1, "103", T0 + 3 * MINUTE), json!([])));
+    // Under four sources the mark stays at minute 0's 100 until the rules are back, so the bars are
+    // minutes 0 and 2, and the order goes out as minute 2's closes: under the first rules, minutes
+    // 0 and 1 would have ordered as minute 1's closed.
     let (path, first) = posted(&stand_in, 1).await;
-    assert_eq!((path.as_str(), &first["client_id"]), ("/v1/orders", &json!(T0 + 3 * MINUTE)), "{first}");
+    assert_eq!((path.as_str(), &first["client_id"]), ("/v1/orders", &json!(T0 + 2 * MINUTE)), "{first}");
 
     stand_in.with(|i| i.time_ms = (T0 + 10 * MINUTE) as u64);
     let weekly = MarketSpec { schedule: weekly(), ..btc_spec() };
-    stand_in.append((19, 0), relisting(19, T0 + 5 * MINUTE + 1, weekly.clone(), false));
-    stand_in.append((20, 0), relisting(20, T0 + 5 * MINUTE + 2, weekly, true));
+    stand_in.append((18, 0), relisting(18, T0 + 5 * MINUTE + 1, weekly.clone(), false));
+    stand_in.append((19, 0), relisting(19, T0 + 5 * MINUTE + 2, weekly, true));
     let err = tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap_err();
     assert!(err.to_string().contains("never closes"), "{err:#}");
+    // The halt leaves the account as it is: its resting order stays.
     let posts = stand_in.with(|i| i.posts.clone());
-    assert_eq!(
-        posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
-        ["/v1/orders", "/v1/orders/cancel-all"]
-    );
+    assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/orders"]);
 }
 
-/// A log message the pinned engine cannot read halts the bot, which still cancels resting orders.
+/// A log message the pinned engine cannot read halts the bot, which leaves its resting order.
 #[tokio::test]
-async fn an_unreadable_message_halts_after_the_stop() {
+async fn an_unreadable_message_halts_without_touching_the_account() {
     let stand_in = StandIn::start().await;
     stand_in.with(|i| {
         i.markets = json!([btc_usd(Some("99"))]);
@@ -77,7 +76,7 @@ async fn an_unreadable_message_halts_after_the_stop() {
     let err = run(config(&stand_in, dir.path(), "1m"), std::future::pending()).await.unwrap_err();
     assert!(format!("{err:#}").contains("the log message at 11:0"), "{err:#}");
     let posts = stand_in.with(|i| i.posts.clone());
-    assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/orders/cancel-all"]);
+    assert!(posts.is_empty(), "{posts:?}");
 }
 
 /// Once the node's answers are signed by another key mid-run, the bot halts at the next call and
@@ -168,8 +167,8 @@ async fn a_stop_waits_for_the_log_to_pass_the_last_order() {
     let stand_in = StandIn::start().await;
     let (bot, _dir) = order_then_stop(&stand_in).await;
     // The order expires at minute 2 and 50 s: a command at 40 s leaves the stop waiting.
-    stand_in.tick(T0 + 2 * MINUTE + 40_000);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let early = stand_in.tick(T0 + 2 * MINUTE + 40_000);
+    stand_in.applied(early).await;
     assert_eq!(stand_in.with(|i| i.posts.len()), 1, "nothing is sent while the order can enter the log");
     stand_in.tick(T0 + 2 * MINUTE + 51_000);
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
@@ -193,8 +192,8 @@ async fn a_stop_waits_for_orders_signed_before_the_start() {
     let dir = tempfile::tempdir().unwrap();
     let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {}));
     // Started at T0: an earlier process's order can enter the log until T0 + 30 s.
-    stand_in.tick(T0 + 20_000);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let early = stand_in.tick(T0 + 20_000);
+    stand_in.applied(early).await;
     assert!(stand_in.with(|i| i.posts.is_empty()), "nothing is sent while such an order can enter the log");
     stand_in.tick(T0 + 31_000);
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
@@ -245,7 +244,7 @@ async fn order_then_stop(stand_in: &Arc<StandIn>) -> (JoinHandle<anyhow::Result<
         i.time_ms = (T0 + 2 * MINUTE + 20_000) as u64;
         i.frame_time = Some((T0 + 2 * MINUTE) as u64);
     });
-    for (seq, ts, mid) in [(13, T0 + MINUTE, "101"), (14, T0 + 2 * MINUTE, "102")] {
+    for (seq, ts, mid) in [(14, T0 + MINUTE, "101"), (15, T0 + 2 * MINUTE, "102")] {
         stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
     }
     let (path, _) = posted(stand_in, 1).await;

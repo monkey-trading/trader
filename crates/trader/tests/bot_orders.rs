@@ -6,9 +6,9 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    MINUTE, StandIn, T0, account, account_view, btc_usd, command, config, own_fill, posted, prices, run, warm,
+    MINUTE, StandIn, T0, account, account_view, btc_usd, bucket, command, config, order, own_fill, prices, run, warm,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::sync::oneshot;
 
 /// A signed refusal of the order, such as a stale nonce, is logged, and the next bar orders again.
@@ -48,13 +48,13 @@ async fn an_unanswered_order_holds_the_next_until_it_expires() {
         i.time_ms = (T0 + 2 * MINUTE + 30_000) as u64;
         i.post_delay = Some(Duration::from_secs(3));
     });
-    for (seq, ts, mid) in [(13, T0 + MINUTE, "101"), (14, T0 + 2 * MINUTE, "102")] {
+    for (seq, ts, mid) in [(14, T0 + MINUTE, "101"), (15, T0 + 2 * MINUTE, "102")] {
         stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
     }
     assert_eq!(order(&stand_in, 1).await["client_id"], T0 + MINUTE);
     stand_in.with(|i| i.post_delay = None);
-    stand_in.append((15, 0), command(15, T0 + 3 * MINUTE, prices(1, "103", T0 + 3 * MINUTE), json!([])));
-    stand_in.append((16, 0), command(16, T0 + 4 * MINUTE, prices(1, "104", T0 + 4 * MINUTE), json!([])));
+    stand_in.append((16, 0), command(16, T0 + 3 * MINUTE, prices(1, "103", T0 + 3 * MINUTE), json!([])));
+    stand_in.append((17, 0), command(17, T0 + 4 * MINUTE, prices(1, "104", T0 + 4 * MINUTE), json!([])));
     assert_eq!(order(&stand_in, 2).await["client_id"], T0 + 3 * MINUTE);
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
@@ -98,7 +98,9 @@ async fn a_reversal_refused_whole_closes_first() {
 }
 
 /// A fill from an order this process did not sign is an earlier process's while that one's orders
-/// can still enter the log; after that, someone else trades the account, and the bot stops.
+/// can still enter the log; after that, someone else trades the account, and the bot stops, leaving
+/// the account as it is. An order is the bot's by its signature, not its nonce: another request on
+/// a nonce the bot also signed is not the bot's.
 #[tokio::test]
 async fn a_fill_from_another_signer_stops_the_bot() {
     let stand_in = StandIn::start().await;
@@ -110,11 +112,19 @@ async fn a_fill_from_another_signer_stops_the_bot() {
         json!({ "account": account(), "client_id": 7, "market": 1, "side": "buy", "qty": "1",
             "kind": { "kind": "market", "quoted": "100" }, "auth": auth })
     };
-    // Within the half minute after the start: an earlier process's order.
-    stand_in.append((11, 0), own_fill(11, T0 + 10_000, &theirs(40), "1"));
-    stand_in.append((12, 0), own_fill(12, T0 + MINUTE, &theirs(41), "2"));
+    // Within the half minute after the start: an earlier process's order, which leaves it flat.
+    stand_in.append((11, 0), command(11, T0, prices(1, "100", T0), json!([])));
+    stand_in.append((12, 0), own_fill(12, T0 + 500, &theirs(40), "0"));
+    for (seq, ts, mid) in [(13, T0 + 1_001, "100"), (14, T0 + MINUTE, "101"), (15, T0 + 2 * MINUTE, "102")] {
+        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
+    }
+    // The bot's own order, on nonce 0; then another order on nonce 0 fills.
+    let first = order(&stand_in, 1).await;
+    assert_eq!(first["auth"]["nonce"], 0);
+    stand_in.append((16, 0), own_fill(16, T0 + 2 * MINUTE + 1, &theirs(0), "1"));
     let err = tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap_err();
-    assert!(err.to_string().contains("a fill at seq 12 is from an order this process did not sign"), "{err:#}");
+    assert!(err.to_string().contains("a fill at seq 16 is from an order this process did not sign"), "{err:#}");
+    assert_eq!(stand_in.with(|i| i.posts.len()), 1, "a halt leaves the account as it is");
 }
 
 // ── Helpers ──
@@ -125,6 +135,7 @@ fn flat_account(stand_in: &StandIn) {
         i.markets = json!([btc_usd(Some("99"))]);
         i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
         i.head_seq = 10;
+        i.marks = vec![bucket(T0, "100")];
     });
 }
 
@@ -136,11 +147,4 @@ fn rising(stand_in: &StandIn, seq: u64, mids: &[&str]) {
         let seq = seq + n as u64;
         stand_in.append((seq, 0), command(seq, *ts, prices(1, mid, *ts), json!([])));
     }
-}
-
-/// The `n`th POST, which must be an order.
-async fn order(stand_in: &StandIn, n: usize) -> Value {
-    let (path, body) = posted(stand_in, n).await;
-    assert_eq!(path, "/v1/orders", "{body}");
-    body
 }

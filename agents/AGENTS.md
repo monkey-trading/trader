@@ -39,14 +39,16 @@ list.
   REST calls over TLS pinned to the node's key hash (or publicly rooted), each under a fresh
   challenge and verified with `engine_wire::verify_received`; `stream/` reads the public log over
   one `signed=1` connection, verifying each frame with `FrameVerifier`, refusing gaps and resuming
-  after the last message. `bot/` reads the market and the account at startup; once its index is
-  exact it warms up from the node's log-derived marks history (`startup.rs`); it follows the log
+  after the last message. `bot/` reads the market and the account at startup; five seconds of log
+  after its index is exact it warms up from the node's log-derived marks history (`startup.rs`); it
+  follows the log
   into bars (built from moves of the mark, as that history is) and decisions, and signs market
   orders on the next nonce (`orders.rs`), none for a bar behind the node's time or before the log
   has passed every order that could still enter it; it stops on a fill from an order it did not
   sign (`fills.rs`), and on SIGINT or SIGTERM, once the log has passed those orders, cancels resting
   orders and optionally closes the position, exiting non-zero when it leaves either behind or
-  cannot confirm it did not (`stop.rs`). An answer or frame signed by another key stops the bot.
+  cannot confirm it did not (`stop.rs`). A halt (an answer or frame signed by another key, a log
+  it cannot follow, someone else's fill) stops the bot and leaves the account as it is.
   `tests/` runs it against a local stand-in node (`tests/common/`) that signs its answers and
   frames and injects faults. Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, which the config tests load.

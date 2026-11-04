@@ -40,7 +40,7 @@ let mut strategy = SmaCrossover::new(5, 20)?;
 if let Some(bar) = bars.on_command(ts, Some(mark))
     && let Some(target) = strategy.on_close(bar.close)
 {
-    let order = order_for(target, size, position);
+    let order = order_for(target, size, position, false);
 }
 ```
 

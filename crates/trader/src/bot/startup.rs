@@ -23,10 +23,16 @@ use crate::stream::Stream;
 
 /// The marks history's resolutions, widest first, with their bucket widths.
 const RESOLUTIONS: [(&str, Millis); 3] = [("1d", 86_400_000), ("1h", 3_600_000), ("1m", 60_000)];
-/// How many signed nonces the bot remembers to tell its fills apart: more than can be in flight.
-pub(super) const SIGNED_NONCES: usize = 64;
+/// How many signed orders the bot remembers to tell its fills apart: more than can be in flight.
+pub(super) const SIGNED_ORDERS: usize = 64;
 /// How long after a failed warm-up, in sequenced time, the bot tries again.
 const WARM_UP_RETRY_MS: Millis = 5_000;
+/// How long after its index is exact the bot reads the marks history: past the node's own lag in
+/// writing marks to it, so the history holds every move before the index was exact.
+const HISTORY_LAG_MS: Millis = 5_000;
+/// The most moves kept between the index being exact and the warm-up; a mark moves at most once
+/// per command, and `HISTORY_LAG_MS` holds far fewer commands.
+const PENDING_MOVES: usize = 4096;
 /// The provenance of a marks bucket the log itself derived, the only kind the bot warms up from.
 const LOG_DERIVED: &str = "log_derived";
 
@@ -45,7 +51,7 @@ pub fn stop_signal() -> anyhow::Result<impl Future<Output = ()>> {
 }
 
 /// The bot for `cfg`'s account, with its position and balance, and the log from the seq after the
-/// market read.
+/// head before the reads.
 /// Error cases:
 /// - the node cannot be reached, or an answer does not verify, or is refused
 /// - the market is not listed, or is one the bot does not trade
@@ -58,8 +64,12 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
     let strategy_cfg = &cfg.strategy;
     let account = key.address();
 
+    // The log head as it stood before the reads below: their views hold at least that much of the
+    // log, so the stream, which starts after it, misses nothing they do not show. What it repeats
+    // applies again to the same effect: a fill's position is absolute, and a listing's rules are
+    // the same rules.
+    let head_seq = node.nonce(account).await?.head_seq;
     let markets = node.markets().await?;
-    let head_seq = markets.head_seq;
     let market = markets
         .body
         .into_iter()
@@ -96,10 +106,13 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         warm_up_after: Millis::MIN,
         strategy: SmaCrossover::new(strategy_cfg.fast, strategy_cfg.slow)?,
         close_first: false,
-        signed_nonces: VecDeque::with_capacity(SIGNED_NONCES),
+        signed_orders: VecDeque::with_capacity(SIGNED_ORDERS),
         position,
         balance: view.balance,
         mark: market.mark,
+        exact_mark: None,
+        exact_from: None,
+        pending_moves: Vec::new(),
         order_expires_at: None,
         // An order an earlier process signed before this start expires by now plus its window.
         trading_from: now.saturating_add(orders::EXPIRES_IN_MS),
@@ -110,21 +123,33 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
 }
 
 impl Bot {
-    /// Once the index the bot derives is exact at `ts`, warms the strategy up from the node's marks
-    /// history through `node_time` and starts the bars from it: bars before the current one from
-    /// the history, and the current one from the history's buckets in its window. Reading the
-    /// history only then means no move the bot's index missed is in a bar. Only buckets the log
-    /// derived count; a bucket seeded from a venue's candles is not the engine's index. Returns
-    /// whether the bars have started; a failed read is tried again `WARM_UP_RETRY_MS` later.
+    /// Before the bars start: from the first command at which the bot's index is exact, keeps its
+    /// moves, and `HISTORY_LAG_MS` later warms the strategy up from the node's marks history,
+    /// through `node_time`. Bars before the one the index became exact in come from the history;
+    /// that one starts from the history's bucket in its window, which holds the moves before the
+    /// index was exact, and the kept moves follow, which may close it and place an order. Only
+    /// buckets the log derived count; a bucket seeded from a venue's candles is not the engine's
+    /// index. A failed read is tried again `WARM_UP_RETRY_MS` later.
     /// Error cases:
     /// - an answer signed by another key than the signer
-    pub(super) async fn warm_up(&mut self, ts: Millis, node_time: Millis) -> Result<bool, Halt> {
-        if !self.marks.is_complete(ts) || ts < self.warm_up_after {
-            return Ok(false);
+    pub(super) async fn warm_up(&mut self, ts: Millis, moved: Option<Fixed>, node_time: Millis) -> Result<(), Halt> {
+        if !self.marks.is_complete(ts) {
+            return Ok(());
+        }
+        let exact_from = *self.exact_from.get_or_insert(ts);
+        if let Some(mark) = moved {
+            if self.pending_moves.len() == PENDING_MOVES {
+                warn!("too many moves before the warm-up; starting it again");
+                self.pending_moves.clear();
+                self.exact_from = Some(ts);
+            }
+            self.pending_moves.push((ts, mark));
+        }
+        if ts < exact_from.saturating_add(HISTORY_LAG_MS) || ts < self.warm_up_after {
+            return Ok(());
         }
         let bar_ms = self.bar_ms;
-        // Bars that end by `live_from` come from the history.
-        let live_from = BarBuilder::new(bar_ms, Millis::MIN).window_start(node_time.max(ts));
+        let live_from = BarBuilder::new(bar_ms, Millis::MIN).window_start(exact_from);
         let history_from = live_from - bar_ms * self.history_bars;
         // The widest buckets that tile a bar, which the node keeps longest; every bar is whole minutes.
         let (resolution, _) =
@@ -135,27 +160,39 @@ impl Bot {
             Err(e) => {
                 warn!("the marks history was not read; trying again: {e}");
                 self.warm_up_after = ts.saturating_add(WARM_UP_RETRY_MS);
-                return Ok(false);
+                return Ok(());
             }
         };
         let (logged, seeded): (Vec<&MarkBucket>, Vec<&MarkBucket>) =
             buckets.iter().partition(|bucket| bucket.provenance == LOG_DERIVED);
-        let (past, current): (Vec<&MarkBucket>, Vec<&MarkBucket>) =
-            logged.into_iter().partition(|bucket| bucket.ts < live_from);
         let mut history = BarBuilder::new(bar_ms, Millis::MIN);
         let mut bars = 0;
-        let closes = past.iter().map(|bucket| (bucket.ts, Some(bucket.close))).chain([(live_from, None)]);
-        for (at, close) in closes {
+        let past = logged.iter().filter(|bucket| bucket.ts < live_from).map(|bucket| (bucket.ts, Some(bucket.close)));
+        for (at, close) in past.chain([(live_from, None)]) {
             if let Some(bar) = history.on_command(at, close) {
                 self.strategy.on_close(bar.close);
                 bars += 1;
             }
         }
-        let mut live = BarBuilder::new(bar_ms, live_from);
-        current.iter().for_each(|bucket| _ = live.on_command(bucket.ts, Some(bucket.close)));
-        self.bars = Some(live);
         let (fast, slow) = self.strategy.averages();
         info!(bars, seeded = seeded.len(), resolution, live_from, ?fast, ?slow, "warmed up from the marks history");
-        Ok(true)
+        // With no exact value yet, moves start from the node's last mark in the history.
+        if self.exact_mark.is_none() {
+            self.exact_mark = logged.last().map(|bucket| bucket.close);
+        }
+        let mut live = BarBuilder::new(bar_ms, live_from);
+        for bucket in logged.iter().filter(|bucket| bucket.ts < live_from + bar_ms) {
+            live.on_command(bucket.ts, Some(bucket.close));
+        }
+        for (at, mark) in std::mem::take(&mut self.pending_moves) {
+            if let Some(bar) = live.on_command(at, Some(mark)) {
+                self.on_bar(bar, at, node_time.saturating_sub(at)).await?;
+            }
+        }
+        if let Some(bar) = live.on_command(ts, None) {
+            self.on_bar(bar, ts, node_time.saturating_sub(ts)).await?;
+        }
+        self.bars = Some(live);
+        Ok(())
     }
 }

@@ -10,7 +10,7 @@ use tracing::{Instrument, info, info_span, warn};
 use trader_core::bars::Bar;
 use trader_core::strategy::OrderIntent;
 
-use crate::bot::startup::SIGNED_NONCES;
+use crate::bot::startup::SIGNED_ORDERS;
 use crate::bot::{Bot, Halt, REPLAY_LAG_MS};
 use crate::node::CallError;
 use crate::node::api::AccountView;
@@ -53,13 +53,14 @@ impl Bot {
                 auth: None,
             };
             let hash = order_hash(&self.domain, &request, nonce, expires_at);
-            request.auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
+            let signature = self.key.sign(&hash);
+            request.auth = Some(RequestAuth { nonce, expires_at, signature });
             // Signed, the order can enter the log until it expires, whatever its answer says.
             self.order_expires_at = Some(expires_at);
-            if self.signed_nonces.len() == SIGNED_NONCES {
-                self.signed_nonces.pop_front();
+            if self.signed_orders.len() == SIGNED_ORDERS {
+                self.signed_orders.pop_front();
             }
-            self.signed_nonces.push_back(nonce);
+            self.signed_orders.push_back(signature);
             self.close_first = false;
             info!(side = ?intent.side, qty = %intent.qty, %quoted, reduce_only = intent.reduce_only, nonce, expires_at, "placing a market order");
             match self.node.place_order(&request).await {
