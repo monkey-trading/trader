@@ -1,0 +1,5 @@
+# Agent process artifacts: code-review runs, plans, dev runs, fix notes (do not commit)
+agents/.processes/
+
+# Claude Code local project dir
+.claude/
