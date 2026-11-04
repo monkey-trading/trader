@@ -1,0 +1,51 @@
+/** Tests of the session store. */
+import type { Api, Outcome } from "./client";
+import { SessionStore } from "./session-store";
+
+const ok: Outcome<null> = { status: "ok", value: null };
+
+function storeWith(api: Partial<Api>) {
+  return new SessionStore(api as Api);
+}
+
+describe("SessionStore", () => {
+  it("starts unknown, then follows the bot's answer to the cookie check", async () => {
+    const store = storeWith({ session: () => Promise.resolve(ok) });
+    expect(store.getSnapshot()).toBe("checking");
+    await store.check();
+    expect(store.getSnapshot()).toBe("authenticated");
+    const anonymous = storeWith({ session: () => Promise.resolve({ status: "unauthenticated" }) });
+    await anonymous.check();
+    expect(anonymous.getSnapshot()).toBe("anonymous");
+  });
+
+  it("signs in on success and says why on a refusal, staying signed out", async () => {
+    const outcomes: Outcome<null>[] = [
+      { status: "unauthenticated" },
+      { status: "refused", message: "Too many login attempts.", retryAfterSeconds: 30 },
+      ok,
+    ];
+    const store = storeWith({ login: () => Promise.resolve(outcomes.shift() ?? ok) });
+    expect(await store.login("a")).toEqual({ status: "refused", message: "The password was not accepted." });
+    expect(await store.login("a")).toEqual({
+      status: "refused", message: "Too many login attempts. Try again in 30 seconds.",
+    });
+    expect(store.getSnapshot()).toBe("checking");
+    expect(await store.login("a")).toEqual({ status: "signed-in" });
+    expect(store.getSnapshot()).toBe("authenticated");
+  });
+
+  it("signs out here even when the bot cannot be reached, and tells subscribers once", async () => {
+    const store = storeWith({
+      login: () => Promise.resolve(ok),
+      logout: () => Promise.resolve({ status: "unavailable", message: "down" }),
+    });
+    await store.login("a");
+    let heard = 0;
+    store.subscribe(() => { heard += 1; });
+    await store.logout();
+    store.expire();
+    expect(store.getSnapshot()).toBe("anonymous");
+    expect(heard).toBe(1);
+  });
+});

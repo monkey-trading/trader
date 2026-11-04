@@ -22,4 +22,9 @@ export default defineConfig(
   },
   // Config files are plain JavaScript outside the TypeScript project.
   { files: ["**/*.mjs"], extends: [tseslint.configs.disableTypeChecked] },
+  // The stub server and the browser test run in Node 24, which has these as globals.
+  {
+    files: ["stub/**/*.mjs", "browser-test/**/*.mjs"],
+    languageOptions: { globals: { URL: "readonly", fetch: "readonly", setInterval: "readonly", setTimeout: "readonly", document: "readonly", window: "readonly" } },
+  },
 );

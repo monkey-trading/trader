@@ -6,7 +6,26 @@
   --color-*: initial;
   --color-ink: #111827;
   --color-paper: #f9fafb;
+  --color-surface: #ffffff;
   --color-muted: #4b5563;
+  --color-line: #9ca3af;
+  --color-accent: #1d4ed8;
+  --color-gain: #166534;
+  --color-loss: #b91c1c;
+}
+
+/* The dark theme follows the system setting and redefines the same tokens. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-ink: #f3f4f6;
+    --color-paper: #0b1120;
+    --color-surface: #111827;
+    --color-muted: #9ca3af;
+    --color-line: #6b7280;
+    --color-accent: #93c5fd;
+    --color-gain: #4ade80;
+    --color-loss: #f87171;
+  }
 }
 
 body {
