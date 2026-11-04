@@ -21,7 +21,8 @@ permissions:
   contents: read
 
 jobs:
-  # Sorts a PR's changed files into areas; every other job runs only when its area is true. A push,
+  # Sorts a PR's changed files into areas (scripts/ci-areas.sh); every other job runs only when its
+  # area is true. A push,
   # a merge group, a manual run, a failed diff, a workflow change, and any path not listed set every
   # area true, so only the listed paths can skip a job. Each path lists the area of every job that
   # reads it.
@@ -38,6 +39,7 @@ jobs:
       agent_docs: ${{ steps.classify.outputs.agent_docs }}
       agent_scripts: ${{ steps.classify.outputs.agent_scripts }}
       merge_approval: ${{ steps.classify.outputs.merge_approval }}
+      ci_scripts: ${{ steps.classify.outputs.ci_scripts }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -53,7 +55,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          all="rust console agent_docs agent_scripts merge_approval"
+          all=$(./scripts/ci-areas.sh --all)
           areas=$all
           cache=false
           # The queue lands the commit its merge group tested, so a push to main whose commit passed a
@@ -69,27 +71,7 @@ jobs:
           # --no-renames lists both sides of a move.
           if [[ "$EVENT" == pull_request ]] && files=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
             echo "$files"
-            areas=
-            while IFS= read -r file; do
-              case "$file" in
-                # The review-delta helper and its test.
-                # Markdown links to them are checked too.
-                agents/skills/agent-code-review/scripts/*) areas+=" agent_scripts agent_docs" ;;
-                # The merge queue's approval gate and its test.
-                scripts/check-merge-approved.sh | scripts/check-merge-approved-test.sh) areas+=" merge_approval" ;;
-                # The link checker, its test, the Markdown it reads, and the LICENSE the README links.
-                agents/* | AGENTS.md | CLAUDE.md | README.md | SECURITY.md | LICENSE \
-                  | scripts/check-agent-links.sh | scripts/check-agent-links-test.sh)
-                  areas+=" agent_docs" ;;
-                # Read by no build, test, or script.
-                crates/*/README.md) ;;
-                crates/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | deny.toml \
-                  | scripts/check-file-loc.sh)
-                  areas+=" rust" ;;
-                console/*) areas+=" console" ;;
-                *) areas=$all ;;
-              esac
-            done <<< "$files"
+            areas=$(./scripts/ci-areas.sh <<< "$files")
           fi
           for area in $all; do
             [[ " $areas " == *" $area "* ]] && value=true || value=false
@@ -239,6 +221,18 @@ jobs:
           persist-credentials: false
       - name: Test the merge queue's approval gate
         run: ./scripts/check-merge-approved-test.sh
+
+  ci-scripts:
+    needs: changes
+    if: needs.changes.outputs.ci_scripts == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the path classifier and the ci-passed predicate
+        run: ./scripts/ci-test.sh
 
   # Each job above but `changes` has a `cancel-` companion that runs only on a pull request or a
   # merge group, and only when that job itself fails (`failure()` alone is also true for a failed
@@ -403,22 +397,37 @@ jobs:
           gh run cancel ${{ github.run_id }} \
             || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
 
+  cancel-ci-scripts:
+    needs: ci-scripts
+    if: failure() && needs.ci-scripts.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
   # The single check to require in branch rules. It runs even when a job it needs fails, is
   # cancelled, or is skipped, and passes only if every one of them succeeded or was skipped while
-  # `changes` set its area false. Add every new job to `needs`, and a gated one to `$area` below.
+  # `changes` set its area false. Add every new job to `needs`, and a gated one to the area map in
+  # scripts/check-ci-passed.sh.
   ci-passed:
     if: always()
-    needs: [changes, fmt, file-loc, clippy, test, cargo-deny, console, agent-links, review-delta, merge-approval]
+    needs: [changes, fmt, file-loc, clippy, test, cargo-deny, console, agent-links, review-delta, merge-approval, ci-scripts]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Require every job to succeed, or to skip because its area did not change
         env:
           NEEDS: ${{ toJSON(needs) }}
-        run: |
-          echo "$NEEDS"
-          echo "$NEEDS" | jq -e '
-            .changes.outputs as $run
-            | {fmt: "rust", "file-loc": "rust", clippy: "rust", test: "rust", "cargo-deny": "rust", console: "console", "agent-links": "agent_docs", "review-delta": "agent_scripts", "merge-approval": "merge_approval"} as $area
-            | all(to_entries[]; .value.result == "success"
-                or .value.result == "skipped" and $run[$area[.key] // ""] == "false")'
+        run: ./scripts/check-ci-passed.sh

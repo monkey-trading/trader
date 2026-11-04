@@ -9,9 +9,9 @@ workspace with `trader-core` (indicators, strategies, sizing and risk limits, wi
 `trader` (the binary: the node's API and stream, signing, keys, chain calls, and the console
 server), and `console/`, a Vite, React and TypeScript app built to static files that the binary
 will embed. The engine's own crates (`engine-core`, `engine-wire`, and later `engine-verify`) will
-be Cargo git dependencies pinned by one `rev`. This file is an index: load only the rule whose hint
-matches the current action. Links in this file are relative to `agents/`; commands run from the repository
-root.
+be Cargo git dependencies pinned by one `rev`. This file is an index: load only the rule whose
+hint matches the current action. Links in this file are relative to `agents/`; commands run from
+the repository root.
 
 ## Structure
 
@@ -32,7 +32,8 @@ list.
 - **crates/trader/** — `trader`, the binary (`main.rs` over `lib.rs`): for now its command line,
   which answers `--version`. Its `README.md` lists every file.
 - **console/** — the Vite, React and TypeScript app (`src/` with `main.tsx`, `App.tsx`,
-  `styles.css`, and its tests; `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`,
+  `styles.css`, and its tests; `index.html`, the page that mounts `src/main.tsx`;
+  `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`,
   `tsconfig.json`; Node.js from `.nvmrc`, exact versions pinned by `.npmrc` and
   `package-lock.json`). `npm run build` writes the gitignored `dist/`.
 - **Cargo.toml** — workspace manifest, shared dependencies, and the Cargo profiles (release keeps
@@ -46,16 +47,17 @@ list.
   2.0.
 - **.github/workflows/** — `ci.yaml`: fmt, the file line cap, clippy, tests, `cargo-deny`, the
   console's audit, lint, type check, tests and build, the agent docs' links, the review-delta
-  helper's test, and the merge approval gate's test, on every push to `main`, every PR, and every
+  helper's test, the merge approval gate's test, and the CI scripts' test, on every push to `main`, every PR, and every
   merge group of the merge queue. On a PR, the first job, `changes`, sorts the changed files into
-  the Rust, console, agent-docs, agent-script and merge-approval areas from an explicit path list,
-  and each job runs only when its area changed; a push to `main`, a merge group, a manual run, a
+  the Rust, console, agent-docs, agent-script, merge-approval and CI-script areas with
+  `scripts/ci-areas.sh` (an explicit path list), and each job runs only when its area changed; a push to `main`, a merge group, a manual run, a
   workflow change, a failed diff, or any path the list does not name runs every job. A push to
   `main` whose commit passed a merge group runs no area, only compiling in the jobs that save a
   Rust cache. Actions are pinned by commit SHA, and the Rust toolchain comes from
-  `rust-toolchain.toml`. `ci-passed` is the one CI check branch rules require: it passes only when
-  every other job succeeded or was skipped because its area did not change, so each new job must be
-  added to its `needs` and its area map, and every path it reads to `changes`. Each job but
+  `rust-toolchain.toml`. `ci-passed` is the one CI check branch rules require: its predicate,
+  `scripts/check-ci-passed.sh`, passes only when every other job succeeded or was skipped because
+  its area did not change, so each new job must be added to its `needs` and its area map, and every
+  path it reads to `ci-areas.sh`. Each job but
   `changes` and `ci-passed` has a `cancel-<job>` companion that runs only on a PR or a merge group,
   and only if that job fails; it cancels the run, so the first failed job stops the rest. A new job
   gets a companion. `gh run rerun --failed` re-runs the failed, cancelled, and unstarted jobs with
@@ -66,7 +68,10 @@ list.
   account. It never runs on a pull request, where the owner's commit status is the check.
 - **scripts/** — `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
-  running it against a stubbed GitHub API; `check-agent-links.sh`: every relative Markdown link
+  running it against a stubbed GitHub API; `ci-areas.sh`, the path classifier, and
+  `check-ci-passed.sh`, the `ci-passed` predicate, with `ci-test.sh` testing both and checking
+  that every job in `ci.yaml` is in the predicate's `needs`, area map and cancel companions;
+  `check-agent-links.sh`: every relative Markdown link
   under `agents/` and in the root `*.md` files, percent-decoding link paths and fragments before
   resolving them, resolves to a file inside the repository and, with a `#fragment`, to a heading
   in it, and the root `AGENTS.md` and `CLAUDE.md` are symlinks to `agents/AGENTS.md`;
@@ -88,6 +93,7 @@ Run from the repo root:
 - Console, from `console/` (Node.js from `.nvmrc`): `npm ci`, then `npm run lint`,
   `npm run typecheck`, `npm test`, `npm run build`; `npm audit --audit-level=high`; `npm run dev`
   serves it on loopback
+- CI scripts test: `./scripts/ci-test.sh` (needs `jq` and `yq`)
 - Merge approval gate tests: `scripts/check-merge-approved-test.sh` (stubs the GitHub API; needs
   only `jq`)
 - Agent docs links: `./scripts/check-agent-links.sh` (needs `python3`); its test: `./scripts/check-agent-links-test.sh`
@@ -116,10 +122,11 @@ Run from the repo root:
   [git-workflow](rules/git-workflow.md#local-checks-before-push) come first.
 - **No git submodules, ever.** Code from another repository comes through Cargo, npm, or a
   script-managed gitignored cache, never a submodule.
-- **The engine is pinned once.** `engine-core`, `engine-wire`, and `engine-verify` are Cargo git
-  dependencies on `https://github.com/monkey-trading/engine` with one shared `rev`; `Cargo.lock`
-  records the commit, so the bot signs exactly what the node checks. That `rev` is the only pin of
-  the engine, and the dev stack builds its node from the same commit
+- **The engine is pinned once.** From the first feature that uses them, `engine-core`,
+  `engine-wire`, and `engine-verify` are Cargo git dependencies on
+  `https://github.com/monkey-trading/engine` with one shared `rev`; `Cargo.lock` records the
+  commit, so the bot signs exactly what the node checks. That `rev` is the only pin of the engine,
+  and the dev stack builds its node from the same commit
   ([rust-implementation](skills/rust-implementation/SKILL.md#the-engine-crates)).
 - **`trader-core` does no IO.** No clocks, randomness, files, environment, or network: time and
   prices arrive as arguments, so strategies are tested and benchmarked without a network.

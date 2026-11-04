@@ -15,7 +15,7 @@ IO, so it is tested and benchmarked without a network.
 
 ## Usage
 
-A library crate, used by `trader`.
+A library crate, to be used by `trader`.
 
 ## Testing
 

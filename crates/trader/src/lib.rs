@@ -28,7 +28,7 @@ mod tests {
     /// `--version` reports the crate's version and exits with a display-version error.
     #[test]
     fn version_flag_reports_the_package_version() {
-        let err = Cli::try_parse_from(["trader", "--version"]).unwrap_err();
+        let err = Cli::try_parse_from(["trader", "--version"]).expect_err("--version exits through clap");
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
         assert_eq!(err.to_string(), format!("trader {}\n", env!("CARGO_PKG_VERSION")));
     }
@@ -36,7 +36,7 @@ mod tests {
     /// An unknown argument is refused, never ignored.
     #[test]
     fn unknown_argument_is_refused() {
-        let err = Cli::try_parse_from(["trader", "--bogus"]).unwrap_err();
+        let err = Cli::try_parse_from(["trader", "--bogus"]).expect_err("an unknown flag is refused");
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 }

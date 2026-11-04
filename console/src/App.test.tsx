@@ -8,7 +8,9 @@ describe("App", () => {
     render(<App />);
 
     expect(screen.getByRole("link", { name: "Skip to content" })).toHaveAttribute("href", "#main");
+    // The skip link moves focus to main, which must therefore be focusable.
     expect(screen.getByRole("main")).toHaveAttribute("id", "main");
+    expect(screen.getByRole("main")).toHaveAttribute("tabindex", "-1");
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Console");
   });

@@ -1,7 +1,7 @@
 # Security policy
 
-trader holds keys and signs orders for funded accounts, so a vulnerability in it can cost its
-operator money. We ask that you report one privately and give us time to fix it before it becomes
+trader is built to hold keys and sign orders for funded accounts, so a vulnerability in it can cost
+its operator money. We ask that you report one privately and give us time to fix it before it becomes
 public. This policy explains how to reach us, what you can expect in return, and what it covers.
 
 ## Reporting a vulnerability
@@ -49,8 +49,8 @@ ask us before you do it.
 ## Scope
 
 The policy covers the code in this repository and what is built from it: `trader-core`, the
-strategy logic; `trader`, the binary that talks to a monkeytrading node, signs for its keys, and
-serves the console; and the console in `console/`, a web app the binary embeds. The CI workflows
+strategy logic; `trader`, the binary, which is being built to talk to a monkeytrading node, sign for its
+keys, and serve the console; and the console in `console/`, a web app the binary will embed. The CI workflows
 and scripts in the repository are in scope too, as they guard what merges.
 
 The findings that matter most let someone obtain or use a key the bot holds, make the bot sign an
