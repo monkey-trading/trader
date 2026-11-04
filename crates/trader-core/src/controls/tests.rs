@@ -311,6 +311,12 @@ fn a_minimum_order_notional() {
         controls.decide(&account("5000", &held), &bar(&market, "100", Target::Flat)),
         order(Side::Sell, "1", true)
     );
+    // An order of exactly the minimum is allowed.
+    market.min_order_notional = fx("1000");
+    assert_eq!(
+        controls.decide(&account("5000", &[]), &bar(&market, "100", Target::Long)),
+        order(Side::Buy, "10", false)
+    );
 }
 
 /// A holding in a market quoted outside USD cannot be valued, so no order is placed.

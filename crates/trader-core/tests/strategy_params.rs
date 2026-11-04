@@ -146,3 +146,57 @@ fn warm_up_bars() {
     assert_eq!(bars("kind = 'donchian_breakout'"), 21);
     assert_eq!(bars("kind = 'ema_crossover'\nfast = 5\nslow = 9000"), 10_000);
 }
+
+/// A close equal to a channel edge is not a breakout: 1, 2, 3 then 3 is flat, and so is 3, 2, 1 then 1.
+/// A long also stays while a close only equals the exit channel's lowest: 1, 2, 3, 4 is long, and 4 again
+/// does not leave it.
+#[test]
+fn donchian_edges_are_not_breakouts_and_exits_need_a_close_beyond() {
+    let run = |closes: &[&str]| {
+        let mut strategy = build("kind = 'donchian_breakout'\nentry = 3\nexit = 1").unwrap();
+        closes.iter().map(|c| strategy.on_close(fx(c))).last().unwrap()
+    };
+    assert_eq!(run(&["1", "2", "3", "3"]), Some(Target::Flat));
+    assert_eq!(run(&["3", "2", "1", "1"]), Some(Target::Flat));
+    assert_eq!(run(&["1", "2", "3", "4"]), Some(Target::Long));
+    assert_eq!(run(&["1", "2", "3", "4", "4"]), Some(Target::Long));
+    assert_eq!(run(&["3", "2", "1", "0.5", "0.5"]), Some(Target::Short));
+}
+
+/// The levels are inclusive: an index of exactly 50 enters long at an oversold level of 50, and short at an
+/// overbought level of 50.
+#[test]
+fn rsi_levels_are_inclusive() {
+    let run = |levels: &str| {
+        let mut strategy = build(&format!("kind = 'rsi_reversion'\nperiod = 2\n{levels}")).unwrap();
+        ["10", "9", "10"].into_iter().map(|c| strategy.on_close(fx(c))).last().unwrap()
+    };
+    assert_eq!(run("oversold = 50\nexit = 50\noverbought = 60"), Some(Target::Long));
+    assert_eq!(run("oversold = 40\nexit = 50\noverbought = 50"), Some(Target::Short));
+    assert_eq!(run("oversold = 49\nexit = 50\noverbought = 51"), Some(Target::Flat));
+}
+
+/// A close on a band is not outside it: 2, 4, 4, 4, 5, 5, 7, 9 has bands 1 and 9 at two deviations, and its last close
+/// is 9; 8, 6, 6, 6, 5, 5, 3, 1 has the same bands and ends on 1. Both stay flat.
+#[test]
+fn bollinger_bands_are_strict() {
+    let run = |closes: &[&str]| {
+        let mut strategy = build("kind = 'bollinger_reversion'\nperiod = 8\nwidth = 2").unwrap();
+        closes.iter().map(|c| strategy.on_close(fx(c))).last().unwrap()
+    };
+    assert_eq!(run(&["2", "4", "4", "4", "5", "5", "7", "9"]), Some(Target::Flat));
+    assert_eq!(run(&["8", "6", "6", "6", "5", "5", "3", "1"]), Some(Target::Flat));
+}
+
+/// A long leaves at the middle band exactly: closes 1, 2, 3, 1, 2 over three with one deviation are short
+/// (3 is above 2.8165), long (1 is below 1.1835), and then flat, as 2 is the mean of 3, 1, 2.
+#[test]
+fn bollinger_leaves_a_position_at_the_middle() {
+    let mut strategy = build("kind = 'bollinger_reversion'\nperiod = 3\nwidth = 1").unwrap();
+    let seen: Vec<_> = ["1", "2", "3", "1", "2"].into_iter().map(|c| strategy.on_close(fx(c))).collect();
+    use Target::*;
+    assert_eq!(seen, [None, None, Some(Short), Some(Long), Some(Flat)]);
+    let mut mirrored = build("kind = 'bollinger_reversion'\nperiod = 3\nwidth = 1").unwrap();
+    let seen: Vec<_> = ["3", "2", "1", "3", "2"].into_iter().map(|c| mirrored.on_close(fx(c))).collect();
+    assert_eq!(seen, [None, None, Some(Long), Some(Short), Some(Flat)]);
+}
