@@ -71,7 +71,7 @@ list.
   private reporting address, response times, disclosure, safe harbour, scope), and Apache License
   2.0.
 - **.github/workflows/** — `ci.yaml`: fmt, the file line cap, clippy, tests, `cargo-deny`, the dev
-  scenario (`dev-trade-one`, which caches the engine's built binaries by the pinned commit), the
+  scenarios (`dev-trade-one` and `dev-strategies`, which cache the engine's built binaries by the pinned commit), the
   console's audit, lint, type check, tests and build, the agent docs' links, the review-delta
   helper's test, the merge approval gate's test, and the CI scripts' test, on every push to `main`, every PR, and every
   merge group of the merge queue. On a PR, the first job, `changes`, sorts the changed files into

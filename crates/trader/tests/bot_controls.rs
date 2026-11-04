@@ -16,8 +16,14 @@ use tokio::sync::oneshot;
 const DAY: i64 = 24 * 60 * MINUTE;
 
 /// A prices command at `ts`.
-fn price_at(stand_in: &StandIn, seq: u64, ts: i64, mid: &str) {
+fn price_at(stand_in: &StandIn, ts: i64, mid: &str) {
+    let seq = next_seq(stand_in);
     stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
+}
+
+/// The seq after the log's last message, or the head.
+fn next_seq(stand_in: &StandIn) -> u64 {
+    stand_in.with(|i| i.log.last().map_or(i.head_seq, |((seq, _), _)| *seq) + 1)
 }
 
 /// The log's entry for the close-all request `body` the bot posted, which closed the position at `ts`.
@@ -73,7 +79,7 @@ async fn the_daily_loss_limit_flattens_and_holds_across_a_restart() {
     warm(&stand_in).await;
 
     // The mark falls to 94: equity 995 against the day's opening 1,000 is a loss of 5, the limit.
-    price_at(&stand_in, 13, T0 + MINUTE, "94");
+    price_at(&stand_in, T0 + MINUTE, "94");
     let (path, body) = posted(&stand_in, 1).await;
     assert_eq!(path, "/v1/positions/close-all");
     assert_eq!(body["closes"], json!([{ "market": 1, "quoted": "94" }]));
@@ -82,9 +88,9 @@ async fn the_daily_loss_limit_flattens_and_holds_across_a_restart() {
 
     // The close is declined or not yet in the log: it is tried again on a later move of the mark, once
     // five seconds have passed since the last try, without waiting for a bar.
-    price_at(&stand_in, 14, T0 + MINUTE + 2_000, "96");
+    price_at(&stand_in, T0 + MINUTE + 2_000, "96");
     assert_eq!(posts_after_settling(&stand_in).await, 1, "too soon after the last try");
-    price_at(&stand_in, 15, T0 + MINUTE + 6_000, "95");
+    price_at(&stand_in, T0 + MINUTE + 6_000, "95");
     let (path, body) = posted(&stand_in, 2).await;
     assert_eq!(
         (path.as_str(), &body["closes"]),
@@ -92,9 +98,10 @@ async fn the_daily_loss_limit_flattens_and_holds_across_a_restart() {
     );
 
     // The close lands, and is the bot's own fill; no bar after it orders, whatever the strategy says.
-    stand_in.append((16, 0), own_close(16, T0 + MINUTE + 6_100, &body));
-    for (seq, minute, mid) in [(17, 2, "96"), (18, 3, "99"), (19, 4, "103"), (20, 5, "110")] {
-        price_at(&stand_in, seq, T0 + minute * MINUTE, mid);
+    let seq = next_seq(&stand_in);
+    stand_in.append((seq, 0), own_close(seq, T0 + MINUTE + 6_100, &body));
+    for (_, minute, mid) in [(17, 2, "96"), (18, 3, "99"), (19, 4, "103"), (20, 5, "110")] {
+        price_at(&stand_in, T0 + minute * MINUTE, mid);
     }
     assert_eq!(posts_after_settling(&stand_in).await, 2);
     stop.send(()).unwrap();
@@ -111,15 +118,15 @@ async fn the_daily_loss_limit_flattens_and_holds_across_a_restart() {
     let (stop, bot) =
         start(&again, dir.path(), &[("daily_loss = { usd = \"100000\" }", "daily_loss = { usd = \"5\" }")]);
     warm(&again).await;
-    for (seq, minute, mid) in [(13, 1, "101"), (14, 2, "102"), (15, 3, "103")] {
-        price_at(&again, seq, T0 + minute * MINUTE, mid);
+    for (_, minute, mid) in [(13, 1, "101"), (14, 2, "102"), (15, 3, "103")] {
+        price_at(&again, T0 + minute * MINUTE, mid);
     }
     assert_eq!(posts_after_settling(&again).await, 0, "stopped for the day");
 
     // The next UTC day opens afresh, and the same bars order.
     again.with(|i| i.time_ms = (T0 + DAY) as u64);
-    for (seq, minute, mid) in [(16, 0, "100"), (17, 1, "101"), (18, 2, "102"), (19, 3, "103")] {
-        price_at(&again, seq, T0 + DAY + minute * MINUTE, mid);
+    for (_, minute, mid) in [(16, 0, "100"), (17, 1, "101"), (18, 2, "102"), (19, 3, "103")] {
+        price_at(&again, T0 + DAY + minute * MINUTE, mid);
     }
     let (path, body) = posted(&again, 1).await;
     assert_eq!((path.as_str(), body["side"].as_str()), ("/v1/orders", Some("buy")));
@@ -148,14 +155,14 @@ async fn no_order_in_a_halt_or_on_the_first_bar_after_it() {
     let (stop, bot) = start(&stand_in, dir.path(), &[]);
     warm(&stand_in).await;
     // Closes 100 then 101 make the target long, but the command that completes the second bar is in the halt.
-    price_at(&stand_in, 13, T0 + MINUTE, "101");
-    price_at(&stand_in, 14, T0 + 2 * MINUTE, "101.5");
+    price_at(&stand_in, T0 + MINUTE, "101");
+    price_at(&stand_in, T0 + 2 * MINUTE, "101.5");
     assert_eq!(posts_after_settling(&stand_in).await, 0, "the halt shuts the market at 08:02");
     // The market reopens at 08:10 with a gap: 102 at 08:10, 103 at 08:11 (the gap bar completes), 104 at 08:12.
-    price_at(&stand_in, 15, T0 + 10 * MINUTE, "102");
-    price_at(&stand_in, 16, T0 + 11 * MINUTE, "103");
+    price_at(&stand_in, T0 + 10 * MINUTE, "102");
+    price_at(&stand_in, T0 + 11 * MINUTE, "103");
     assert_eq!(posts_after_settling(&stand_in).await, 0, "the first bar after the halt is a gap");
-    price_at(&stand_in, 17, T0 + 12 * MINUTE, "104");
+    price_at(&stand_in, T0 + 12 * MINUTE, "104");
     let (path, order) = posted(&stand_in, 1).await;
     assert_eq!(path, "/v1/orders");
     assert_eq!((order["side"].as_str(), order["client_id"].as_i64()), (Some("buy"), Some(T0 + 11 * MINUTE)));
@@ -176,8 +183,8 @@ async fn a_position_is_held_for_the_minimum() {
     });
     let (stop, bot) = start(&stand_in, dir.path(), &[("min_hold = \"0s\"", "min_hold = \"5m\"")]);
     warm(&stand_in).await;
-    price_at(&stand_in, 13, T0 + MINUTE, "101");
-    price_at(&stand_in, 14, T0 + 2 * MINUTE, "102");
+    price_at(&stand_in, T0 + MINUTE, "101");
+    price_at(&stand_in, T0 + 2 * MINUTE, "102");
     let (_, buy) = posted(&stand_in, 1).await;
     assert_eq!(buy["side"], "buy");
     // The buy fills at 08:02:00.100; the account then holds 0.980392156.
@@ -185,13 +192,14 @@ async fn a_position_is_held_for_the_minimum() {
         let position = json!({ "1": { "qty": "0.980392156", "entry": "102" } });
         i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
     });
-    stand_in.append((15, 0), own_fill(15, T0 + 2 * MINUTE + 100, &buy, "0.980392156"));
+    let seq = next_seq(&stand_in);
+    stand_in.append((seq, 0), own_fill(seq, T0 + 2 * MINUTE + 100, &buy, "0.980392156"));
     // The target turns short at 08:04 and stays so; the hold runs to 08:07:00.100.
-    for (seq, minute, mid) in [(16, 3, "90"), (17, 4, "80"), (18, 5, "79"), (19, 6, "78")] {
-        price_at(&stand_in, seq, T0 + minute * MINUTE, mid);
+    for (_, minute, mid) in [(16, 3, "90"), (17, 4, "80"), (18, 5, "79"), (19, 6, "78")] {
+        price_at(&stand_in, T0 + minute * MINUTE, mid);
     }
     assert_eq!(posts_after_settling(&stand_in).await, 1, "held until 08:07");
-    price_at(&stand_in, 20, T0 + 8 * MINUTE, "77");
+    price_at(&stand_in, T0 + 8 * MINUTE, "77");
     let (_, sell) = posted(&stand_in, 2).await;
     assert_eq!(sell["side"], "sell");
     stop.send(()).unwrap();
@@ -210,8 +218,8 @@ async fn an_account_without_cash_opens_nothing() {
     });
     let (stop, bot) = start(&stand_in, dir.path(), &[]);
     warm(&stand_in).await;
-    for (seq, minute, mid) in [(13, 1, "101"), (14, 2, "102"), (15, 3, "103")] {
-        price_at(&stand_in, seq, T0 + minute * MINUTE, mid);
+    for (_, minute, mid) in [(13, 1, "101"), (14, 2, "102"), (15, 3, "103")] {
+        price_at(&stand_in, T0 + minute * MINUTE, mid);
     }
     assert_eq!(posts_after_settling(&stand_in).await, 0);
     stop.send(()).unwrap();
@@ -232,8 +240,8 @@ async fn the_margin_buffer_holds_back_an_order() {
     let edits = [("margin_buffer_bps = 0", "margin_buffer_bps = 100000")];
     let (stop, bot) = start(&stand_in, dir.path(), &edits);
     warm(&stand_in).await;
-    for (seq, minute, mid) in [(13, 1, "101"), (14, 2, "102"), (15, 3, "103")] {
-        price_at(&stand_in, seq, T0 + minute * MINUTE, mid);
+    for (_, minute, mid) in [(13, 1, "101"), (14, 2, "102"), (15, 3, "103")] {
+        price_at(&stand_in, T0 + minute * MINUTE, mid);
     }
     assert_eq!(posts_after_settling(&stand_in).await, 0);
     stop.send(()).unwrap();
@@ -260,9 +268,10 @@ async fn a_split_moves_the_position() {
         i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
     });
     let split = json!({ "type": "corporate_split", "id": "s1", "market": 1, "new_units": 2, "old_units": 1 });
-    stand_in.append((13, 0), command(13, T0 + 5_000, json!({ "type": "tick" }), json!([split])));
-    price_at(&stand_in, 14, T0 + MINUTE, "99");
-    price_at(&stand_in, 15, T0 + 2 * MINUTE, "98");
+    let seq = next_seq(&stand_in);
+    stand_in.append((seq, 0), command(seq, T0 + 7_000, json!({ "type": "tick" }), json!([split])));
+    price_at(&stand_in, T0 + MINUTE, "99");
+    price_at(&stand_in, T0 + 2 * MINUTE, "98");
     let (_, order) = posted(&stand_in, 1).await;
     assert_eq!((order["side"].as_str(), order["qty"].as_str()), (Some("sell"), Some("3.020408163")));
     stop.send(()).unwrap();
@@ -282,7 +291,8 @@ async fn a_failed_corporate_action_halts() {
     let (_stop, bot) = start(&stand_in, dir.path(), &[]);
     warm(&stand_in).await;
     let failed = json!({ "type": "corporate_action_failed", "id": "s1", "market": 1, "at": T0, "reason": "no price" });
-    stand_in.append((13, 0), command(13, T0 + MINUTE, json!({ "type": "tick" }), json!([failed])));
+    let seq = next_seq(&stand_in);
+    stand_in.append((seq, 0), command(seq, T0 + MINUTE, json!({ "type": "tick" }), json!([failed])));
     let err = tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap_err();
     assert!(err.to_string().contains("a corporate action failed for the market"), "{err:#}");
 }

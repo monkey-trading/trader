@@ -52,8 +52,8 @@ async fn relistings_change_the_rules_or_halt() {
 
     stand_in.with(|i| i.time_ms = (T0 + 10 * MINUTE) as u64);
     let yen = MarketSpec { quote_currency: QuoteCurrency::Jpy { fx_market: 9 }, ..btc_spec() };
-    stand_in.append((19, 0), relisting(19, T0 + 5 * MINUTE + 1, yen.clone(), false));
-    stand_in.append((20, 0), relisting(20, T0 + 5 * MINUTE + 2, yen, true));
+    stand_in.append((18, 0), relisting(18, T0 + 5 * MINUTE + 1, yen.clone(), false));
+    stand_in.append((19, 0), relisting(19, T0 + 5 * MINUTE + 2, yen, true));
     let err = tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap_err();
     assert!(err.to_string().contains("not a USD market priced from spot quotes"), "{err:#}");
     // The halt leaves the account as it is: its resting order stays.

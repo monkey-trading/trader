@@ -27,7 +27,7 @@ every="agent_docs agent_scripts ci_scripts console merge_approval rust"
 check "a Rust source file" "rust" "$(areas crates/trader/src/lib.rs)"
 check "the manifests, lockfile, toolchain and policy" "rust" \
   "$(areas Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml deny.toml)"
-check "the example config and the dev scenario" "rust" "$(areas config/example.toml scripts/dev-trade-one.sh)"
+check "the example config and the dev scenarios" "rust" "$(areas config/example.toml scripts/dev-trade-one.sh scripts/dev-strategies.sh)"
 check "the dev stack feeds the dev scenario and its test" "ci_scripts rust" "$(areas scripts/dev-stack.sh)"
 check "the dev stack's test" "ci_scripts" "$(areas scripts/dev-stack-test.sh)"
 check "the line cap feeds the Rust jobs and its test" "ci_scripts rust" "$(areas scripts/check-file-loc.sh)"

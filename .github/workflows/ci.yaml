@@ -281,6 +281,49 @@ jobs:
         if: failure() && needs.changes.outputs.cache != 'true'
         run: tail -n 200 "$RUNNER_TEMP"/dev-trade-one/*.log
 
+  # The strategies' dev scenario (scripts/dev-strategies.sh): a dev node from the engine commit
+  # Cargo.lock pins, and seven accounts trading on it for fifteen minutes, one per strategy. The node, its tools and its dev
+  # config are built once per engine commit and cached by it; a push to main that only refreshes
+  # caches builds them and the bot, and runs nothing.
+  dev-strategies:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.cache == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update
+      - name: Read the pinned engine commit
+        id: engine
+        run: |
+          commit=$(grep -o 'git+https://github.com/monkey-trading/engine?rev=[0-9a-f]*#[0-9a-f]*' Cargo.lock \
+            | sed 's/.*#//' | sort -u)
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          echo "commit=$commit" | tee -a "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/monkeytrading-trader/engine/${{ steps.engine.outputs.commit }}/dist
+          key: engine-${{ runner.os }}-${{ steps.engine.outputs.commit }}
+      - name: Build the engine at the pinned commit
+        run: bash -c 'source scripts/dev-stack.sh && dev_stack_build'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Build the bot
+        run: cargo build --locked -p trader
+      - name: Run the dev scenario
+        if: needs.changes.outputs.cache != 'true'
+        env:
+          SCENARIO_ARTIFACTS: ${{ runner.temp }}/dev-strategies
+        run: ./scripts/dev-strategies.sh
+      - name: Keep the scenario's logs
+        if: failure() && needs.changes.outputs.cache != 'true'
+        run: tail -n 200 "$RUNNER_TEMP"/dev-strategies/*.log
+
   # Each job above but `changes` has a `cancel-` companion that runs only on a pull request or a
   # merge group, and only when that job itself fails (`failure()` alone is also true for a failed
   # ancestor such as `changes`). It cancels the run, so the first failed job stops the rest from
@@ -478,13 +521,30 @@ jobs:
           gh run cancel ${{ github.run_id }} \
             || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
 
+  cancel-dev-strategies:
+    needs: dev-strategies
+    if: failure() && needs.dev-strategies.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
   # The single check to require in branch rules. It runs even when a job it needs fails, is
   # cancelled, or is skipped, and passes only if every one of them succeeded or was skipped while
   # `changes` set its area false. Add every new job to `needs`, and a gated one to the area map in
   # scripts/check-ci-passed.sh.
   ci-passed:
     if: always()
-    needs: [changes, fmt, file-loc, clippy, test, cargo-deny, dev-trade-one, console, agent-links, review-delta, merge-approval, ci-scripts]
+    needs: [changes, fmt, file-loc, clippy, test, cargo-deny, dev-trade-one, dev-strategies, console, agent-links, review-delta, merge-approval, ci-scripts]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
