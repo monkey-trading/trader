@@ -4,9 +4,13 @@
 //! account's fills move its position. A target the position is not at sends a signed market order,
 //! unless the bar is history the stream is replaying, or the last order could still enter the log.
 
+mod fills;
 mod orders;
 mod startup;
 pub use startup::stop_signal;
+mod stop;
+
+use std::collections::VecDeque;
 
 use engine_core::Fixed;
 use engine_core::command::{AdminCommand, Command};
@@ -15,7 +19,7 @@ use engine_core::event::Event;
 use engine_core::market::{MarketSpec, QuoteCurrency};
 use engine_core::session::Schedule;
 use engine_core::types::{MarketId, Millis};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use trader_core::bars::{Bar, BarBuilder};
 use trader_core::marks::IndexMarks;
 use trader_core::strategy::{SmaCrossover, order_for};
@@ -55,8 +59,18 @@ pub struct Bot {
     max_slippage_bps: i64,
     close_on_stop: bool,
     marks: IndexMarks,
-    bars: BarBuilder,
+    /// The bar length, and how many bars of history warm the strategy up.
+    bar_ms: Millis,
+    history_bars: i64,
+    /// Bars from the log, once the index is exact and the history has warmed the strategy up.
+    bars: Option<BarBuilder>,
+    /// The earliest sequenced time a failed warm-up is tried again.
+    warm_up_after: Millis,
     strategy: SmaCrossover,
+    /// Whether the next reversal is only a close: the engine refused the last one whole.
+    close_first: bool,
+    /// The nonces of the last orders this process signed, to tell its fills from others'.
+    signed_nonces: VecDeque<u64>,
     /// The account's signed position in the market.
     position: Fixed,
     /// The account's balance, as the last verified read of the account gave it.
@@ -69,6 +83,8 @@ pub struct Bot {
     /// The latest expiry an order signed before this start can carry. Until the log passes it, an
     /// earlier process's order may still enter the log, and no order is placed.
     trading_from: Millis,
+    /// The time of the last command read from the log.
+    log_ts: Millis,
 }
 
 /// Runs the bot until `stop` completes, or until it halts on its own; then cancels the account's
@@ -98,7 +114,7 @@ pub async fn run(
             if let Err(halt) = &followed {
                 error!(alert = "bot_halted", "{halt}");
             }
-            bot.stop().await.and(followed)
+            bot.stop(&mut stream).await.and(followed)
         }
     };
     if let Err(Halt::WrongSigner) = &halt {
@@ -146,6 +162,7 @@ impl Bot {
             return Ok(());
         }
         let message: CommandMessage<'_> = serde_json::from_str(&frame.msg).map_err(|e| unreadable(e.into()))?;
+        self.log_ts = message.ts;
         let command = message.head().map_err(unreadable)?;
         let events = message.events().map_err(unreadable)?;
         match command.kind {
@@ -161,6 +178,7 @@ impl Bot {
             filled |= self.on_event(message.seq, event);
         }
         if filled {
+            self.check_own_fills(&message, &events)?;
             self.refresh_balance().await?;
         }
         // Only a mark that moved goes into the bars, as the node's marks history records only moves,
@@ -169,9 +187,12 @@ impl Bot {
         if moved.is_some() {
             self.mark = moved;
         }
-        if let Some(bar) = self.bars.on_command(message.ts, moved) {
-            let lag = i64::try_from(frame.time).unwrap_or(Millis::MAX).saturating_sub(message.ts);
-            self.on_bar(bar, message.ts, lag).await?;
+        let node_time = Millis::try_from(frame.time).unwrap_or(Millis::MAX);
+        if self.bars.is_none() && !self.warm_up(message.ts, node_time).await? {
+            return Ok(());
+        }
+        if let Some(bar) = self.bars.as_mut().and_then(|bars| bars.on_command(message.ts, moved)) {
+            self.on_bar(bar, message.ts, node_time.saturating_sub(message.ts)).await?;
         }
         Ok(())
     }
@@ -195,47 +216,6 @@ impl Bot {
         Ok(())
     }
 
-    /// Follows the account's fills: the position in the market. Returns whether `event` is one.
-    fn on_event(&mut self, seq: u64, event: &Event) -> bool {
-        let Event::Fill(fill) = event else { return false };
-        if fill.account != self.key.address() {
-            return false;
-        }
-        if fill.market == self.market {
-            self.position = fill.position;
-        }
-        info!(
-            seq,
-            order_id = fill.order_id,
-            market = fill.market,
-            side = ?fill.side,
-            qty = %fill.qty,
-            price = %fill.price,
-            realised_pnl = %fill.realised_pnl,
-            profit_fee = %fill.profit_fee,
-            liquidation = fill.liquidation,
-            position = %self.position,
-            "fill"
-        );
-        true
-    }
-
-    /// Reads the balance again, verified, after the account's fills: fills, financing, fees and
-    /// transfers all move it, and the node's answer is the one figure that holds all of them.
-    /// Error cases:
-    /// - an answer signed by another key than the signer
-    async fn refresh_balance(&mut self) -> Result<(), Halt> {
-        match self.node.account(self.key.address()).await {
-            Ok(answer) => {
-                self.balance = answer.body.balance;
-                info!(balance = %self.balance, head_seq = answer.head_seq, "balance");
-            }
-            Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-            Err(e) => warn!("the balance was not read: {e}"),
-        }
-        Ok(())
-    }
-
     /// Hands a bar to the strategy, completed by a command at `ts` that the node sent `lag` ms after
     /// it, and orders toward its target. A bar the stream is replaying from history, or one that
     /// closes before the log has passed the last order's expiry, places no order: that order's
@@ -247,7 +227,7 @@ impl Bot {
         let (fast, slow) = self.strategy.averages();
         debug!(start = bar.start, close = %bar.close, ?fast, ?slow, ?target, lag, "bar");
         let Some(target) = target else { return Ok(()) };
-        let Some(intent) = order_for(target, self.qty, self.position) else { return Ok(()) };
+        let Some(intent) = order_for(target, self.qty, self.position, self.close_first) else { return Ok(()) };
         if lag > REPLAY_LAG_MS {
             info!(?target, lag, "the bar is history the stream is replaying: no order");
             return Ok(());
@@ -257,7 +237,8 @@ impl Bot {
             return Ok(());
         }
         if ts <= self.trading_from {
-            info!(?target, self.trading_from, "an order signed before this start may still enter the log: no order");
+            let trading_from = self.trading_from;
+            info!(?target, trading_from, "an order signed before this start may still enter the log: no order");
             return Ok(());
         }
         info!(?target, position = %self.position, "moving to the target");

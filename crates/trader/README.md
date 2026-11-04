@@ -13,22 +13,28 @@ answer that fails the check is an error, never data, and one signed by another k
   the public roots, each under a fresh challenge and verified with `engine-wire`
 - One signed stream connection that reads the public log, verifies each frame with
   `FrameVerifier`, refuses gaps, and resumes after the last message it read when a connection
-  fails or falls silent
-- Startup reads of the market, the account's position and balance, and the market's marks history
-  to warm the strategy up, at the widest resolution that tiles a bar; from then on the position
-  follows the account's fills in the log, and the balance is read again after each of them
+  fails or falls silent; a frame or message it cannot read stops the bot
+- Startup reads of the market and the account's position and balance; from then on the position
+  follows the account's fills in the log, and the balance is read again after each of them. A
+  fill from an order this process did not sign, once orders signed before it started have
+  expired, means someone else trades the account, and stops the bot
+- Once the index the bot derives from the log is exact, a warm-up from the node's log-derived marks
+  history, at the widest resolution that tiles a bar: bars before the current one from the
+  history, and the current one started from the history's buckets in its window
 - Bars built only from moves of the mark, as the node's marks history records them, so bars warmed
-  up from the history and bars built live agree; the current bar starts from the history's buckets
-  in its window
+  up from the history and bars built live agree
 - Signed market orders toward the strategy's target, on the account's next nonce, quoted at the
-  last mark; a declined order is logged with the node's reason and retried on the next bar. No
+  last mark; a declined order is logged with the node's reason and retried on the next bar, and a
+  reversal the engine refuses whole is retried as a reduce-only close, then an opening order. No
   order goes out for a bar more than half a minute behind the node's time, by its frame or by the
   nonce answer, or before the log has passed the expiry of the last order, or of any order an
   earlier process may have signed, so an order's fill is always in the position before the next
   decision. An order never exceeds the engine's input bound
-- On SIGINT or SIGTERM, once the last order can no longer enter the log, a cancel of the account's
-  resting orders and, when configured, a close of its position at the node's current mark; a stop
-  that leaves either behind, or cannot confirm it did not, exits non-zero with an alert
+- On SIGINT or SIGTERM, once the log has passed every order that could still enter it, a cancel of
+  the account's resting orders and, when configured, a close of its position at the node's current
+  mark; a stop that leaves either behind, or cannot confirm it did not, exits non-zero with an
+  alert. A stop can take the order expiry window (30 s) and a few calls of `request_timeout`, and
+  a second signal does not cut it short, so a supervisor's grace period should be longer
 - The account key from an encrypted Web3 Secret Storage keystore, or, in a dev build, a hex file;
   held only as a signing key that zeroes its secret on drop, and never printed. A release build
   refuses the keys whose private halves this repository publishes
@@ -48,13 +54,19 @@ answer that fails the check is an error, never data, and one signed by another k
 - `src/stream/mod.rs`: `Stream`, the verified, gap-free, resuming log
 - `src/stream/message.rs`: the stream's messages, read as borrowed views
 - `src/bot/mod.rs`: the bot: applying the log, bars, and decisions
-- `src/bot/startup.rs`: the startup reads and the stop signals
-- `src/bot/orders.rs`: the signed order, cancel and close requests
+- `src/bot/startup.rs`: the startup reads, the warm-up from the marks history, and the stop signals
+- `src/bot/fills.rs`: the account's fills, the balance read after them, and the check that they
+  are the bot's own
+- `src/bot/orders.rs`: the signed market order
+- `src/bot/stop.rs`: the stop: the wait for the log, the signed cancel and close, and the check
 - `tests/common/mod.rs`: a local stand-in node that signs its answers and frames, with injected
   faults
+- `tests/common/bot.rs`: the bot's config, run, and the log and account the tests script
 - `tests/node_answers.rs`, `tests/stream.rs`, `tests/bot.rs`: the binary against the stand-in
 - `tests/bot_halts.rs`: the bot against the stand-in when its market is relisted, the log cannot be
   read, the node changes signer, or a stop cannot leave the account as it should
+- `tests/bot_orders.rs`: the bot's orders when one is refused, goes unanswered, or is a reversal the
+  engine refuses whole, and when someone else trades the account
 
 ## Usage
 

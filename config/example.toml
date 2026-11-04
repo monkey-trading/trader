@@ -23,7 +23,9 @@ stream_timeout = "30s"
 # (password = { file = "..." }) or an environment variable (password = { env = "..." }).
 # A dev build also takes { type = "hex_file", path = "..." }: a file holding the key in hex.
 key = { type = "keystore", path = "keys/account.json", password = { env = "TRADER_KEY_PASSWORD" } }
-# Whether stopping the bot closes the strategy's position. It always cancels resting orders.
+# Whether stopping the bot closes the strategy's position. It always cancels resting orders. A stop
+# first waits for the log to pass any order that could still enter it, up to 35 s, then makes a few
+# calls of up to request_timeout each; give a supervisor's stop a longer grace period.
 close_on_stop = false
 
 [strategy]

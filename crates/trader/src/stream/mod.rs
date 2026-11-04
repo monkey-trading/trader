@@ -45,8 +45,9 @@ pub enum StreamError {
     /// not the frame that was signed.
     #[error("a stream frame is not signed by the configured signer")]
     WrongSigner,
-    /// A verified message the bot cannot place in the log: no type, or no offset it can read. The
-    /// node would send it again on every connection.
+    /// A frame of a version or shape this crate cannot read, or a verified message the bot cannot
+    /// place in the log: no type, or no offset it can read. The node would send it again on every
+    /// connection.
     #[error("{0:#}")]
     Unreadable(anyhow::Error),
 }
@@ -84,7 +85,7 @@ impl Stream {
     /// reconnecting as needed. Cancel-safe: a frame counts as returned only once this returns it.
     /// Error cases:
     /// - a frame's signature is not the configured signer's over it
-    /// - a verified message has no type, or no offset that parses
+    /// - a frame of another version or shape, or a verified message with no type or readable offset
     pub async fn next(&mut self) -> Result<Frame, StreamError> {
         loop {
             let Some(open) = self.open.as_mut() else {
@@ -109,6 +110,10 @@ impl Stream {
             let frame = match open.verifier.verify_text(text.as_str()) {
                 Ok(frame) => frame,
                 Err(FrameError::Refused(WireError::WrongSigner)) => return Err(StreamError::WrongSigner),
+                // A frame this crate cannot read, which every connection would send again.
+                Err(e @ (FrameError::NotAFrame(_) | FrameError::Refused(WireError::UnsupportedVersion(_)))) => {
+                    return Err(StreamError::Unreadable(e.into()));
+                }
                 Err(e) => {
                     self.drop_connection(&format!("a frame does not verify: {e}")).await;
                     continue;

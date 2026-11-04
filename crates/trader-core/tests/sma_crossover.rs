@@ -74,8 +74,21 @@ fn orders_move_the_position_to_its_target() {
         (Target::Short, "-0.75", order(Side::Buy, "0.25", true)),
     ];
     for (target, position, expected) in cases {
-        assert_eq!(order_for(target, size, fx(position)), expected, "{target:?} from {position}");
+        assert_eq!(order_for(target, size, fx(position), false), expected, "{target:?} from {position}");
     }
+}
+
+/// With `close_first`, a reversal is only the close, reduce-only, each way; a move that does not
+/// cross zero is as without it.
+#[test]
+fn close_first_splits_a_reversal() {
+    let size = fx("0.5");
+    let order = |side, qty: &str, reduce_only| Some(OrderIntent { side, qty: fx(qty), reduce_only });
+    assert_eq!(order_for(Target::Short, size, fx("0.5"), true), order(Side::Sell, "0.5", true));
+    assert_eq!(order_for(Target::Long, size, fx("-0.5"), true), order(Side::Buy, "0.5", true));
+    assert_eq!(order_for(Target::Short, size, Fixed::ZERO, true), order(Side::Sell, "0.5", false));
+    assert_eq!(order_for(Target::Flat, size, fx("0.5"), true), order(Side::Sell, "0.5", true));
+    assert_eq!(order_for(Target::Long, size, fx("0.25"), true), order(Side::Buy, "0.25", false));
 }
 
 /// No order is above the engine's input bound: reversing a position of the largest size takes one
@@ -84,15 +97,15 @@ fn orders_move_the_position_to_its_target() {
 fn orders_stay_within_the_input_bound() {
     let max = Fixed::MAX_INPUT;
     let order = |side, reduce_only| Some(OrderIntent { side, qty: max, reduce_only });
-    assert_eq!(order_for(Target::Short, max, max), order(Side::Sell, true));
-    assert_eq!(order_for(Target::Short, max, Fixed::ZERO), order(Side::Sell, false));
-    assert_eq!(order_for(Target::Long, max, -max), order(Side::Buy, true));
-    assert_eq!(order_for(Target::Long, max, Fixed::ZERO), order(Side::Buy, false));
+    assert_eq!(order_for(Target::Short, max, max, false), order(Side::Sell, true));
+    assert_eq!(order_for(Target::Short, max, Fixed::ZERO, false), order(Side::Sell, false));
+    assert_eq!(order_for(Target::Long, max, -max, false), order(Side::Buy, true));
+    assert_eq!(order_for(Target::Long, max, Fixed::ZERO, false), order(Side::Buy, false));
     // A move just over the bound leaves its remainder for the next order.
     let half = max.div_int(2);
     let just_over = half + Fixed::from_raw(1);
     assert_eq!(
-        order_for(Target::Short, just_over, just_over),
+        order_for(Target::Short, just_over, just_over, false),
         Some(OrderIntent { side: Side::Sell, qty: max, reduce_only: false })
     );
 }
@@ -121,7 +134,7 @@ fn marks_to_orders() {
     for (ts, mark) in marks {
         let Some(bar) = bars.on_command(ts, Some(fx(mark))) else { continue };
         let Some(target) = strategy.on_close(bar.close) else { continue };
-        if let Some(order) = order_for(target, Fixed::ONE, position) {
+        if let Some(order) = order_for(target, Fixed::ONE, position, false) {
             position += if order.side == Side::Buy { order.qty } else { -order.qty };
             orders.push((bar.start, order.side, order.qty));
         }

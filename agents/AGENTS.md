@@ -35,17 +35,20 @@ list.
 - **crates/trader/** — `trader`, the binary (`main.rs` over `lib.rs`): `trader run --config` trades
   one account in one market. `config/` loads and checks the TOML config; `keys.rs` unlocks the
   account key (a Web3 Secret Storage keystore, or a hex file in a dev build) into a signing key that
-  zeroes on drop; `node/` makes REST calls over TLS pinned to the node's key hash (or publicly
-  rooted), each under a fresh challenge and verified with `engine_wire::verify_received`;
-  `stream/` reads the public log over one `signed=1` connection, verifying each frame with
-  `FrameVerifier`, refusing gaps and resuming after the last message; `bot/` reads the market, the
-  account and the marks history at startup, follows the log into bars (built from moves of the mark,
-  as the node's history is) and decisions, signs market orders on the next nonce (none for a bar the
-  stream replays, or before the last order's expiry has passed in the log), and on SIGINT or SIGTERM
-  cancels resting orders and optionally closes the position, exiting non-zero when it leaves either
-  behind or cannot confirm it did not. An answer or frame signed by another key stops the bot. `tests/` runs it against a local
-  stand-in node (`tests/common/`) that signs its answers and frames and injects faults. Its
-  `README.md` lists every file.
+  zeroes on drop, and refuses outside a dev build the keys the repository publishes; `node/` makes
+  REST calls over TLS pinned to the node's key hash (or publicly rooted), each under a fresh
+  challenge and verified with `engine_wire::verify_received`; `stream/` reads the public log over
+  one `signed=1` connection, verifying each frame with `FrameVerifier`, refusing gaps and resuming
+  after the last message. `bot/` reads the market and the account at startup; once its index is
+  exact it warms up from the node's log-derived marks history (`startup.rs`); it follows the log
+  into bars (built from moves of the mark, as that history is) and decisions, and signs market
+  orders on the next nonce (`orders.rs`), none for a bar behind the node's time or before the log
+  has passed every order that could still enter it; it stops on a fill from an order it did not
+  sign (`fills.rs`), and on SIGINT or SIGTERM, once the log has passed those orders, cancels resting
+  orders and optionally closes the position, exiting non-zero when it leaves either behind or
+  cannot confirm it did not (`stop.rs`). An answer or frame signed by another key stops the bot.
+  `tests/` runs it against a local stand-in node (`tests/common/`) that signs its answers and
+  frames and injects faults. Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, which the config tests load.
 - **console/** — the Vite, React and TypeScript app (`src/` with `main.tsx`, `App.tsx`,
   `styles.css`, and its tests; `index.html`, the page that mounts `src/main.tsx`;

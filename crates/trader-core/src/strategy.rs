@@ -1,5 +1,7 @@
 //! The SMA crossover strategy and the order that moves a position to its target.
 
+use std::cmp::Ordering;
+
 use engine_core::Fixed;
 use engine_core::types::Side;
 
@@ -59,9 +61,9 @@ impl SmaCrossover {
         let fast_scaled = fast.raw() * self.slow.period() as i128;
         let slow_scaled = slow.raw() * self.fast.period() as i128;
         Some(match fast_scaled.cmp(&slow_scaled) {
-            std::cmp::Ordering::Greater => Target::Long,
-            std::cmp::Ordering::Less => Target::Short,
-            std::cmp::Ordering::Equal => Target::Flat,
+            Ordering::Greater => Target::Long,
+            Ordering::Less => Target::Short,
+            Ordering::Equal => Target::Flat,
         })
     }
 
@@ -74,13 +76,17 @@ impl SmaCrossover {
 /// The order that takes `position` toward `target`, where a long or short target is `size` units:
 /// `None` when the position is already there. An order is at most `Fixed::MAX_INPUT` units, the
 /// most the engine takes, so a larger move, such as reversing a position of more than half that,
-/// takes more than one order.
-pub fn order_for(target: Target, size: Fixed, position: Fixed) -> Option<OrderIntent> {
+/// takes more than one order. With `close_first`, a move across zero is only the close of the
+/// position, reduce-only, and the next order opens the other side: the engine can refuse a
+/// reversal its pure close would pass.
+pub fn order_for(target: Target, size: Fixed, position: Fixed, close_first: bool) -> Option<OrderIntent> {
     let wanted = match target {
         Target::Long => size,
         Target::Short => -size,
         Target::Flat => Fixed::ZERO,
     };
+    let crosses = wanted.signum() * position.signum() < 0;
+    let wanted = if close_first && crosses { Fixed::ZERO } else { wanted };
     let delta = wanted - position;
     if delta.is_zero() {
         return None;

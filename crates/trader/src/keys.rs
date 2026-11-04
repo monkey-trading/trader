@@ -9,6 +9,7 @@ use anyhow::{Context, bail};
 use engine_core::eip712::{self, B256, Signature};
 use engine_core::types::AccountId;
 use k256::ecdsa::SigningKey;
+use tokio::task::spawn_blocking;
 use zeroize::Zeroizing;
 
 use crate::config::{KeySource, PasswordSource};
@@ -50,7 +51,7 @@ impl AccountKey {
             KeySource::Keystore { path, password } => {
                 let password = read_password(password, env)?;
                 let path = path.clone();
-                let bytes = tokio::task::spawn_blocking(move || {
+                let bytes = spawn_blocking(move || {
                     eth_keystore::decrypt_key(&path, password.as_bytes())
                         .map(Zeroizing::new)
                         .with_context(|| format!("decrypting the keystore {}", path.display()))

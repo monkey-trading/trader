@@ -67,6 +67,12 @@ impl IndexMarks {
         }
     }
 
+    /// Whether the book holds, at `now`, every quote that can count: more than `max_age_ms` of the
+    /// log has passed since the first command it saw.
+    pub fn is_complete(&self, now: Millis) -> bool {
+        self.first.is_some_and(|first| now.saturating_sub(first) > self.rules.max_age_ms)
+    }
+
     /// The index mark at `now`, any command's sequenced time: `None` until the book has seen
     /// `max_age_ms` of the log, or while the fresh quotes give no index. Worked out again only once
     /// a quote is stored or a fresh one ages out, so most commands cost a comparison.
@@ -78,7 +84,7 @@ impl IndexMarks {
         }
         let max_age = self.rules.max_age_ms;
         let first = *self.first.get_or_insert(now);
-        let known = if now.saturating_sub(first) <= max_age {
+        let known = if !self.is_complete(now) {
             (None, first.saturating_add(max_age))
         } else {
             let mark = compute_index(&self.quotes, &self.rules, now).ok().map(|index| index.mid);
@@ -112,6 +118,8 @@ mod tests {
         marks.store(10_000, &[quote("a", "100", 10_000), quote("b", "100.02", 10_000), quote("c", "100.04", 10_000)]);
         assert_eq!(marks.mark(10_000), None);
         assert_eq!(marks.mark(11_000), None);
+        assert!(!marks.is_complete(11_000));
+        assert!(marks.is_complete(11_001));
         marks.store(11_001, &[quote("a", "100.01", 11_001)]);
         // b and c are 1001ms old and drop out, leaving one source: no index.
         assert_eq!(marks.mark(11_001), None);

@@ -4,16 +4,19 @@
 
 mod common;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    MINUTE, StandIn, T0, account, account_view, btc_usd, command, config, posted, prices, resting_order, run,
+    MINUTE, StandIn, T0, account, account_view, btc_usd, command, config, posted, prices, resting_order, run, warm,
 };
 use engine_core::command::{AdminCommand, Command};
 use engine_core::market::{MarketSpec, PriceRules};
 use engine_core::session::Schedule;
 use serde_json::{Value, json};
+use tempfile::TempDir;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 /// An applied listing's price rules take effect: with four sources needed, three venues give no
 /// mark and nothing is ordered; back at two, the crossover orders again. A rejected listing changes
@@ -70,6 +73,7 @@ async fn an_unreadable_message_halts_after_the_stop() {
     });
     let dir = tempfile::tempdir().unwrap();
     stand_in.append((11, 0), command(11, T0, json!({ "type": "tick" }), json!([{ "type": "no_such_event" }])));
+    stand_in.append((12, 0), command(12, T0 + MINUTE, json!({ "type": "tick" }), json!([])));
     let err = run(config(&stand_in, dir.path(), "1m"), std::future::pending()).await.unwrap_err();
     assert!(format!("{err:#}").contains("the log message at 11:0"), "{err:#}");
     let posts = stand_in.with(|i| i.posts.clone());
@@ -120,6 +124,7 @@ async fn a_stop_without_the_account_cancels_and_is_incomplete() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     stand_in.with(|i| i.accounts.clear());
+    stand_in.tick(T0 + MINUTE);
     stop.send(()).unwrap();
     let err = tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap_err();
     assert!(err.to_string().contains("the stop is incomplete"), "{err:#}");
@@ -139,6 +144,7 @@ async fn a_declined_close_is_an_incomplete_stop() {
         i.replies.push_back(json!([{ "type": "order_rejected", "account": account(), "client_id": 0,
             "reason": { "kind": "slippage", "quoted": "99", "live": "90", "slippage_bps": 909 } }]));
     });
+    stand_in.tick(T0 + MINUTE);
     let dir = tempfile::tempdir().unwrap();
     let err = run(config(&stand_in, dir.path(), "1m"), async {}).await.unwrap_err();
     assert!(err.to_string().contains("a position of 1 are left"), "{err:#}");
@@ -146,38 +152,38 @@ async fn a_declined_close_is_an_incomplete_stop() {
     assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/positions/close-all"]);
 }
 
-/// A stop that never sees the node's time pass the last order's expiry cannot say that order is
-/// settled, and reports the stop incomplete, after cancelling and closing what it can see.
+/// A stop that never sees the log pass the last order's expiry cannot say that order is settled,
+/// and reports the stop incomplete.
 #[tokio::test]
-async fn a_stop_that_cannot_see_the_last_order_expire_is_incomplete() {
+async fn a_stop_that_cannot_see_the_log_pass_the_last_order_is_incomplete() {
     let stand_in = StandIn::start().await;
-    stand_in.with(|i| {
-        i.markets = json!([btc_usd(Some("99"))]);
-        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
-        i.head_seq = 10;
-    });
-    let dir = tempfile::tempdir().unwrap();
-    let (stop, stopped) = oneshot::channel::<()>();
-    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
-        _ = stopped.await;
-    }));
-    for (seq, ts, mid) in
-        [(11, T0, "100"), (12, T0 + 1_001, "100"), (13, T0 + MINUTE, "101"), (14, T0 + 2 * MINUTE, "102")]
-    {
-        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
-    }
-    let (path, _) = posted(&stand_in, 1).await;
-    assert_eq!(path, "/v1/orders");
-    // The node's time stays where it was when the order was signed, half a minute before its expiry.
-    stop.send(()).unwrap();
+    let (bot, _dir) = order_then_stop(&stand_in).await;
     let err = tokio::time::timeout(Duration::from_secs(60), bot).await.unwrap().unwrap().unwrap_err();
-    assert!(err.to_string().contains("not read past the last order's expiry"), "{err:#}");
+    assert!(err.to_string().contains("the log was not seen past the last order's expiry"), "{err:#}");
 }
 
-/// The stop waits, reading the node's time again, until it is past the last order's expiry, and
-/// only then cancels.
+/// The stop waits until the log passes the last order's expiry, and only then cancels.
 #[tokio::test]
-async fn a_stop_waits_out_the_last_order() {
+async fn a_stop_waits_for_the_log_to_pass_the_last_order() {
+    let stand_in = StandIn::start().await;
+    let (bot, _dir) = order_then_stop(&stand_in).await;
+    // The order expires at minute 2 and 50 s: a command at 40 s leaves the stop waiting.
+    stand_in.tick(T0 + 2 * MINUTE + 40_000);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(stand_in.with(|i| i.posts.len()), 1, "nothing is sent while the order can enter the log");
+    stand_in.tick(T0 + 2 * MINUTE + 51_000);
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+    let posts = stand_in.with(|i| i.posts.clone());
+    assert_eq!(
+        posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+        ["/v1/orders", "/v1/orders/cancel-all"]
+    );
+}
+
+/// A stop just after a start waits for the log to pass the expiry of any order an earlier process
+/// signed, then cancels.
+#[tokio::test]
+async fn a_stop_waits_for_orders_signed_before_the_start() {
     let stand_in = StandIn::start().await;
     stand_in.with(|i| {
         i.markets = json!([btc_usd(Some("99"))]);
@@ -185,32 +191,15 @@ async fn a_stop_waits_out_the_last_order() {
         i.head_seq = 10;
     });
     let dir = tempfile::tempdir().unwrap();
-    let (stop, stopped) = oneshot::channel::<()>();
-    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
-        _ = stopped.await;
-    }));
-    for (seq, ts, mid) in
-        [(11, T0, "100"), (12, T0 + 1_001, "100"), (13, T0 + MINUTE, "101"), (14, T0 + 2 * MINUTE, "102")]
-    {
-        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
-    }
-    posted(&stand_in, 1).await;
-    // The order was signed at T0 and expires at T0 + 30 s, which is where the node's time now is.
-    let reads = stand_in.with(|i| {
-        i.time_ms = (T0 + 30_000) as u64;
-        i.market_reads
-    });
-    stop.send(()).unwrap();
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
-    assert_eq!(stand_in.with(|i| i.posts.len()), 1, "nothing is sent while the order can enter the log");
-    assert!(stand_in.with(|i| i.market_reads) >= reads + 2, "the node's time is read again");
-    stand_in.with(|i| i.time_ms = (T0 + 30_001) as u64);
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {}));
+    // Started at T0: an earlier process's order can enter the log until T0 + 30 s.
+    stand_in.tick(T0 + 20_000);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(stand_in.with(|i| i.posts.is_empty()), "nothing is sent while such an order can enter the log");
+    stand_in.tick(T0 + 31_000);
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
     let posts = stand_in.with(|i| i.posts.clone());
-    assert_eq!(
-        posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
-        ["/v1/orders", "/v1/orders/cancel-all"]
-    );
+    assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/orders/cancel-all"]);
 }
 
 // ── Helpers ──
@@ -235,4 +224,32 @@ fn relisting(seq: u64, ts: i64, spec: MarketSpec, applied: bool) -> Value {
     let event =
         if applied { json!({ "type": "admin_applied" }) } else { json!({ "type": "admin_rejected", "reason": "no" }) };
     command(seq, ts, cmd, json!([event]))
+}
+
+/// Starts the bot with a resting order on the account, has it order at minute 2 on a nonce the
+/// node answers twenty seconds later, so the order expires at minute 2 and 50 s, and stops it.
+/// The returned directory holds the bot's config and key until it is dropped.
+async fn order_then_stop(stand_in: &Arc<StandIn>) -> (JoinHandle<anyhow::Result<()>>, TempDir) {
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({ "9": resting_order(9) })));
+        i.head_seq = 10;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let bot = tokio::spawn(run(config(stand_in, dir.path(), "1m"), async {
+        _ = stopped.await;
+    }));
+    warm(stand_in).await;
+    stand_in.with(|i| {
+        i.time_ms = (T0 + 2 * MINUTE + 20_000) as u64;
+        i.frame_time = Some((T0 + 2 * MINUTE) as u64);
+    });
+    for (seq, ts, mid) in [(13, T0 + MINUTE, "101"), (14, T0 + 2 * MINUTE, "102")] {
+        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
+    }
+    let (path, _) = posted(stand_in, 1).await;
+    assert_eq!(path, "/v1/orders");
+    stop.send(()).unwrap();
+    (bot, dir)
 }

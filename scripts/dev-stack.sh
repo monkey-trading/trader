@@ -223,7 +223,8 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   dev_stack_start
   echo "==> a dev node is up; its [node] config:"
   dev_stack_node_config
-  echo "==> fund an account: curl -sk $dev_stack_api/v1/dev/deposit -H 'content-type: application/json' -d '{\"account\":\"0x…\",\"amount\":\"100000\"}'"
+  echo "==> fund and declare an account: source this script and call dev_stack_fund <address> <amount> and"
+  echo "    dev_stack_declare <hex key> <address> with dev_stack_api=$dev_stack_api; the deposit credits once declared"
   echo "==> the node's log: $dev_stack_work/node.log; interrupt to stop"
   wait "$dev_stack_node_pid"
 fi

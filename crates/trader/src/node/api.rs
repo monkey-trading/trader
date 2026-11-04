@@ -39,11 +39,13 @@ pub struct NonceView {
     pub next_nonce: u64,
 }
 
-/// One bucket of a market's index marks: its start and its last mark.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+/// One bucket of a market's index marks: its start, its last mark, and whether the log derived it
+/// (`log_derived`) or a venue's candles seeded it (`seeded_from_provider`).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct MarkBucket {
     pub ts: Millis,
     pub close: Fixed,
+    pub provenance: String,
 }
 
 /// One page of `GET /v1/markets/{id}/marks`.
