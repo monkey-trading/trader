@@ -3,11 +3,10 @@
 # file or directory inside the repository, that a #fragment names a heading in its target, and that
 # the root AGENTS.md and CLAUDE.md are symlinks to agents/AGENTS.md. Percent-encoded destinations
 # are decoded before they are resolved, and an ATX heading's closing # markers are not part of its
-# anchor. Inline links (with a title in
-# quotes or parentheses, an angle-bracket destination, or a destination on the next line) and
-# reference definitions are read; code spans and fenced blocks (backtick or tilde) are not. A link
-# into the gitignored agents/.processes/ or a pulled vendor pack is reported, because a fresh
-# checkout lacks it. Needs python3. Exits 1 and prints each broken link.
+# anchor. Inline links (with a title in quotes or parentheses, an angle-bracket destination, or a
+# destination on the next line) and reference definitions are read; code spans and fenced blocks
+# (backtick or tilde) are not. A link into the gitignored agents/.processes/ or a pulled vendor
+# pack is reported, because a fresh checkout lacks it. Needs python3. Exits 1 and prints each broken link.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 exec python3 -I - "$root" <<'PY'

@@ -43,15 +43,15 @@ fresh; add '[x](<missing b.md>)'; check angle-bracket-link-with-space 1
 fresh; touch "$repo/agents/rules/a b.md"; add '[x](a%20b.md)'; check valid-percent-encoded-link 0
 fresh; add '[x](a%20b.md)'; check percent-encoded-link-missing 1 'agents/rules/a.md:4: a%20b.md does not resolve'
 fresh; add '[x](a%2Emd#heading-one)'; check valid-percent-encoded-dot 0
-fresh; touch "$tmp/outside.md"; add '[x](%2E%2E/%2E%2E/%2E%2E/outside.md)'; check encoded-leaves-repository 1
-fresh; mkdir -p "$repo/agents/.processes"; touch "$repo/agents/.processes/n.md"; add '[x](../%2Eprocesses/n.md)'; check encoded-processes-link-reported 1
-fresh; add '[x](a.md%00)'; check encoded-nul 1
+fresh; touch "$tmp/outside.md"; add '[x](%2E%2E/%2E%2E/%2E%2E/outside.md)'; check encoded-leaves-repository 1 'agents/rules/a.md:4: %2E%2E/%2E%2E/%2E%2E/outside.md leaves the repository'
+fresh; mkdir -p "$repo/agents/.processes"; touch "$repo/agents/.processes/n.md"; add '[x](../%2Eprocesses/n.md)'; check encoded-processes-link-reported 1 'agents/rules/a.md:4: ../%2Eprocesses/n.md is local only (gitignored)'
+fresh; add '[x](a.md%00)'; check encoded-nul 1 'agents/rules/a.md:4: a.md%00 does not resolve'
 fresh; printf '# C\n\n## Caf\xc3\xa9\n' > "$repo/agents/rules/c.md"; add '[x](c.md#caf%C3%A9)'; check valid-percent-encoded-fragment 0
-fresh; add '[x](a.md#heading%20one)'; check percent-encoded-fragment-with-space 1
+fresh; add '[x](a.md#heading%20one)'; check percent-encoded-fragment-with-space 1 'agents/rules/a.md:4: a.md#heading%20one names no heading'
 fresh; printf '## Usage ##\n' >> "$repo/agents/rules/a.md"; add '[x](#usage)'; check valid-closed-heading 0
 fresh; printf '## Usage ##  \n' >> "$repo/agents/rules/a.md"; add '[x](#usage)'; check valid-closed-heading-trailing-space 0
-fresh; printf '## Usage ##\n' >> "$repo/agents/rules/a.md"; add '[x](#usage-)'; check closed-heading-marker-not-in-anchor 1
-fresh; printf '## Usage ##\n' >> "$repo/agents/rules/a.md"; add '[x](#missing)'; check closed-heading-missing-fragment 1
+fresh; printf '## Usage ##\n' >> "$repo/agents/rules/a.md"; add '[x](#usage-)'; check closed-heading-marker-not-in-anchor 1 'agents/rules/a.md:5: #usage- names no heading'
+fresh; printf '## Usage ##\n' >> "$repo/agents/rules/a.md"; add '[x](#missing)'; check closed-heading-missing-fragment 1 'agents/rules/a.md:5: #missing names no heading'
 fresh; printf '## Usage #\n## Usage ##\n' >> "$repo/agents/rules/a.md"; add '[x](#usage-1)'; check closed-headings-count-as-duplicates 0
 fresh; printf '## C#\n' >> "$repo/agents/rules/a.md"; add '[x](#c)'; check hash-inside-heading-kept 0
 fresh; add '[x]('; add '  missing.md)'; check destination-on-next-line 1
