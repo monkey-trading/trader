@@ -18,16 +18,18 @@ while IFS= read -r file; do
     agents/skills/agent-code-review/scripts/*) areas+=" agent_scripts agent_docs" ;;
     # The merge queue's approval gate and its test.
     scripts/check-merge-approved.sh | scripts/check-merge-approved-test.sh) areas+=" merge_approval" ;;
-    # This classifier, the ci-passed predicate, and their test.
-    scripts/ci-areas.sh | scripts/check-ci-passed.sh | scripts/ci-test.sh) areas+=" ci_scripts" ;;
+    # This classifier, the ci-passed predicate, and their test; the line cap's test.
+    scripts/ci-areas.sh | scripts/check-ci-passed.sh | scripts/ci-test.sh | scripts/check-file-loc-test.sh)
+      areas+=" ci_scripts" ;;
+    # The line cap is read by the Rust jobs, and its test by the CI scripts job.
+    scripts/check-file-loc.sh) areas+=" rust ci_scripts" ;;
     # The link checker, its test, the Markdown it reads, and the LICENSE the README links.
     agents/* | AGENTS.md | CLAUDE.md | README.md | SECURITY.md | LICENSE | scripts/check-agent-links.sh \
       | scripts/check-agent-links-test.sh)
       areas+=" agent_docs" ;;
     # Read by no build, test, or script.
     crates/*/README.md) ;;
-    crates/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | deny.toml \
-      | scripts/check-file-loc.sh)
+    crates/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | deny.toml)
       areas+=" rust" ;;
     console/*) areas+=" console" ;;
     *)

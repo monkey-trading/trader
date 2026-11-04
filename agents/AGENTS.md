@@ -66,7 +66,8 @@ list.
   which follows the queue's entries from the group's head down to `main` and passes only if the
   latest `merge-approved` status on the head of every PR in the group is `success` from the owner's
   account. It never runs on a pull request, where the owner's commit status is the check.
-- **scripts/** — `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate;
+- **scripts/** — `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
+  `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
   running it against a stubbed GitHub API; `ci-areas.sh`, the path classifier, and
   `check-ci-passed.sh`, the `ci-passed` predicate, with `ci-test.sh` testing both and checking
@@ -88,7 +89,7 @@ Run from the repo root:
   `cargo test --workspace --locked`
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - Format check: `cargo fmt --all -- --check`
-- File line cap: `./scripts/check-file-loc.sh`
+- File line cap: `./scripts/check-file-loc.sh`; its test: `./scripts/check-file-loc-test.sh`
 - Supply chain: `cargo deny check` (CI runs it; install `cargo-deny` to run it locally)
 - Console, from `console/` (Node.js from `.nvmrc`): `npm ci`, then `npm run lint`,
   `npm run typecheck`, `npm test`, `npm run build`; `npm audit --audit-level=high`; `npm run dev`
