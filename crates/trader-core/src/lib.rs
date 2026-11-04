@@ -6,10 +6,15 @@
 
 pub mod bands;
 pub mod bars;
+pub mod controls;
 pub mod ema;
 pub mod extremes;
+pub mod hours;
+pub mod margin;
 pub mod marks;
+pub mod risk;
 pub mod rsi;
+pub mod sizing;
 pub mod sma;
 pub mod strategies;
 pub mod strategy;

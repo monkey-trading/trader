@@ -132,3 +132,17 @@ fn donchian_by_hand() {
     assert_eq!(seen[..9], expected);
     assert_eq!(seen[9..], [Some(Short), Some(Flat)]);
 }
+
+/// Bars to warm up on: the window for the windowed strategies, more for the exponential ones, and never
+/// more than the longest period.
+#[test]
+fn warm_up_bars() {
+    let bars = |text| parse(text).unwrap().warm_up_bars();
+    assert_eq!(bars("kind = 'sma_crossover'\nfast = 5\nslow = 20"), 20);
+    assert_eq!(bars("kind = 'ema_crossover'\nfast = 5\nslow = 20"), 60);
+    assert_eq!(bars("kind = 'macd'"), 105);
+    assert_eq!(bars("kind = 'rsi_reversion'"), 71);
+    assert_eq!(bars("kind = 'bollinger_reversion'"), 20);
+    assert_eq!(bars("kind = 'donchian_breakout'"), 21);
+    assert_eq!(bars("kind = 'ema_crossover'\nfast = 5\nslow = 9000"), 10_000);
+}

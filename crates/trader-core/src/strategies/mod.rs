@@ -12,6 +12,7 @@ use engine_core::Fixed;
 use serde::Deserialize;
 
 use crate::bands::MAX_CLOSE;
+use crate::sma::MAX_PERIOD;
 use crate::strategy::{ParamsError, SmaCrossover, Target};
 
 pub use bollinger_reversion::BollingerReversion;
@@ -105,6 +106,22 @@ pub enum Strategy {
 }
 
 impl StrategyParams {
+    /// How many bars of history to feed a new strategy before it trades, so its indicators have the
+    /// window they need and the exponential ones, which never forget, have mostly lost their seed:
+    /// the bars to a first target for the windowed strategies, a few times that for the others. At
+    /// most `MAX_PERIOD` bars.
+    pub fn warm_up_bars(&self) -> usize {
+        let bars = match *self {
+            Self::SmaCrossover { slow, .. } => slow,
+            Self::EmaCrossover { slow, .. } => 3 * slow,
+            Self::Macd { slow, signal, .. } => 3 * (slow + signal),
+            Self::RsiReversion { period, .. } => 5 * period + 1,
+            Self::BollingerReversion { period, .. } => period,
+            Self::DonchianBreakout { entry, .. } => entry + 1,
+        };
+        bars.min(MAX_PERIOD)
+    }
+
     /// The strategy these parameters name, with its indicators empty.
     /// Error cases:
     /// - a parameter outside what its strategy takes (see `ParamsError`)
