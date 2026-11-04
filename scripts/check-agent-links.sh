@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Checks that every relative Markdown link under agents/ and in the root *.md files resolves to a
 # file or directory inside the repository, that a #fragment names a heading in its target, and that
-# the root AGENTS.md and CLAUDE.md are symlinks to agents/AGENTS.md. Inline links (with a title in
+# the root AGENTS.md and CLAUDE.md are symlinks to agents/AGENTS.md. Percent-encoded destinations
+# are decoded before they are resolved, and an ATX heading's closing # markers are not part of its
+# anchor. Inline links (with a title in
 # quotes or parentheses, an angle-bracket destination, or a destination on the next line) and
 # reference definitions are read; code spans and fenced blocks (backtick or tilde) are not. A link
 # into the gitignored agents/.processes/ or a pulled vendor pack is reported, because a fresh
@@ -12,6 +14,7 @@ exec python3 -I - "$root" <<'PY'
 import os
 import re
 import sys
+from urllib.parse import unquote
 
 root = os.path.realpath(sys.argv[1])
 problems = []
@@ -70,7 +73,7 @@ def prose(path):
                 lines.append(line)
                 heading = re.match(r"#{1,6}\s+(.*)", line)
                 if heading:
-                    headings.append(heading.group(1))
+                    headings.append(re.sub(r"(?:^|\s+)#+\s*$", "", heading.group(1)))
     return lines, headings
 
 
@@ -118,6 +121,10 @@ for path in files:
         if re.match(r"[a-z][a-z0-9+.-]*:", target):
             continue
         file_part, _, fragment = target.partition("#")
+        file_part, fragment = unquote(file_part), unquote(fragment)
+        if "\0" in file_part:
+            problems.append(f"{rel}:{number}: {target} does not resolve")
+            continue
         resolved = path if not file_part else os.path.normpath(os.path.join(os.path.dirname(path), file_part))
         real = os.path.realpath(resolved)
         if not os.path.exists(resolved):

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Checks check-agent-links.sh on a scratch repository: valid links, a missing file, a missing
 # heading, titled links (quoted and parenthesised), reference definitions, angle-bracket links, a
-# destination on the next line, a link that leaves the repository, a symlink that does, links into
-# gitignored paths, skipped backtick and tilde fences, and wrong root symlinks. Prints
-# one line per case and exits 1 if any case fails.
+# destination on the next line, a link that leaves the repository, a symlink that does,
+# percent-encoded destinations, headings with closing markers, links into gitignored paths, skipped
+# backtick and tilde fences, and wrong root symlinks. Prints one line per case and exits 1 if any
+# case fails.
 set -euo pipefail
 script="$(cd "$(dirname "$0")" && pwd)/check-agent-links.sh"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -17,10 +18,12 @@ fresh() { # a minimal valid repository
   printf '# A\n\n## Heading one\n' > "$repo/agents/rules/a.md"
   ln -s agents/AGENTS.md "$repo/AGENTS.md"; ln -s agents/AGENTS.md "$repo/CLAUDE.md"
 }
-check() { # name expected-exit
+check() { # name expected-exit [output-line]
   local got=0
   "$repo/scripts/check-agent-links.sh" > "$tmp/out" 2>&1 || got=$?
-  if [ "$got" = "$2" ]; then echo "ok   $1"; else echo "FAIL $1: exit $got, want $2"; failed=1; fi
+  if [ "$got" != "$2" ]; then echo "FAIL $1: exit $got, want $2"; failed=1
+  elif [ -n "${3:-}" ] && ! grep -qxF "$3" "$tmp/out"; then echo "FAIL $1: output lacks: $3"; failed=1
+  else echo "ok   $1"; fi
 }
 add() { printf '%s\n' "$1" >> "$repo/agents/rules/a.md"; }
 
@@ -37,6 +40,20 @@ fresh; add '[x](<missing.md>)'; check angle-bracket-link 1
 fresh; add '[x](<a.md>)'; check valid-angle-bracket-link 0
 fresh; touch "$repo/agents/rules/a b.md"; add '[x](<a b.md>)'; check valid-angle-bracket-link-with-space 0
 fresh; add '[x](<missing b.md>)'; check angle-bracket-link-with-space 1
+fresh; touch "$repo/agents/rules/a b.md"; add '[x](a%20b.md)'; check valid-percent-encoded-link 0
+fresh; add '[x](a%20b.md)'; check percent-encoded-link-missing 1 'agents/rules/a.md:4: a%20b.md does not resolve'
+fresh; add '[x](a%2Emd#heading-one)'; check valid-percent-encoded-dot 0
+fresh; touch "$tmp/outside.md"; add '[x](%2E%2E/%2E%2E/%2E%2E/outside.md)'; check encoded-leaves-repository 1
+fresh; mkdir -p "$repo/agents/.processes"; touch "$repo/agents/.processes/n.md"; add '[x](../%2Eprocesses/n.md)'; check encoded-processes-link-reported 1
+fresh; add '[x](a.md%00)'; check encoded-nul 1
+fresh; printf '# C\n\n## Caf\xc3\xa9\n' > "$repo/agents/rules/c.md"; add '[x](c.md#caf%C3%A9)'; check valid-percent-encoded-fragment 0
+fresh; add '[x](a.md#heading%20one)'; check percent-encoded-fragment-with-space 1
+fresh; printf '## Usage ##\n' >> "$repo/agents/rules/a.md"; add '[x](#usage)'; check valid-closed-heading 0
+fresh; printf '## Usage ##  \n' >> "$repo/agents/rules/a.md"; add '[x](#usage)'; check valid-closed-heading-trailing-space 0
+fresh; printf '## Usage ##\n' >> "$repo/agents/rules/a.md"; add '[x](#usage-)'; check closed-heading-marker-not-in-anchor 1
+fresh; printf '## Usage ##\n' >> "$repo/agents/rules/a.md"; add '[x](#missing)'; check closed-heading-missing-fragment 1
+fresh; printf '## Usage #\n## Usage ##\n' >> "$repo/agents/rules/a.md"; add '[x](#usage-1)'; check closed-headings-count-as-duplicates 0
+fresh; printf '## C#\n' >> "$repo/agents/rules/a.md"; add '[x](#c)'; check hash-inside-heading-kept 0
 fresh; add '[x]('; add '  missing.md)'; check destination-on-next-line 1
 fresh; add '[x]('; add '  a.md)'; check valid-destination-on-next-line 0
 fresh; add '[x](https://example.com/none)'; check external-link-ignored 0
@@ -50,6 +67,7 @@ fresh; touch "$repo/agents/skills/vendor/pull.sh"; add '[x](../skills/vendor/pul
 fresh; touch "$repo/agents/skills/vendor/pack/SKILL.md"; add '[x](../skills/vendor/pack/SKILL.md)'; check vendor-pack-link-reported 1
 fresh; mkdir -p "$repo/agents/.processes/fixes"; touch "$repo/agents/.processes/fixes/n.md"; add '[x](../.processes/fixes/n.md)'; check processes-link-reported 1
 fresh; echo '[x](missing.md)' > "$repo/agents/skills/vendor/pack/README.md"; check vendor-pack-skipped 0
-fresh; rm "$repo/CLAUDE.md"; cp "$repo/agents/AGENTS.md" "$repo/CLAUDE.md"; check root-copy-not-symlink 1
-fresh; rm "$repo/AGENTS.md"; ln -s agents/rules/a.md "$repo/AGENTS.md"; check root-symlink-wrong-target 1
+fresh; rm "$repo/CLAUDE.md"; printf '[rule](agents/rules/a.md#heading-one)\n' > "$repo/CLAUDE.md"; check root-copy-not-symlink 1 'CLAUDE.md: not a symlink'
+fresh; rm "$repo/AGENTS.md"; ln -s agents/rules/a.md "$repo/AGENTS.md"; check root-symlink-wrong-target 1 'AGENTS.md: does not point to agents/AGENTS.md'
+fresh; mkdir -p "$repo/agents/.processes/fixes"; echo '[x](missing.md)' > "$repo/agents/.processes/x.md"; echo '[x](missing.md)' > "$repo/agents/.processes/fixes/y.md"; check processes-directory-skipped 0
 exit "$failed"
