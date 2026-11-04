@@ -1,0 +1,25 @@
+/* Class detection is limited to src/, so words in agents/ or the READMEs add no rules. */
+@import "tailwindcss" source("./");
+
+@theme {
+  /* Only the tokens below make colour utilities, so no colour escapes the contrast check. */
+  --color-*: initial;
+  --color-ink: #111827;
+  --color-paper: #f9fafb;
+  --color-muted: #4b5563;
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

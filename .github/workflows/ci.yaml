@@ -1,0 +1,433 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+# A merge group's ref names its pull request and base commit, so a group shares it only with the
+# stale run of a group the queue rebuilt on the same base, which the new run cancels.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+
+permissions:
+  contents: read
+
+jobs:
+  # Sorts a PR's changed files into areas (scripts/ci-areas.sh); every other job runs only when its
+  # area is true. A push,
+  # a merge group, a manual run, a failed diff, a workflow change, and any path not listed set every
+  # area true, so only the listed paths can skip a job. Each path lists the area of every job that
+  # reads it.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      cache: ${{ steps.classify.outputs.cache }}
+      rust: ${{ steps.classify.outputs.rust }}
+      console: ${{ steps.classify.outputs.console }}
+      agent_docs: ${{ steps.classify.outputs.agent_docs }}
+      agent_scripts: ${{ steps.classify.outputs.agent_scripts }}
+      merge_approval: ${{ steps.classify.outputs.merge_approval }}
+      ci_scripts: ${{ steps.classify.outputs.ci_scripts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Classify changed files
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          all=$(./scripts/ci-areas.sh --all)
+          areas=$all
+          cache=false
+          # The queue lands the commit its merge group tested, so a push to main whose commit passed a
+          # group has already run every check on it. That push then only refreshes the Rust caches: it
+          # runs the jobs that save one, compiling without the tests, and no area. A commit with no passed
+          # group, or an API error, runs every job.
+          if [[ "$EVENT" == push ]]; then
+            tested=$(gh api "repos/$GH_REPO/actions/workflows/ci.yaml/runs?head_sha=$SHA&event=merge_group&status=success&per_page=1" \
+              --jq .total_count) || tested=0
+            if [[ "$tested" =~ ^[1-9][0-9]*$ ]]; then areas=; cache=true; fi
+          fi
+          echo "cache=$cache" | tee -a "$GITHUB_OUTPUT"
+          # --no-renames lists both sides of a move.
+          if [[ "$EVENT" == pull_request ]] && files=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
+            echo "$files"
+            areas=$(./scripts/ci-areas.sh <<< "$files")
+          fi
+          for area in $all; do
+            [[ " $areas " == *" $area "* ]] && value=true || value=false
+            echo "$area=$value" | tee -a "$GITHUB_OUTPUT"
+          done
+
+  fmt:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  file-loc:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check max file length
+        run: ./scripts/check-file-loc.sh
+
+  clippy:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.cache == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.cache == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Test
+        run: cargo test --workspace --locked ${{ needs.changes.outputs.cache == 'true' && '--no-run' || '' }}
+
+  cargo-deny:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          command: check
+
+  console:
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: console/.nvmrc
+      - name: Install from the lockfile
+        working-directory: console
+        run: npm ci
+      - name: Audit
+        working-directory: console
+        run: npm audit --audit-level=high
+      - name: Lint
+        working-directory: console
+        run: npm run lint
+      - name: Type check
+        working-directory: console
+        run: npm run typecheck
+      - name: Test
+        working-directory: console
+        run: npm test
+      - name: Build
+        working-directory: console
+        run: npm run build
+
+  agent-links:
+    needs: changes
+    if: needs.changes.outputs.agent_docs == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the agent docs' links
+        run: ./scripts/check-agent-links.sh
+      - name: Test the link checker
+        run: ./scripts/check-agent-links-test.sh
+
+  review-delta:
+    needs: changes
+    if: needs.changes.outputs.agent_scripts == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the review-delta helper
+        run: ./agents/skills/agent-code-review/scripts/review-delta-test.sh
+
+  merge-approval:
+    needs: changes
+    if: needs.changes.outputs.merge_approval == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the merge queue's approval gate
+        run: ./scripts/check-merge-approved-test.sh
+
+  ci-scripts:
+    needs: changes
+    if: needs.changes.outputs.ci_scripts == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the path classifier and the ci-passed predicate
+        run: ./scripts/ci-test.sh
+
+  # Each job above but `changes` has a `cancel-` companion that runs only on a pull request or a
+  # merge group, and only when that job itself fails (`failure()` alone is also true for a failed
+  # ancestor such as `changes`). It cancels the run, so the first failed job stops the rest from
+  # spending runner minutes; `ci-passed` still runs and fails on the cancelled jobs, so the merge
+  # queue drops a failed group's pull request without waiting for the slowest job. A push to `main`
+  # and a manual run skip the companions: every job runs to the end, so caches are saved whole and
+  # every failure shows. The companions run no repository code, so `actions: write` is held by them
+  # alone. They are not in `ci-passed`'s `needs`. `changes` has none, so its failure leaves the
+  # other jobs to skip as before. A job that times out is cancelled, not failed, so its companion
+  # skips and the run continues. A new job gets a companion.
+  cancel-fmt:
+    needs: fmt
+    if: failure() && needs.fmt.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  cancel-file-loc:
+    needs: file-loc
+    if: failure() && needs.file-loc.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  cancel-clippy:
+    needs: clippy
+    if: failure() && needs.clippy.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  cancel-test:
+    needs: test
+    if: failure() && needs.test.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  cancel-cargo-deny:
+    needs: cargo-deny
+    if: failure() && needs.cargo-deny.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  cancel-console:
+    needs: console
+    if: failure() && needs.console.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  cancel-agent-links:
+    needs: agent-links
+    if: failure() && needs.agent-links.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  cancel-review-delta:
+    needs: review-delta
+    if: failure() && needs.review-delta.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  cancel-merge-approval:
+    needs: merge-approval
+    if: failure() && needs.merge-approval.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  cancel-ci-scripts:
+    needs: ci-scripts
+    if: failure() && needs.ci-scripts.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  # The single check to require in branch rules. It runs even when a job it needs fails, is
+  # cancelled, or is skipped, and passes only if every one of them succeeded or was skipped while
+  # `changes` set its area false. Add every new job to `needs`, and a gated one to the area map in
+  # scripts/check-ci-passed.sh.
+  ci-passed:
+    if: always()
+    needs: [changes, fmt, file-loc, clippy, test, cargo-deny, console, agent-links, review-delta, merge-approval, ci-scripts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require every job to succeed, or to skip because its area did not change
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: ./scripts/check-ci-passed.sh

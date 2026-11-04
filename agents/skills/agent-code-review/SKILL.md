@@ -188,9 +188,6 @@ recorded invariants add to what it checks and never narrow it.
 
 ## The review loop
 
-Until the CI feature lands there is no `ci-passed`: where this skill names it,
-[AGENTS.md](../../AGENTS.md#repo-facts) says what stands in.
-
 A PR is marked ready through review rounds, numbered from the first on its branch. Each round runs
 this skill in multi-agent mode at `medium` or higher over the PR's full diff
 ([agent-create-pr](../agent-create-pr/SKILL.md#before-a-pr-is-ready-for-review)), or in a delta

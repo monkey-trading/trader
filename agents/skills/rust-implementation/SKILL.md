@@ -255,7 +255,7 @@ everything else is a config key.
 - Prefer logic from the workspace's own crates and follow DRY: strategy and indicator logic lives in `trader-core`, and the binary reuses it.
 - May add smaller utility crates freely; ask before adding a major crate, weighing maintenance and popularity.
 - A new dependency of `trader-core` must not pull in IO or a runtime.
-- A new crate must pass `cargo-deny` against `deny.toml` (advisories, licenses, bans, sources), which CI runs once the Cargo workspace and CI feature adds it.
+- A new crate must pass `cargo-deny` against `deny.toml` (advisories, licenses, bans, sources), which CI runs.
 - Permitted by default (non-exhaustive): `alloy`, `anyhow`, `argon2`, `axum`, `base64`, `bytes`, `clap`, `futures`, `hex`, `http`, `itertools`, `rand` (key and salt generation, and tests), `reqwest`, `rustls`, `secrecy`, `serde` (and ecosystem), `sha2`, `sha3`, `smallvec`, `thiserror`, `tokio` (and ecosystem), `toml`, `tracing`, `tracing-subscriber` (with `env-filter`), `zeroize`.
 
 ### The engine crates
@@ -309,7 +309,7 @@ Import sections appear in this order, separated by a blank line. In `lib.rs` / `
 ## File line cap and module splits
 
 Rust source files are capped at 500 lines, enforced per package by
-`scripts/check-file-loc.sh` in CI (both come with the Cargo workspace and CI feature). A package opts in with a
+`scripts/check-file-loc.sh` in CI. A package opts in with a
 `check_pkg crates/<pkg> 500` line; adding that line means every `.rs` file in
 the package, `tests/` included, must already be under the cap (the script takes
 optional exempt paths, but prefer splitting over exempting). New packages opt in

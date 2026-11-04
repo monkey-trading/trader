@@ -1,0 +1,7 @@
+[package]
+name = "trader-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Indicators, strategies, sizing and risk limits for the monkeytrading bot, with no IO"

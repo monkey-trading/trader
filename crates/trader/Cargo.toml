@@ -1,0 +1,10 @@
+[package]
+name = "trader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The monkeytrading bot: runs strategies against the engine's node and serves its console"
+
+[dependencies]
+clap = { workspace = true }
