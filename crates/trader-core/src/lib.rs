@@ -4,7 +4,12 @@
 //! arrive as arguments, so strategies are tested and benchmarked without a network, and a recorded
 //! log replays through it to the same decisions.
 
+pub mod bands;
 pub mod bars;
+pub mod ema;
+pub mod extremes;
 pub mod marks;
+pub mod rsi;
 pub mod sma;
+pub mod strategies;
 pub mod strategy;

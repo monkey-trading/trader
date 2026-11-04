@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use engine_core::Fixed;
 use engine_core::types::Side;
 
+use crate::bands::{MAX_BAND_PERIOD, MAX_WIDTH};
 use crate::sma::{MAX_PERIOD, Sma};
 
 /// The position a strategy wants in its market.
@@ -20,6 +21,16 @@ pub enum Target {
 pub enum ParamsError {
     #[error("the fast period must be at least 1 and below the slow period, which is at most {MAX_PERIOD}")]
     Periods,
+    #[error("the period must be from 1 to {MAX_PERIOD}")]
+    Period,
+    #[error("the band period must be from 2 to {MAX_BAND_PERIOD}")]
+    BandPeriod,
+    #[error("the band width must be above 0 and at most {MAX_WIDTH} standard deviations")]
+    Width,
+    #[error("the levels must satisfy 0 < oversold <= exit <= overbought < 100")]
+    Levels,
+    #[error("the exit period must be from 1 to the entry period, which is at most {MAX_PERIOD}")]
+    ExitPeriod,
 }
 
 /// Long while the fast average of bar closes is above the slow one, short while it is below, and

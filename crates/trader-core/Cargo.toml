@@ -10,4 +10,8 @@ description = "Indicators, strategies, sizing and risk limits for the monkeytrad
 # deterministic too, so a recorded log replays through this crate to the same decisions.
 [dependencies]
 engine-core = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

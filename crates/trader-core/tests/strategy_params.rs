@@ -1,0 +1,134 @@
+//! The strategies' config sections and what they refuse, and the closes a strategy takes.
+
+use engine_core::Fixed;
+use trader_core::bands::MAX_CLOSE;
+use trader_core::strategies::{Strategy, StrategyParams, is_valid_close};
+use trader_core::strategy::{ParamsError, Target};
+
+fn fx(text: &str) -> Fixed {
+    text.parse().unwrap()
+}
+
+fn parse(text: &str) -> Result<StrategyParams, toml::de::Error> {
+    toml::from_str(text)
+}
+
+/// Strategies with conventional parameters take them as defaults; the two crossovers have none.
+#[test]
+fn conventional_parameters_are_the_defaults() {
+    assert_eq!(parse("kind = 'macd'").unwrap(), StrategyParams::Macd { fast: 12, slow: 26, signal: 9 });
+    assert_eq!(
+        parse("kind = 'rsi_reversion'").unwrap(),
+        StrategyParams::RsiReversion { period: 14, oversold: fx("30"), exit: fx("50"), overbought: fx("70") }
+    );
+    assert_eq!(
+        parse("kind = 'bollinger_reversion'").unwrap(),
+        StrategyParams::BollingerReversion { period: 20, width: fx("2") }
+    );
+    assert_eq!(parse("kind = 'donchian_breakout'").unwrap(), StrategyParams::DonchianBreakout { entry: 20, exit: 10 });
+    assert!(parse("kind = 'sma_crossover'").is_err());
+    assert!(parse("kind = 'ema_crossover'\nfast = 5").is_err());
+}
+
+/// A typo, an unknown strategy, a missing kind, and a float where a decimal string is due all fail.
+#[test]
+fn a_misspelt_section_is_refused() {
+    assert!(parse("kind = 'macd'\nsignall = 9").is_err());
+    assert!(parse("kind = 'rsi'").is_err());
+    assert!(parse("period = 14").is_err());
+    assert!(parse("kind = 'bollinger_reversion'\nwidth = 2.5").is_err());
+    assert!(parse("kind = 'bollinger_reversion'\nwidth = '2.5'").is_ok());
+}
+
+fn build(text: &str) -> Result<Strategy, ParamsError> {
+    parse(text).unwrap().build()
+}
+
+#[test]
+fn parameters_out_of_range_are_refused() {
+    let periods = |text| build(text).err();
+    assert_eq!(periods("kind = 'ema_crossover'\nfast = 5\nslow = 5"), Some(ParamsError::Periods));
+    assert_eq!(periods("kind = 'ema_crossover'\nfast = 0\nslow = 5"), Some(ParamsError::Periods));
+    assert_eq!(periods("kind = 'ema_crossover'\nfast = 2\nslow = 10001"), Some(ParamsError::Periods));
+    assert_eq!(periods("kind = 'macd'\nfast = 12\nslow = 12"), Some(ParamsError::Periods));
+    assert_eq!(periods("kind = 'macd'\nsignal = 0"), Some(ParamsError::Period));
+    assert_eq!(periods("kind = 'rsi_reversion'\nperiod = 0"), Some(ParamsError::Period));
+    assert_eq!(periods("kind = 'rsi_reversion'\noversold = 0"), Some(ParamsError::Levels));
+    assert_eq!(periods("kind = 'rsi_reversion'\noversold = 60"), Some(ParamsError::Levels));
+    assert_eq!(periods("kind = 'rsi_reversion'\noverbought = 40"), Some(ParamsError::Levels));
+    assert_eq!(periods("kind = 'rsi_reversion'\noverbought = 100"), Some(ParamsError::Levels));
+    assert_eq!(periods("kind = 'bollinger_reversion'\nperiod = 1"), Some(ParamsError::BandPeriod));
+    assert_eq!(periods("kind = 'bollinger_reversion'\nperiod = 1001"), Some(ParamsError::BandPeriod));
+    assert_eq!(periods("kind = 'bollinger_reversion'\nwidth = 0"), Some(ParamsError::Width));
+    assert_eq!(periods("kind = 'bollinger_reversion'\nwidth = 11"), Some(ParamsError::Width));
+    assert_eq!(periods("kind = 'donchian_breakout'\nentry = 5\nexit = 6"), Some(ParamsError::ExitPeriod));
+    assert_eq!(periods("kind = 'donchian_breakout'\nexit = 0"), Some(ParamsError::ExitPeriod));
+    assert_eq!(periods("kind = 'donchian_breakout'\nentry = 10001\nexit = 5"), Some(ParamsError::ExitPeriod));
+}
+
+/// The widest accepted settings build, so a bound is the last value taken and not the first refused.
+#[test]
+fn the_bounds_themselves_are_accepted() {
+    assert!(build("kind = 'bollinger_reversion'\nperiod = 1000\nwidth = 10").is_ok());
+    assert!(build("kind = 'bollinger_reversion'\nperiod = 2\nwidth = '0.000000001'").is_ok());
+    assert!(build("kind = 'donchian_breakout'\nentry = 10000\nexit = 10000").is_ok());
+    assert!(build("kind = 'rsi_reversion'\noversold = '0.000000001'\noverbought = '99.999999999'").is_ok());
+    assert!(build("kind = 'macd'\nfast = 9999\nslow = 10000\nsignal = 10000").is_ok());
+}
+
+/// A close that is not a valid mark is no data: it gives no target and leaves the strategy as it was.
+#[test]
+fn an_invalid_close_changes_nothing() {
+    for text in [
+        "kind = 'sma_crossover'\nfast = 1\nslow = 2",
+        "kind = 'ema_crossover'\nfast = 1\nslow = 2",
+        "kind = 'macd'\nfast = 1\nslow = 2\nsignal = 1",
+        "kind = 'rsi_reversion'\nperiod = 2",
+        "kind = 'bollinger_reversion'\nperiod = 2",
+        "kind = 'donchian_breakout'\nentry = 2\nexit = 1",
+    ] {
+        let mut clean = build(text).unwrap();
+        let mut disturbed = build(text).unwrap();
+        for close in ["10", "11", "10.5", "12", "13", "12.5", "11"] {
+            for bad in [Fixed::ZERO, fx("-1"), MAX_CLOSE + Fixed::from_raw(1), Fixed::MAX_INPUT] {
+                assert_eq!(disturbed.on_close(bad), None, "{text}: {bad}");
+            }
+            assert_eq!(disturbed.on_close(fx(close)), clean.on_close(fx(close)), "{text} at {close}");
+        }
+    }
+}
+
+#[test]
+fn the_valid_range_of_a_close() {
+    assert!(is_valid_close(Fixed::from_raw(1)));
+    assert!(is_valid_close(MAX_CLOSE));
+    assert!(!is_valid_close(Fixed::ZERO));
+    assert!(!is_valid_close(MAX_CLOSE + Fixed::from_raw(1)));
+}
+
+/// RSI reversion by hand: period 2 over 10, 9, 8, 9, 10, 11. Changes -1, -1 give index 0 (long, below
+/// 30); +1 gives gain 0.5 over loss 0.5, index 50 (flat at the exit); +1 gives gain 0.75 over loss
+/// 0.25, index 75 (short, above 70); +1 gives 0.875 over 0.125, index 87.5, so it stays short.
+#[test]
+fn rsi_reversion_by_hand() {
+    let mut strategy = build("kind = 'rsi_reversion'\nperiod = 2").unwrap();
+    let seen: Vec<_> = ["10", "9", "8", "9", "10", "11"].into_iter().map(|c| strategy.on_close(fx(c))).collect();
+    use Target::*;
+    assert_eq!(seen, [None, None, Some(Long), Some(Flat), Some(Short), Some(Short)]);
+}
+
+/// Donchian by hand with an entry channel of 3 closes and an exit channel of 1. The fourth close, 4,
+/// is above the highest of 1, 2, 3: long. 3.5 is below the close before it, not below the lowest of
+/// 2, 3, 4: flat. 3.6 is inside the channel of 3, 4, 3.5: still flat. 5 is above 4: long. 6 is above
+/// 5, and the long stays. 5.5 is below 6: flat. 3 is below the lowest of 5, 6, 5.5: short. 3.5 is above
+/// the close before it, not above the highest of 6, 5.5, 3: flat.
+#[test]
+fn donchian_by_hand() {
+    let mut strategy = build("kind = 'donchian_breakout'\nentry = 3\nexit = 1").unwrap();
+    let closes = ["1", "2", "3", "4", "3.5", "3.6", "5", "6", "5.5", "3", "3.5"];
+    let seen: Vec<_> = closes.into_iter().map(|c| strategy.on_close(fx(c))).collect();
+    use Target::*;
+    let expected = [None, None, None, Some(Long), Some(Flat), Some(Flat), Some(Long), Some(Long), Some(Flat)];
+    assert_eq!(seen[..9], expected);
+    assert_eq!(seen[9..], [Some(Short), Some(Flat)]);
+}
