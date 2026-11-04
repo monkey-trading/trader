@@ -146,6 +146,73 @@ async fn a_declined_close_is_an_incomplete_stop() {
     assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/positions/close-all"]);
 }
 
+/// A stop that never sees the node's time pass the last order's expiry cannot say that order is
+/// settled, and reports the stop incomplete, after cancelling and closing what it can see.
+#[tokio::test]
+async fn a_stop_that_cannot_see_the_last_order_expire_is_incomplete() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
+        _ = stopped.await;
+    }));
+    for (seq, ts, mid) in
+        [(11, T0, "100"), (12, T0 + 1_001, "100"), (13, T0 + MINUTE, "101"), (14, T0 + 2 * MINUTE, "102")]
+    {
+        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
+    }
+    let (path, _) = posted(&stand_in, 1).await;
+    assert_eq!(path, "/v1/orders");
+    // The node's time stays where it was when the order was signed, half a minute before its expiry.
+    stop.send(()).unwrap();
+    let err = tokio::time::timeout(Duration::from_secs(60), bot).await.unwrap().unwrap().unwrap_err();
+    assert!(err.to_string().contains("not read past the last order's expiry"), "{err:#}");
+}
+
+/// The stop waits, reading the node's time again, until it is past the last order's expiry, and
+/// only then cancels.
+#[tokio::test]
+async fn a_stop_waits_out_the_last_order() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({ "9": resting_order(9) })));
+        i.head_seq = 10;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
+        _ = stopped.await;
+    }));
+    for (seq, ts, mid) in
+        [(11, T0, "100"), (12, T0 + 1_001, "100"), (13, T0 + MINUTE, "101"), (14, T0 + 2 * MINUTE, "102")]
+    {
+        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
+    }
+    posted(&stand_in, 1).await;
+    // The order was signed at T0 and expires at T0 + 30 s, which is where the node's time now is.
+    let reads = stand_in.with(|i| {
+        i.time_ms = (T0 + 30_000) as u64;
+        i.market_reads
+    });
+    stop.send(()).unwrap();
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(stand_in.with(|i| i.posts.len()), 1, "nothing is sent while the order can enter the log");
+    assert!(stand_in.with(|i| i.market_reads) >= reads + 2, "the node's time is read again");
+    stand_in.with(|i| i.time_ms = (T0 + 30_001) as u64);
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+    let posts = stand_in.with(|i| i.posts.clone());
+    assert_eq!(
+        posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+        ["/v1/orders", "/v1/orders/cancel-all"]
+    );
+}
+
 // ── Helpers ──
 
 /// BTC-USD's listing, as the stand-in lists it.

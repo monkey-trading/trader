@@ -33,14 +33,15 @@ fn equal_averages_are_flat() {
     assert_eq!(last, Some(Target::Flat));
 }
 
-/// The comparison is exact: fast 1 over slow 3 on 1, 1, 1.000000001 has a slow average that
-/// truncates to 1.000000000 but is above 1, so the fast close above it is long.
+/// The comparison is exact: fast 1 over slow 3 on 1, 1, 0.999999999 has a slow average of
+/// 0.9999999996…, which truncates to the fast close itself, yet the close is below it: short, where
+/// comparing the truncated averages would say flat.
 #[test]
 fn compares_without_rounding() {
     let mut strategy = SmaCrossover::new(1, 3).unwrap();
-    let last = ["1", "1", "1.000000001"].into_iter().map(|c| strategy.on_close(fx(c))).last().unwrap();
-    assert_eq!(strategy.averages().1, Some(fx("1")));
-    assert_eq!(last, Some(Target::Long));
+    let last = ["1", "1", "0.999999999"].into_iter().map(|c| strategy.on_close(fx(c))).last().unwrap();
+    assert_eq!(strategy.averages(), (Some(fx("0.999999999")), Some(fx("0.999999999"))));
+    assert_eq!(last, Some(Target::Short));
 }
 
 #[test]
@@ -75,6 +76,25 @@ fn orders_move_the_position_to_its_target() {
     for (target, position, expected) in cases {
         assert_eq!(order_for(target, size, fx(position)), expected, "{target:?} from {position}");
     }
+}
+
+/// No order is above the engine's input bound: reversing a position of the largest size takes one
+/// order of the bound to flat, then another to the target, each way.
+#[test]
+fn orders_stay_within_the_input_bound() {
+    let max = Fixed::MAX_INPUT;
+    let order = |side, reduce_only| Some(OrderIntent { side, qty: max, reduce_only });
+    assert_eq!(order_for(Target::Short, max, max), order(Side::Sell, true));
+    assert_eq!(order_for(Target::Short, max, Fixed::ZERO), order(Side::Sell, false));
+    assert_eq!(order_for(Target::Long, max, -max), order(Side::Buy, true));
+    assert_eq!(order_for(Target::Long, max, Fixed::ZERO), order(Side::Buy, false));
+    // A move just over the bound leaves its remainder for the next order.
+    let half = max.div_int(2);
+    let just_over = half + Fixed::from_raw(1);
+    assert_eq!(
+        order_for(Target::Short, just_over, just_over),
+        Some(OrderIntent { side: Side::Sell, qty: max, reduce_only: false })
+    );
 }
 
 /// A recorded run: one mark per command, three per minute, through one-minute bars into a 1-over-2

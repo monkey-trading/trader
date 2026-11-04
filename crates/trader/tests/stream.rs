@@ -87,6 +87,20 @@ async fn a_start_after_the_requested_seq_is_a_gap() {
     assert_eq!(stand_in.with(|i| i.connections.len()), 2);
 }
 
+/// A verified message the bot cannot place, one with no offset, stops the stream: every connection
+/// would send it again.
+#[tokio::test]
+async fn a_message_with_no_offset_stops_the_stream() {
+    let stand_in = StandIn::start().await;
+    stand_in.append((1, 0), tick(1));
+    stand_in.append((2, 0), json!({ "type": "something_new", "seq": 2 }));
+    let mut stream = stream(&stand_in, 1, Duration::from_secs(30));
+    assert_eq!(next(&mut stream).await, (1, 0));
+    let err = timeout(Duration::from_secs(10), stream.next()).await.unwrap().unwrap_err();
+    assert!(err.to_string().contains("something_new stream message with no offset"), "{err}");
+    assert_eq!(stand_in.with(|i| i.connections.len()), 1);
+}
+
 // ── Helpers ──
 
 /// A `Tick` command at `seq`.

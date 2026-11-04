@@ -14,21 +14,26 @@ use tracing::{Instrument, error, info, info_span, warn};
 use trader_core::bars::Bar;
 use trader_core::strategy::OrderIntent;
 
-use crate::bot::{Bot, Halt};
+use crate::bot::{Bot, Halt, REPLAY_LAG_MS};
 use crate::node::CallError;
 
 /// How long after the node's time a signed request may still be sequenced: long enough to reach a
 /// node over a slow link, and shorter than the shortest bar, so a live bot's next bar is past it.
-const EXPIRES_IN_MS: Millis = 30_000;
-/// The longest the stop waits for the last order's expiry to pass in the node's time.
+pub(super) const EXPIRES_IN_MS: Millis = 30_000;
+/// The longest the stop waits for the node's time to pass the last order's expiry.
 const MAX_EXPIRY_WAIT: Duration = Duration::from_millis(EXPIRES_IN_MS as u64 + 5_000);
+/// The pause between two reads of the node's time while the stop waits.
+const EXPIRY_POLL: Duration = Duration::from_secs(1);
 
 impl Bot {
     /// Places a signed market order for `intent`, quoted at the last mark, under `bar`'s start as
-    /// its client id. A refusal, by the node or the engine, is logged, and the next bar tries again.
+    /// its client id, unless the node's time when it gives the nonce is more than `REPLAY_LAG_MS`
+    /// past `ts`, the time of the command that closed the bar: the bar is then history, however
+    /// promptly its frame was signed. A refusal, by the node or the engine, is logged, and the next
+    /// bar tries again.
     /// Error cases:
     /// - an answer signed by another key than the signer
-    pub(super) async fn place(&mut self, intent: OrderIntent, bar: Bar) -> Result<(), Halt> {
+    pub(super) async fn place(&mut self, intent: OrderIntent, bar: Bar, ts: Millis) -> Result<(), Halt> {
         // Bar starts are positive milliseconds since the epoch, one per bar.
         let client_id = u64::try_from(bar.start).unwrap_or_default();
         let span = info_span!("order", id = client_id);
@@ -37,7 +42,12 @@ impl Bot {
                 warn!("no mark to quote the order at");
                 return Ok(());
             };
-            let Some((nonce, expires_at)) = self.next_nonce().await? else { return Ok(()) };
+            let Some((nonce, now)) = self.next_nonce().await? else { return Ok(()) };
+            if now.saturating_sub(ts) > REPLAY_LAG_MS {
+                info!(now, ts, "the bar is history by the node's time: no order");
+                return Ok(());
+            }
+            let expires_at = now.saturating_add(EXPIRES_IN_MS);
             let mut request = OrderRequest {
                 account: self.key.address(),
                 client_id,
@@ -75,7 +85,8 @@ impl Bot {
     /// - orders still rest, or a position it was to close is still held, or neither can be confirmed
     pub(super) async fn stop(&mut self) -> Result<(), Halt> {
         let account = self.key.address();
-        let quoted = self.wait_out_last_order().await?.or(self.mark);
+        let (mark, settled) = self.wait_out_last_order().await?;
+        let quoted = mark.or(self.mark);
         let (resting, held) = match self.read_account().await {
             Ok(view) => (Some(view.orders.len()), view.positions.get(&self.market).map_or(Fixed::ZERO, |p| p.qty)),
             Err(Halt::WrongSigner) => return Err(Halt::WrongSigner),
@@ -86,7 +97,8 @@ impl Bot {
         };
         if resting != Some(0) {
             info!(?resting, "cancelling the account's resting orders");
-            if let Some((nonce, expires_at)) = self.next_nonce().await? {
+            if let Some((nonce, now)) = self.next_nonce().await? {
+                let expires_at = now.saturating_add(EXPIRES_IN_MS);
                 let hash = cancel_all_hash(&self.domain, account, nonce, expires_at);
                 let auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
                 match self.node.cancel_all(&CancelAllRequest { account, auth }).await {
@@ -98,7 +110,8 @@ impl Bot {
         }
         if let (true, false, Some(quoted)) = (self.close_on_stop, held.is_zero(), quoted) {
             info!(position = %held, %quoted, "closing the position");
-            if let Some((nonce, expires_at)) = self.next_nonce().await? {
+            if let Some((nonce, now)) = self.next_nonce().await? {
+                let expires_at = now.saturating_add(EXPIRES_IN_MS);
                 let mut request = CloseAllRequest {
                     account,
                     closes: vec![CloseEntry { market: self.market, quoted }],
@@ -126,36 +139,39 @@ impl Bot {
                 left.orders.len()
             )));
         }
+        if !settled {
+            return Err(incomplete("the node's time was not read past the last order's expiry".into()));
+        }
         info!(resting_orders = 0, %position, "stopped");
         Ok(())
     }
 
-    /// Waits until the node's time is past the last order's expiry, so that order is in the log or
-    /// never will be, and returns the market's mark as the node gives it then, if it gives one.
+    /// Waits until a verified read of the node's time is past the last order's expiry, so that order
+    /// is in the log or never will be, for at most `MAX_EXPIRY_WAIT`. Returns the market's mark as
+    /// the node last gave it, and whether the expiry was seen to pass, which it always is with no
+    /// order outstanding once the node's time has been read.
     /// Error cases:
     /// - an answer signed by another key than the signer
-    async fn wait_out_last_order(&self) -> Result<Option<Fixed>, Halt> {
-        let mut waited = false;
+    async fn wait_out_last_order(&self) -> Result<(Option<Fixed>, bool), Halt> {
+        let deadline = tokio::time::Instant::now() + MAX_EXPIRY_WAIT;
+        let mut mark = None;
         loop {
-            let markets = match self.node.markets().await {
-                Ok(markets) => markets,
+            match self.node.markets().await {
+                Ok(markets) => {
+                    mark = markets.body.iter().find(|m| m.spec.id == self.market).and_then(|m| m.mark);
+                    let now = Millis::try_from(markets.time_ms).unwrap_or(Millis::MAX);
+                    if self.order_expires_at.is_none_or(|expires_at| now > expires_at) {
+                        return Ok((mark, true));
+                    }
+                    info!(now, expires_at = ?self.order_expires_at, "waiting until the last order can no longer enter the log");
+                }
                 Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-                Err(e) => {
-                    warn!("the market's mark was not read: {e}");
-                    return Ok(None);
-                }
-            };
-            let mark = markets.body.iter().find(|m| m.spec.id == self.market).and_then(|m| m.mark);
-            let now = Millis::try_from(markets.time_ms).unwrap_or(Millis::MAX);
-            match self.order_expires_at {
-                Some(expires_at) if now <= expires_at && !waited => {
-                    let wait = Duration::from_millis(u64::try_from(expires_at - now).unwrap_or(0) + 1_000);
-                    info!(expires_at, "waiting until the last order can no longer enter the log");
-                    tokio::time::sleep(wait.min(MAX_EXPIRY_WAIT)).await;
-                    waited = true;
-                }
-                _ => return Ok(mark),
+                Err(e) => warn!("the node's time and mark were not read: {e}"),
             }
+            if tokio::time::Instant::now() + EXPIRY_POLL > deadline {
+                return Ok((mark, false));
+            }
+            tokio::time::sleep(EXPIRY_POLL).await;
         }
     }
 
@@ -170,14 +186,14 @@ impl Bot {
         }
     }
 
-    /// The account's next nonce and an expiry `EXPIRES_IN_MS` after the node's time, or `None`, with
-    /// a warning, when the node gives no answer to rely on.
+    /// The account's next nonce and the node's time when it gave it, or `None`, with a warning,
+    /// when the node gives no answer to rely on.
     /// Error cases:
     /// - an answer signed by another key than the signer
     async fn next_nonce(&self) -> Result<Option<(u64, Millis)>, Halt> {
         match self.node.nonce(self.key.address()).await {
             Ok(answer) => match Millis::try_from(answer.time_ms) {
-                Ok(now) => Ok(Some((answer.body.next_nonce, now.saturating_add(EXPIRES_IN_MS)))),
+                Ok(now) => Ok(Some((answer.body.next_nonce, now))),
                 Err(_) => {
                     warn!(time_ms = answer.time_ms, "the node's time is out of range");
                     Ok(None)

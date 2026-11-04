@@ -24,11 +24,11 @@ use crate::config::Config;
 use crate::keys::AccountKey;
 use crate::node::{CallError, Node};
 use crate::stream::message::{CommandMessage, Head, Quotes};
-use crate::stream::{Frame, Stream};
+use crate::stream::{Frame, Stream, StreamError};
 
 /// How far behind the node's time a bar may close and still be acted on; one further behind is
 /// history the stream is replaying, quoted at marks long gone.
-const REPLAY_LAG_MS: Millis = 30_000;
+pub(super) const REPLAY_LAG_MS: Millis = 30_000;
 
 /// Why the bot stopped on its own.
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +66,9 @@ pub struct Bot {
     /// The expiry of the last order signed. Until the log passes it, that order may still enter the
     /// log, so its fill may still be to come, and no other order is placed.
     order_expires_at: Option<Millis>,
+    /// The latest expiry an order signed before this start can carry. Until the log passes it, an
+    /// earlier process's order may still enter the log, and no order is placed.
+    trading_from: Millis,
 }
 
 /// Runs the bot until `stop` completes, or until it halts on its own; then cancels the account's
@@ -80,7 +83,15 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let key = AccountKey::load(&cfg.account.key, env).await?;
     info!(account = %key.address(), "account key unlocked");
-    let (mut bot, mut stream) = startup::start(&cfg, key).await?;
+    let (mut bot, mut stream) = match startup::start(&cfg, key).await {
+        Ok(started) => started,
+        Err(e) => {
+            if let Some(CallError::WrongSigner { .. }) = e.downcast_ref::<CallError>() {
+                error!(alert = "node_signer_mismatch", "{e:#}");
+            }
+            return Err(e);
+        }
+    };
     let halt = match bot.follow(&mut stream, stop).await {
         Err(Halt::WrongSigner) => Err(Halt::WrongSigner),
         followed => {
@@ -110,7 +121,10 @@ impl Bot {
                     return Ok(());
                 }
                 frame = stream.next() => {
-                    let frame = frame.map_err(|_| Halt::WrongSigner)?;
+                    let frame = frame.map_err(|e| match e {
+                        StreamError::WrongSigner => Halt::WrongSigner,
+                        StreamError::Unreadable(e) => Halt::Unfollowable(e),
+                    })?;
                     self.apply(&frame).await?;
                 }
             }
@@ -139,7 +153,7 @@ impl Bot {
                 let quotes: Quotes = serde_json::from_str(message.cmd.get()).map_err(|e| unreadable(e.into()))?;
                 self.marks.store(message.ts, &quotes.quotes);
             }
-            "admin" | "signed_admin" => self.relist(&message.command().map_err(unreadable)?, &events)?,
+            "admin" | "signed_admin" => self.relist(message.ts, &message.command().map_err(unreadable)?, &events)?,
             _ => {}
         }
         let mut filled = false;
@@ -162,10 +176,10 @@ impl Bot {
         Ok(())
     }
 
-    /// Takes the price rules of a listing of the market that an applied admin command sets.
+    /// Takes the price rules of a listing of the market that an applied admin command at `ts` sets.
     /// Error cases:
     /// - the new listing is one the bot does not trade
-    fn relist(&mut self, command: &Command, events: &[Event]) -> Result<(), Halt> {
+    fn relist(&mut self, ts: Millis, command: &Command, events: &[Event]) -> Result<(), Halt> {
         let admin = match command {
             Command::Admin(admin) => admin,
             Command::SignedAdmin(request) => &request.command,
@@ -177,7 +191,7 @@ impl Bot {
         }
         supported(spec).map_err(Halt::Unfollowable)?;
         info!(market = self.market, rules = ?spec.price_rules, "the market's listing changed");
-        self.marks.set_rules(spec.price_rules);
+        self.marks.set_rules(ts, spec.price_rules);
         Ok(())
     }
 
@@ -242,8 +256,12 @@ impl Bot {
             info!(?target, expires_at, "the last order may still enter the log: no order");
             return Ok(());
         }
+        if ts <= self.trading_from {
+            info!(?target, self.trading_from, "an order signed before this start may still enter the log: no order");
+            return Ok(());
+        }
         info!(?target, position = %self.position, "moving to the target");
-        self.place(intent, bar).await
+        self.place(intent, bar, ts).await
     }
 }
 

@@ -271,6 +271,112 @@ async fn an_order_holds_the_next_until_it_expires() {
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
 }
 
+/// A bar whose frame was signed promptly but is read late is history by the node's time when it
+/// gives the nonce, and places no order.
+#[tokio::test]
+async fn a_bar_read_late_places_no_order() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
+        _ = stopped.await;
+    }));
+    while stand_in.with(|i| i.connections.is_empty()) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The frames carry the time they were signed at, minute 2, but the node's time is minute 10.
+    stand_in.with(|i| {
+        i.time_ms = (T0 + 10 * MINUTE) as u64;
+        i.frame_time = Some((T0 + 2 * MINUTE) as u64);
+    });
+    for (seq, ts, mid) in
+        [(11, T0, "100"), (12, T0 + 1_001, "100"), (13, T0 + MINUTE, "101"), (14, T0 + 2 * MINUTE, "102")]
+    {
+        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
+    }
+    // Minute 1's bar is long and asks for a nonce, whose answer is minute 10. A bar closed at the
+    // node's time orders.
+    while stand_in.with(|i| i.nonce_reads) == 0 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    stand_in.with(|i| i.frame_time = None);
+    stand_in.append((15, 0), command(15, T0 + 10 * MINUTE, prices(1, "103", T0 + 10 * MINUTE), json!([])));
+    assert_eq!(order(&stand_in, 1).await["client_id"], T0 + 2 * MINUTE);
+    stand_in.with(|i| i.time_ms = (T0 + 20 * MINUTE) as u64);
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+    assert_eq!(stand_in.with(|i| i.posts.len()), 1);
+}
+
+/// An order an earlier process signed may enter the log until its expiry, at most the window after
+/// this start, so no order goes out for a bar closed before then.
+#[tokio::test]
+async fn no_order_before_an_earlier_process_orders_expire() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("98"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+        i.time_ms = (T0 + 50_000) as u64;
+        let bucket = |ts: i64, close: &str| {
+            json!({ "ts": ts, "open": close, "high": close, "low": close,
+            "close": close, "provenance": "log_derived" })
+        };
+        i.marks = vec![bucket(T0 - 2 * MINUTE, "99"), bucket(T0 - MINUTE, "98")];
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
+        _ = stopped.await;
+    }));
+    // Warmed up at 99 then 98, minute 0 closes at 100: long, but at T0 + 60 s, before T0 + 80 s.
+    for (seq, ts, mid) in
+        [(11, T0 + 50_000, "100"), (12, T0 + 51_001, "100"), (13, T0 + MINUTE, "101"), (14, T0 + 2 * MINUTE, "102")]
+    {
+        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
+    }
+    assert_eq!(order(&stand_in, 1).await["client_id"], T0 + MINUTE);
+    stand_in.with(|i| i.time_ms = (T0 + 10 * MINUTE) as u64);
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+}
+
+/// The current bar starts from the history's bucket in its window: a bot started at T0 + 20 s,
+/// whose mark does not move again before minute 1, still has minute 0's bar, at the history's 101.
+#[tokio::test]
+async fn the_current_bar_starts_from_the_history() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("101"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+        i.time_ms = (T0 + 20_000) as u64;
+        let bucket = |ts: i64, close: &str| {
+            json!({ "ts": ts, "open": close, "high": close, "low": close,
+            "close": close, "provenance": "log_derived" })
+        };
+        i.marks = vec![bucket(T0 - 2 * MINUTE, "99"), bucket(T0 - MINUTE, "100"), bucket(T0, "101")];
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
+        _ = stopped.await;
+    }));
+    for (seq, ts) in [(11, T0 + 20_000), (12, T0 + 21_001), (13, T0 + MINUTE)] {
+        stand_in.append((seq, 0), command(seq, ts, prices(1, "101", ts), json!([])));
+    }
+    // 101 above the average of 100 and 101: long, ordered as minute 0's bar closes.
+    assert_eq!(order(&stand_in, 1).await["client_id"], T0);
+    stand_in.with(|i| i.time_ms = (T0 + 10 * MINUTE) as u64);
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+}
+
 // ── Helpers ──
 
 /// The `n`th POST, which must be an order.

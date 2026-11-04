@@ -71,6 +71,8 @@ pub enum Fault {
 pub struct Inner {
     pub answers: Option<Answers>,
     pub time_ms: u64,
+    /// The time stream frames are signed with, when it is not `time_ms`.
+    pub frame_time: Option<u64>,
     pub head_seq: u64,
     pub markets: Value,
     /// Account views by lower-case address; an absent one answers 404.
@@ -87,8 +89,11 @@ pub struct Inner {
     pub faults: BTreeMap<(usize, (u64, u32)), Fault>,
     /// The request target of each stream connection opened.
     pub connections: Vec<String>,
-    /// How many times an account was read.
+    /// How many times an account, and its nonce, were read.
     pub account_reads: usize,
+    pub nonce_reads: usize,
+    /// How many times the markets were read.
+    pub market_reads: usize,
     /// Whether a cancel-all clears the account's resting orders and a close-all its positions in
     /// the markets it names, as the engine's do when they succeed.
     pub settle: bool,
@@ -254,7 +259,11 @@ async fn sign_answers(State(s): State<Arc<StandIn>>, req: Request, next: Next) -
 }
 
 async fn markets(State(s): State<Arc<StandIn>>) -> Response {
-    axum::Json(s.with(|i| i.markets.clone())).into_response()
+    let markets = s.with(|i| {
+        i.market_reads += 1;
+        i.markets.clone()
+    });
+    axum::Json(markets).into_response()
 }
 
 async fn marks(State(s): State<Arc<StandIn>>) -> Response {
@@ -275,7 +284,11 @@ async fn account_view_route(State(s): State<Arc<StandIn>>, Path(address): Path<S
 }
 
 async fn nonce(State(s): State<Arc<StandIn>>) -> Response {
-    axum::Json(json!({ "next_nonce": s.with(|i| i.nonce) })).into_response()
+    let nonce = s.with(|i| {
+        i.nonce_reads += 1;
+        i.nonce
+    });
+    axum::Json(json!({ "next_nonce": nonce })).into_response()
 }
 
 /// Records a POST, settles a cancel-all or close-all when `Inner::settle` says so, and answers
@@ -337,7 +350,9 @@ async fn serve_log(s: Arc<StandIn>, mut socket: WebSocket, connection: Connectio
         let appended = s.appended.notified();
         let entry = s.with(|i| {
             let pending: Vec<_> = i.log.iter().filter(|(offset, _)| *offset >= start).cloned().collect();
-            pending.get(next).cloned().map(|(offset, msg)| (offset, msg, i.faults.remove(&(place, offset)), i.time_ms))
+            pending.get(next).cloned().map(|(offset, msg)| {
+                (offset, msg, i.faults.remove(&(place, offset)), i.frame_time.unwrap_or(i.time_ms))
+            })
         });
         let Some((_, msg, fault, time)) = entry else {
             appended.await;

@@ -12,9 +12,10 @@ use trader_core::bars::BarBuilder;
 use trader_core::marks::IndexMarks;
 use trader_core::strategy::SmaCrossover;
 
-use crate::bot::{Bot, supported};
+use crate::bot::{Bot, orders, supported};
 use crate::config::Config;
 use crate::keys::AccountKey;
+use crate::node::api::MarkBucket;
 use crate::node::{CallError, Node, Tls};
 use crate::stream::Stream;
 
@@ -71,22 +72,27 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
     let bar_ms = Millis::try_from(strategy_cfg.bar.as_millis()).context("bar length")?;
     let mut strategy = SmaCrossover::new(strategy_cfg.fast, strategy_cfg.slow)?;
     let now = Millis::try_from(now).context("node time")?;
-    // Bars that end by `live_from` come from the history; the log builds the rest.
+    // Bars that end by `live_from` come from the history. The current bar starts from the history's
+    // buckets in its window, the moves the node saw before this start, and the log goes on from there.
     let live_from = BarBuilder::new(bar_ms, Millis::MIN).window_start(now);
     let history_from = live_from - bar_ms * i64::try_from(strategy_cfg.slow).context("slow period")?;
     // The widest buckets that tile a bar, which the node keeps longest; every bar is whole minutes.
-    let (resolution, bucket_ms) =
+    let (resolution, _) =
         RESOLUTIONS.into_iter().find(|(_, width)| bar_ms % width == 0).expect("bars are whole minutes");
-    let buckets = node.marks(market_id, resolution, history_from, live_from - bucket_ms).await?;
+    let buckets = node.marks(market_id, resolution, history_from, now).await?;
+    let (past, current): (Vec<&MarkBucket>, Vec<&MarkBucket>) =
+        buckets.iter().partition(|bucket| bucket.ts < live_from);
     let mut history = BarBuilder::new(bar_ms, Millis::MIN);
     let mut bars = 0;
-    let closes = buckets.iter().map(|bucket| (bucket.ts, Some(bucket.close))).chain([(live_from, None)]);
+    let closes = past.iter().map(|bucket| (bucket.ts, Some(bucket.close))).chain([(live_from, None)]);
     for (ts, close) in closes {
         if let Some(bar) = history.on_command(ts, close) {
             strategy.on_close(bar.close);
             bars += 1;
         }
     }
+    let mut live = BarBuilder::new(bar_ms, live_from);
+    current.iter().for_each(|bucket| _ = live.on_command(bucket.ts, Some(bucket.close)));
     let (fast, slow) = strategy.averages();
     info!(bars, buckets = buckets.len(), resolution, ?fast, ?slow, "warmed up from the marks history");
 
@@ -99,12 +105,14 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         max_slippage_bps: strategy_cfg.max_slippage_bps,
         close_on_stop: cfg.account.close_on_stop,
         marks: IndexMarks::new(market.spec.price_rules),
-        bars: BarBuilder::new(bar_ms, live_from),
+        bars: live,
         strategy,
         position,
         balance: view.balance,
         mark: market.mark,
         order_expires_at: None,
+        // An order an earlier process signed before this start expires by now plus its window.
+        trading_from: now.saturating_add(orders::EXPIRES_IN_MS),
     };
     let stream = Stream::new(tls, node_cfg.signer.0, deployment, node_cfg.stream_timeout, head_seq + 1);
     Ok((bot, stream))

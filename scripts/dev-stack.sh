@@ -150,6 +150,8 @@ CONFIG
   done
   grep -q 'first trusted time sample: sequencing started' "$dev_stack_work/node.log" \
     || dev_stack_fail "the node never started sequencing"
+  [[ "$(curl -sk --max-time 2 "$dev_stack_api/v1/markets" | jq -r '[.[]? | select(.symbol == "BTC-USD" and .mark != null)] | length' \
+    2>/dev/null || true)" == 1 ]] || dev_stack_fail "BTC-USD has no mark"
   attestation="$(curl -sfk --max-time 5 "$dev_stack_api/v1/attestation")" || dev_stack_fail "no attestation"
   dev_stack_signer="$(jq -r .enclave_address <<< "$attestation")"
   dev_stack_pin="$(jq -r '.tls_public_key_sha256 | ltrimstr("0x")' <<< "$attestation")"

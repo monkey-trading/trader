@@ -18,11 +18,14 @@ answer that fails the check is an error, never data, and one signed by another k
   to warm the strategy up, at the widest resolution that tiles a bar; from then on the position
   follows the account's fills in the log, and the balance is read again after each of them
 - Bars built only from moves of the mark, as the node's marks history records them, so bars warmed
-  up from the history and bars built live agree
+  up from the history and bars built live agree; the current bar starts from the history's buckets
+  in its window
 - Signed market orders toward the strategy's target, on the account's next nonce, quoted at the
   last mark; a declined order is logged with the node's reason and retried on the next bar. No
-  order goes out for a bar the stream is replaying from history, or before the log has passed the
-  last order's expiry, so an order's fill is always in the position before the next decision
+  order goes out for a bar more than half a minute behind the node's time, by its frame or by the
+  nonce answer, or before the log has passed the expiry of the last order, or of any order an
+  earlier process may have signed, so an order's fill is always in the position before the next
+  decision. An order never exceeds the engine's input bound
 - On SIGINT or SIGTERM, once the last order can no longer enter the log, a cancel of the account's
   resting orders and, when configured, a close of its position at the node's current mark; a stop
   that leaves either behind, or cannot confirm it did not, exits non-zero with an alert

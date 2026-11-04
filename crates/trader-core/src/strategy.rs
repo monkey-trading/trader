@@ -71,8 +71,10 @@ impl SmaCrossover {
     }
 }
 
-/// The order that takes `position` to `target`, where a long or short target is `size` units:
-/// `None` when the position is already there.
+/// The order that takes `position` toward `target`, where a long or short target is `size` units:
+/// `None` when the position is already there. An order is at most `Fixed::MAX_INPUT` units, the
+/// most the engine takes, so a larger move, such as reversing a position of more than half that,
+/// takes more than one order.
 pub fn order_for(target: Target, size: Fixed, position: Fixed) -> Option<OrderIntent> {
     let wanted = match target {
         Target::Long => size,
@@ -83,8 +85,9 @@ pub fn order_for(target: Target, size: Fixed, position: Fixed) -> Option<OrderIn
     if delta.is_zero() {
         return None;
     }
-    let side = if delta.is_positive() { Side::Buy } else { Side::Sell };
+    let qty = delta.abs().min(Fixed::MAX_INPUT);
+    let (side, after) = if delta.is_positive() { (Side::Buy, position + qty) } else { (Side::Sell, position - qty) };
     // Shrinking toward zero on the same side, or to zero itself, never opens or flips anything.
-    let reduce_only = wanted.signum() * position.signum() >= 0 && wanted.abs() < position.abs();
-    Some(OrderIntent { side, qty: delta.abs(), reduce_only })
+    let reduce_only = after.signum() * position.signum() >= 0 && after.abs() < position.abs();
+    Some(OrderIntent { side, qty, reduce_only })
 }

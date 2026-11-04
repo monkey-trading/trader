@@ -29,8 +29,14 @@ impl IndexMarks {
         Self { rules, quotes: BTreeMap::new(), first: None, known: None }
     }
 
-    /// Takes the rules a new listing of the market sets, from the command that applies it on.
-    pub fn set_rules(&mut self, rules: PriceRules) {
+    /// Takes the rules a new listing of the market sets, from the command at `now` that applies it
+    /// on. A raised age limit first drops the quotes already stale under the old one, as the engine
+    /// does from protocol `V33`, so none of them counts again.
+    pub fn set_rules(&mut self, now: Millis, rules: PriceRules) {
+        let old_max_age = self.rules.max_age_ms;
+        if rules.max_age_ms > old_max_age {
+            self.quotes.retain(|_, quote| quote.ts > now || now - quote.ts <= old_max_age);
+        }
         self.rules = rules;
         self.known = None;
     }
@@ -158,7 +164,25 @@ mod tests {
         marks.store(0, &[]);
         marks.store(5_000, &[quote("a", "100", 5_000), quote("b", "100", 5_000)]);
         assert_eq!(marks.mark(5_000), Some(fx("100")));
-        marks.set_rules(PriceRules { min_sources: 3, ..RULES });
+        marks.set_rules(5_001, PriceRules { min_sources: 3, ..RULES });
         assert_eq!(marks.mark(5_001), None);
+    }
+
+    /// A raised age limit does not bring back a quote stale under the old one; a quote still fresh
+    /// under the old limit counts under the new one as it ages.
+    #[test]
+    fn a_raised_age_limit_keeps_stale_quotes_out() {
+        let mut marks = IndexMarks::new(RULES);
+        marks.store(0, &[]);
+        marks.store(5_000, &[quote("a", "100", 5_000)]);
+        marks.store(6_500, &[quote("b", "100.02", 6_500), quote("c", "100.04", 6_500)]);
+        // At 6,500, a is 1,500 ms old: stale under 1,000, fresh under 5,000, and dropped.
+        marks.set_rules(6_500, PriceRules { max_age_ms: 5_000, ..RULES });
+        assert_eq!(marks.quotes.keys().collect::<Vec<_>>(), ["b", "c"]);
+        assert_eq!(marks.mark(9_000), Some(fx("100.03")));
+        // Lowering the limit drops nothing: age alone keeps a quote out.
+        marks.set_rules(9_000, RULES);
+        assert_eq!(marks.quotes.len(), 2);
+        assert_eq!(marks.mark(9_000), None);
     }
 }

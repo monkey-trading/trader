@@ -8,7 +8,7 @@ pub mod message;
 
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use engine_wire::{Connection, Deployment, Error as WireError, FrameError, FrameVerifier};
 use futures_util::StreamExt;
 use rand::RngCore;
@@ -38,11 +38,18 @@ pub struct Frame {
     pub msg: String,
 }
 
-/// A frame's signature is not the configured signer's over it: another key signed it, or it is not
-/// the frame that was signed.
+/// Why the stream cannot go on.
 #[derive(Debug, thiserror::Error)]
-#[error("a stream frame is not signed by the configured signer")]
-pub struct WrongSigner;
+pub enum StreamError {
+    /// A frame's signature is not the configured signer's over it: another key signed it, or it is
+    /// not the frame that was signed.
+    #[error("a stream frame is not signed by the configured signer")]
+    WrongSigner,
+    /// A verified message the bot cannot place in the log: no type, or no offset it can read. The
+    /// node would send it again on every connection.
+    #[error("{0:#}")]
+    Unreadable(anyhow::Error),
+}
 
 /// The log, read from one seq on across reconnections.
 pub struct Stream {
@@ -77,7 +84,8 @@ impl Stream {
     /// reconnecting as needed. Cancel-safe: a frame counts as returned only once this returns it.
     /// Error cases:
     /// - a frame's signature is not the configured signer's over it
-    pub async fn next(&mut self) -> Result<Frame, WrongSigner> {
+    /// - a verified message has no type, or no offset that parses
+    pub async fn next(&mut self) -> Result<Frame, StreamError> {
         loop {
             let Some(open) = self.open.as_mut() else {
                 match self.connect().await {
@@ -100,45 +108,34 @@ impl Stream {
             };
             let frame = match open.verifier.verify_text(text.as_str()) {
                 Ok(frame) => frame,
-                Err(FrameError::Refused(WireError::WrongSigner)) => return Err(WrongSigner),
+                Err(FrameError::Refused(WireError::WrongSigner)) => return Err(StreamError::WrongSigner),
                 Err(e) => {
                     self.drop_connection(&format!("a frame does not verify: {e}")).await;
                     continue;
                 }
             };
-            match self.place(&frame.msg) {
-                Ok(None) => self.recovered(),
-                Ok(Some(offset)) => {
-                    self.recovered();
-                    self.last = Some(offset);
-                    return Ok(Frame { offset, time: frame.time, msg: frame.msg });
-                }
-                Err(e) => self.drop_connection(&format!("{e:#}")).await,
+            let offset = match read_offset(&frame.msg) {
+                Ok(offset) => offset,
+                Err(e) => return Err(StreamError::Unreadable(e)),
+            };
+            self.recovered();
+            let Some(offset) = offset else { continue };
+            if !self.follows(offset) {
+                let after = self.last.map_or(format!("the start at {}", self.from), |o| o.to_string());
+                self.drop_connection(&format!("message {offset} does not follow {after}")).await;
+                continue;
             }
+            self.last = Some(offset);
+            return Ok(Frame { offset, time: frame.time, msg: frame.msg });
         }
     }
 
-    /// Where `msg` sits: `None` for a heartbeat, else its offset, which must follow the last one.
-    /// Error cases:
-    /// - a message other than a heartbeat with no offset, or one that is not `<seq>:<index>`
-    /// - an offset that leaves a gap after the last message, or repeats one
-    fn place(&self, msg: &str) -> anyhow::Result<Option<Offset>> {
-        let head: Head<'_> = serde_json::from_str(msg).context("a message with no type")?;
-        if head.kind == "heartbeat" {
-            return Ok(None);
-        }
-        let offset: Offset = head.offset.with_context(|| format!("a {} message with no offset", head.kind))?.parse()?;
-        let follows = match self.last {
+    /// Whether `offset` is the next message after the last one returned, or the first of the start.
+    fn follows(&self, offset: Offset) -> bool {
+        match self.last {
             Some(last) => last.is_followed_by(offset),
             None => offset == Offset { seq: self.from, index: 0 },
-        };
-        if !follows {
-            bail!(
-                "message {offset} does not follow {}",
-                self.last.map_or(format!("the start at {}", self.from), |o| o.to_string())
-            );
         }
-        Ok(Some(offset))
     }
 
     /// Opens a connection from the start, or right after the last message returned, under a fresh
@@ -187,4 +184,17 @@ impl Stream {
             self.down = false;
         }
     }
+}
+
+/// Where `msg` sits: `None` for a heartbeat, else its offset.
+/// Error cases:
+/// - a message with no type, or other than a heartbeat with no offset, or one that is not
+///   `<seq>:<index>`
+fn read_offset(msg: &str) -> anyhow::Result<Option<Offset>> {
+    let head: Head<'_> = serde_json::from_str(msg).context("a stream message with no type")?;
+    if head.kind == "heartbeat" {
+        return Ok(None);
+    }
+    let offset = head.offset.with_context(|| format!("a {} stream message with no offset", head.kind))?;
+    Ok(Some(offset.parse()?))
 }

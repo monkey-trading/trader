@@ -1,5 +1,5 @@
-//! The public log's stream messages, read as borrowed views of the frame's text: the envelope first,
-//! and a command's parts only when the bot needs them, so a message it skips costs no allocation.
+//! The public log's stream messages, read as borrowed views of the frame's text: the envelope and a
+//! command's type first, and the rest of a command only when the bot needs it.
 
 use std::fmt;
 use std::str::FromStr;
