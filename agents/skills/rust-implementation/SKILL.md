@@ -269,9 +269,8 @@ what the node does.
   `{ workspace = true }`. Never `branch`, `tag`, or an unpinned git dependency; never a path
   dependency or a copy of their code.
 - That `rev` is the repository's only pin of the engine; `Cargo.lock` records the commit, and
-  `scripts/dev-stack.sh` (added by the first feature that trades) builds the node from it. A bump
-  moves all of them together, names the node releases it supports in the README, and says what
-  changed in the engine's types or hashes.
+  `scripts/dev-stack.sh` builds the node from it. A bump moves all of them together, names the node
+  releases it supports in the README, and says what changed in the engine's types or hashes.
 - `cargo-deny` allows the engine repository as the one git source.
 - The repository has no git submodules, ever: code from another repository comes through Cargo,
   npm, or a script-managed gitignored cache.
@@ -345,7 +344,7 @@ import grouping.
 - Declare `#[cfg(test)] mod tests;` at the bottom of the parent, where the inline module sat.
 - `tests.rs` starts with `use super::*;` plus what it needs; helpers go below the tests under a
   `// ── Helpers ──` divider.
-- Strategy behaviour tests drive `trader-core` through its public API in `crates/core/tests/`
+- Strategy behaviour tests drive `trader-core` through its public API in `crates/trader-core/tests/`
   with recorded bar sequences and known answers. The binary's tests run against local stand-ins for
   the node. An integration-test file over the cap splits by behaviour area, with the shared
   harness in `tests/common/mod.rs`.

@@ -43,9 +43,10 @@ Load on request before creating a branch, committing, pushing, or opening or upd
 - Message: `[<scopes>] Subject`, optionally followed by a blank line and `-` bullets of logical
   changes. The squash builds the `main` commit from the PR title and body, so branch commits may
   stay one line; the detail belongs in the PR body.
-  - Scopes are the areas touched, comma-separated: `[core]` (`crates/core`, the `trader-core`
-    crate), `[trader]` (`crates/trader`, the binary), `[console]` (`console/`), `[config]`,
-    `[agents]`, `[workspace]` (root manifests and tooling) — e.g. `[core,trader]`.
+  - Scopes are the areas touched, comma-separated: `[core]` (`crates/trader-core`, the
+    `trader-core` crate), `[trader]` (`crates/trader`, the binary), `[console]` (`console/`),
+    `[config]` (`config/`), `[agents]`, `[workspace]` (root manifests and tooling), `[scripts]`,
+    `[ci]` — e.g. `[core,trader]`.
   - Subject: imperative, specific, ≤ 72 chars including the tag, no trailing period.
   - Bullets use `-`, never `*`, and start with a verb such as `Add`, `Update`, `Fix`, `Remove`, or
     `Refactor`; logical changes, not file-by-file detail.
@@ -66,9 +67,10 @@ which only refreshes the Rust caches.
   `cargo fmt --all -- --check`, `./scripts/check-file-loc.sh`,
   `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test -p <crate> --locked` for each
   affected crate, `cargo deny check` when dependencies change, and the console's lint, type
-  check, and tests (`npm run lint`, `npm run typecheck`, `npm test` in `console/`) when
-  `console/` changes. A change under `agents/` runs `./scripts/check-agent-links.sh`, and a change
-  to a script runs its test: `./scripts/check-agent-links-test.sh`, or
+  check, tests, build, and audit (`npm run lint`, `npm run typecheck`, `npm test`,
+  `npm run build`, `npm audit --audit-level=high` in `console/`) when `console/` changes. A
+  change under `agents/` runs `./scripts/check-agent-links.sh`, and a change to a script runs its
+  test: `./scripts/check-agent-links-test.sh`, or
   `agents/skills/agent-code-review/scripts/review-delta-test.sh` for the review-delta script,
   `./scripts/check-merge-approved-test.sh` for the merge approval gate, or `./scripts/ci-test.sh`
   for the CI path classifier and `ci-passed` predicate, or `./scripts/check-file-loc-test.sh` for the

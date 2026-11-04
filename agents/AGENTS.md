@@ -8,8 +8,8 @@ own account, and serves a web console on the host's address. The layout is a Car
 workspace with `trader-core` (indicators, strategies, sizing and risk limits, with no IO) and
 `trader` (the binary: the node's API and stream, signing, keys, chain calls, and the console
 server), and `console/`, a Vite, React and TypeScript app built to static files that the binary
-will embed. The engine's own crates (`engine-core`, `engine-wire`, and later `engine-verify`) will
-be Cargo git dependencies pinned by one `rev`. This file is an index: load only the rule whose
+will embed. The engine's own crates (`engine-core`, `engine-wire`, and later `engine-verify`) are
+Cargo git dependencies pinned by one `rev`. This file is an index: load only the rule whose
 hint matches the current action. Links in this file are relative to `agents/`; commands run from
 the repository root.
 
@@ -27,10 +27,31 @@ list.
     `skills/vendor/` holds `vendor.manifest` (the commit each vendored pack is pinned to),
     `pull.sh` (downloads a pack on demand into a directory its own `.gitignore` excludes) and
     `sources.md`.
-- **crates/trader-core/** — `trader-core`, a library with no IO: indicators, strategies, sizing and
-  risk limits. Empty until the first strategy. Its `README.md` lists every file.
-- **crates/trader/** — `trader`, the binary (`main.rs` over `lib.rs`): for now its command line,
-  which answers `--version`. Its `README.md` lists every file.
+- **crates/trader-core/** — `trader-core`, a library with no IO: a market's index mark derived from
+  the log's `Prices` commands with the engine's `compute_index` (`marks.rs`, USD spot markets that
+  never close), bars of marks (`bars.rs`), the moving average (`sma.rs`), and the SMA crossover and
+  the order that moves a position to its target (`strategy.rs`); `tests/` drives it from marks to
+  orders. Its `README.md` lists every file.
+- **crates/trader/** — `trader`, the binary (`main.rs` over `lib.rs`): `trader run --config` trades
+  one account in one market. `config/` loads and checks the TOML config; `keys.rs` unlocks the
+  account key (a Web3 Secret Storage keystore, or a hex file in a dev build) into a signing key that
+  zeroes on drop, and refuses outside a dev build the keys the repository publishes; `node/` makes
+  REST calls over TLS pinned to the node's key hash (or publicly rooted), each under a fresh
+  challenge and verified with `engine_wire::verify_received`; `stream/` reads the public log over
+  one `signed=1` connection, verifying each frame with `FrameVerifier`, refusing gaps and resuming
+  after the last message. `bot/` reads the market and the account at startup; five seconds of log
+  after its index is exact it warms up from the node's log-derived marks history (`startup.rs`); it
+  follows the log
+  into bars (built from moves of the mark, as that history is) and decisions, and signs market
+  orders on the next nonce (`orders.rs`), none for a bar behind the node's time or before the log
+  has passed every order that could still enter it; it stops on a fill from an order it did not
+  sign (`fills.rs`), and on SIGINT or SIGTERM, once the log has passed those orders, cancels resting
+  orders and optionally closes the position, exiting non-zero when it leaves either behind or
+  cannot confirm it did not (`stop.rs`). A halt (an answer or frame signed by another key, a log
+  it cannot follow, someone else's fill) stops the bot and leaves the account as it is.
+  `tests/` runs it against a local stand-in node (`tests/common/`) that signs its answers and
+  frames and injects faults. Its `README.md` lists every file.
+- **config/** — `example.toml`, the bot's documented example config, which the config tests load.
 - **console/** — the Vite, React and TypeScript app (`src/` with `main.tsx`, `App.tsx`,
   `styles.css`, and its tests; `index.html`, the page that mounts `src/main.tsx`;
   `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`,
@@ -45,7 +66,8 @@ list.
 - **README.md**, **SECURITY.md**, **LICENSE** — the public introduction, the security policy (the
   private reporting address, response times, disclosure, safe harbour, scope), and Apache License
   2.0.
-- **.github/workflows/** — `ci.yaml`: fmt, the file line cap, clippy, tests, `cargo-deny`, the
+- **.github/workflows/** — `ci.yaml`: fmt, the file line cap, clippy, tests, `cargo-deny`, the dev
+  scenario (`dev-trade-one`, which caches the engine's built binaries by the pinned commit), the
   console's audit, lint, type check, tests and build, the agent docs' links, the review-delta
   helper's test, the merge approval gate's test, and the CI scripts' test, on every push to `main`, every PR, and every
   merge group of the merge queue. On a PR, the first job, `changes`, sorts the changed files into
@@ -66,7 +88,16 @@ list.
   which follows the queue's entries from the group's head down to `main` and passes only if the
   latest `merge-approved` status on the head of every PR in the group is `success` from the owner's
   account. It never runs on a pull request, where the owner's commit status is the check.
-- **scripts/** — `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
+- **scripts/** — `dev-stack.sh`, a dev node for the bot: it reads the engine commit from
+  `Cargo.lock`, fetches it into a cache outside the repository (`TRADER_ENGINE_CACHE`, by default
+  under `~/.cache/monkeytrading-trader/engine/`), builds the node and its scenario tools once per
+  commit into its `dist/` with the commit's dev config (with `DEV_STACK_CARGO` as the cargo command,
+  such as a build lock), and runs the
+  engine's `config/dev.toml` on free ports and private temporary data with its synthetic access
+  source, printing the bot's `[node]` config; sourced, it gives scenarios functions to start and
+  stop it, fund and declare an account, and sign admin commands. `dev-trade-one.sh`, the dev
+  scenario on it: one account trading BTC-USD for fifteen minutes, checked against its history and
+  emissions; `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
   running it against a stubbed GitHub API; `ci-areas.sh`, the path classifier, and
@@ -84,7 +115,12 @@ list.
 
 Run from the repo root:
 
-- Build and run: `cargo build --workspace`, `cargo run -p trader -- --version`
+- Build and run: `cargo build --workspace`, `cargo run -p trader -- run --config <file>` (see
+  `config/example.toml`)
+- Dev node: `./scripts/dev-stack.sh` (needs git, cargo, python3, curl and jq, and the public
+  Roughtime servers the engine's dev config names); dev scenario: `./scripts/dev-trade-one.sh`
+  (about seventeen minutes; `TRADE_SECONDS` shortens the run, `TRADER_BIN` uses a built bot,
+  `SCENARIO_ARTIFACTS` keeps the logs)
 - Test one crate: `cargo test -p trader-core` or `cargo test -p trader`; the workspace:
   `cargo test --workspace --locked`
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`
@@ -123,11 +159,11 @@ Run from the repo root:
   [git-workflow](rules/git-workflow.md#local-checks-before-push) come first.
 - **No git submodules, ever.** Code from another repository comes through Cargo, npm, or a
   script-managed gitignored cache, never a submodule.
-- **The engine is pinned once.** From the first feature that uses them, `engine-core`,
-  `engine-wire`, and `engine-verify` are Cargo git dependencies on
-  `https://github.com/monkey-trading/engine` with one shared `rev`; `Cargo.lock` records the
-  commit, so the bot signs exactly what the node checks. That `rev` is the only pin of the engine,
-  and the dev stack builds its node from the same commit
+- **The engine is pinned once.** `engine-core` and `engine-wire` (and `engine-verify`, once the
+  production build uses it) are Cargo git dependencies on `https://github.com/monkey-trading/engine`
+  with one shared `rev`; `Cargo.lock` records the commit, so the bot signs exactly what the node
+  checks. That `rev` is the only pin of the engine, `scripts/dev-stack.sh` builds its node from the
+  same commit, and the README names the node it supports
   ([rust-implementation](skills/rust-implementation/SKILL.md#the-engine-crates)).
 - **`trader-core` does no IO.** No clocks, randomness, files, environment, or network: time and
   prices arrive as arguments, so strategies are tested and benchmarked without a network.

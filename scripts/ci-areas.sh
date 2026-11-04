@@ -29,7 +29,9 @@ while IFS= read -r file; do
       areas+=" agent_docs" ;;
     # Read by no build, test, or script.
     crates/*/README.md) ;;
-    crates/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | deny.toml)
+    # The Rust jobs, and the dev scenario, its stack, and the example config the tests load.
+    crates/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | deny.toml | config/* \
+      | scripts/dev-stack.sh | scripts/dev-trade-one.sh)
       areas+=" rust" ;;
     console/*) areas+=" console" ;;
     *)
