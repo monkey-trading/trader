@@ -7,7 +7,7 @@
 #      reversion, a Donchian breakout, and the SMA crossover with the tiny limit;
 #   2. each of the six strategies' accounts trades, and its fills are exactly the fills its bot logged;
 #   3. no account breaches its limits: no fill leaves a position above the total-notional limit or
-#      is a close-out, no position is closed before its minimum hold, and cash stays positive;
+#      is a close-out, no strategy closes a position before its minimum hold, and cash stays positive;
 #   4. the account with the tiny limit is flattened when the limit is reached, places no order after,
 #      and is flat at the end;
 #   5. stopping each bot cancels its resting orders and closes its position, and every bot exits 0.
@@ -233,7 +233,10 @@ for i in "${!names[@]}"; do
   if [[ "$name" != tiny ]]; then
     (( fills > 0 )) || fail "$name: the strategy never traded"
   fi
-  python3 -I - "$work/$name-fills.jsonl" "$min_hold_seconds" "$total_notional" "$stop_ms" <<'PY' || fail "$name: a limit was breached"
+  # The daily loss limit closes a position at once, whatever its minimum hold.
+  hold_seconds="$min_hold_seconds"
+  [[ "$name" == tiny ]] && hold_seconds=0
+  python3 -I - "$work/$name-fills.jsonl" "$hold_seconds" "$total_notional" "$stop_ms" <<'PY' || fail "$name: a limit was breached"
 import json, sys
 path, min_hold_ms, total_notional, stop_ms = sys.argv[1], int(sys.argv[2]) * 1000, float(sys.argv[3]), int(sys.argv[4])
 opened = None

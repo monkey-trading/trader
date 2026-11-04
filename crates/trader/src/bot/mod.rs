@@ -81,6 +81,8 @@ pub struct Bot {
     day_file: DayFile,
     saved_day: Option<DayState>,
     day_unsaved: bool,
+    /// The earliest sequenced time the daily loss limit tries to close the position again.
+    flatten_after: Millis,
     /// Whether the account is in the cash alert: its cash is not positive and an order was refused.
     cash_alert: bool,
     /// Whether the position is read again from the node: a split changed it without a fill.

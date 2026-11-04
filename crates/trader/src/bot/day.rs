@@ -15,6 +15,9 @@ use trader_core::risk::{DayState, DayStatus};
 
 use crate::bot::{Bot, Halt, REPLAY_LAG_MS};
 
+/// How long, in sequenced time, after a try at closing the position the daily loss limit tries again.
+const FLATTEN_RETRY_MS: Millis = 5_000;
+
 /// The file holding one account's day state.
 #[derive(Clone, Debug)]
 pub(super) struct DayFile {
@@ -84,9 +87,14 @@ impl Bot {
                 ?state,
                 "the daily loss limit is reached: flattening and stopping until the next UTC day"
             );
-            if lag <= REPLAY_LAG_MS {
-                self.flatten(ts).await?;
-            }
+        }
+        // While the account is stopped and still holds a position, closing it is tried again every
+        // `FLATTEN_RETRY_MS` of sequenced time, so a close the engine declined, or one held back by an
+        // order in flight, does not wait for the next bar.
+        let stopped = matches!(status, DayStatus::Stopped { .. });
+        if stopped && !self.position.is_zero() && ts >= self.flatten_after && lag <= REPLAY_LAG_MS {
+            self.flatten_after = ts.saturating_add(FLATTEN_RETRY_MS);
+            self.flatten(ts).await?;
         }
         Ok(())
     }

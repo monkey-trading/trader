@@ -20,12 +20,14 @@ fn price_at(stand_in: &StandIn, seq: u64, ts: i64, mid: &str) {
     stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
 }
 
-/// The engine closing the account's position at `ts`, as a close-out, leaving `position`.
-fn closed_out(seq: u64, ts: i64) -> Value {
+/// The log's entry for the close-all request `body` the bot posted, which closed the position at `ts`.
+fn own_close(seq: u64, ts: i64, body: &Value) -> Value {
     let fill = json!({ "type": "fill", "account": account(), "order_id": seq, "market": 1, "side": "sell",
-        "qty": "1", "price": "94", "index": "94", "spread_bps": 0, "realised_pnl": "-6", "profit_fee": "0",
-        "position": "0", "liquidation": true });
-    command(seq, ts, json!({ "type": "tick" }), json!([fill]))
+        "qty": "1", "price": "95", "index": "95", "spread_bps": 0, "realised_pnl": "-4", "profit_fee": "0",
+        "position": "0", "liquidation": false });
+    let evidence = json!({ "result": "failed", "reason": "unavailable" });
+    let cmd = json!({ "type": "access_close_all", "request": body, "evidence": evidence });
+    command(seq, ts, cmd, json!([fill]))
 }
 
 /// How many requests the stand-in has seen, after letting the bot catch up with the log.
@@ -78,17 +80,20 @@ async fn the_daily_loss_limit_flattens_and_holds_across_a_restart() {
     assert_eq!(day_file(dir.path())["tripped"], true);
     assert_eq!(day_file(dir.path())["start_equity"], "1000");
 
-    // The close is declined or not yet in the log: the next bar closes again, at its mark.
-    price_at(&stand_in, 14, T0 + 2 * MINUTE, "95");
+    // The close is declined or not yet in the log: it is tried again on a later move of the mark, once
+    // five seconds have passed since the last try, without waiting for a bar.
+    price_at(&stand_in, 14, T0 + MINUTE + 2_000, "96");
+    assert_eq!(posts_after_settling(&stand_in).await, 1, "too soon after the last try");
+    price_at(&stand_in, 15, T0 + MINUTE + 6_000, "95");
     let (path, body) = posted(&stand_in, 2).await;
     assert_eq!(
         (path.as_str(), &body["closes"]),
         ("/v1/positions/close-all", &json!([{ "market": 1, "quoted": "95" }]))
     );
 
-    // The close-out lands; no bar after it orders, whatever the strategy says.
-    stand_in.append((15, 0), closed_out(15, T0 + 2 * MINUTE + 100));
-    for (seq, minute, mid) in [(16, 3, "96"), (17, 4, "99"), (18, 5, "103"), (19, 6, "110")] {
+    // The close lands, and is the bot's own fill; no bar after it orders, whatever the strategy says.
+    stand_in.append((16, 0), own_close(16, T0 + MINUTE + 6_100, &body));
+    for (seq, minute, mid) in [(17, 2, "96"), (18, 3, "99"), (19, 4, "103"), (20, 5, "110")] {
         price_at(&stand_in, seq, T0 + minute * MINUTE, mid);
     }
     assert_eq!(posts_after_settling(&stand_in).await, 2);
