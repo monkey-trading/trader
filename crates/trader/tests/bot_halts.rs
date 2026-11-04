@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use trader::bot::Halt;
 
 /// An applied listing's price rules take effect: with four sources needed, three venues give no
 /// mark and nothing is ordered; back at two, the crossover orders again. A rejected listing changes
@@ -106,6 +107,44 @@ async fn another_signer_mid_run_halts_without_sending() {
     assert!(stand_in.with(|i| i.posts.is_empty()));
 }
 
+/// A stream frame signed by another key halts the bot as a signer mismatch, not as an unreadable log,
+/// while the node's answers stay the signer's, and nothing is sent, not even its stop's cancel.
+#[tokio::test]
+async fn a_frame_from_another_signer_halts_as_a_mismatch_without_sending() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({ "9": resting_order(9) })));
+        i.head_seq = 10;
+        i.faults.insert((0, (12, 0)), common::Fault::OtherSigner);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    for (seq, ts, mid) in [(11, T0, "100"), (12, T0 + 1_001, "100")] {
+        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
+    }
+    let err = run(config(&stand_in, dir.path(), "1m"), std::future::pending()).await.unwrap_err();
+    assert!(matches!(err.downcast_ref::<Halt>(), Some(Halt::WrongSigner)), "{err:#}");
+    assert!(stand_in.with(|i| i.posts.is_empty()));
+}
+
+/// The same frame while the stop waits for the log to pass the last order's expiry halts the same
+/// way, and the stop's cancel is not sent.
+#[tokio::test]
+async fn a_frame_from_another_signer_during_the_stop_halts_without_sending() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({ "9": resting_order(9) })));
+        i.head_seq = 10;
+        i.faults.insert((0, (11, 0)), common::Fault::OtherSigner);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    stand_in.tick(T0 + 20_000);
+    let err = run(config(&stand_in, dir.path(), "1m"), async {}).await.unwrap_err();
+    assert!(matches!(err.downcast_ref::<Halt>(), Some(Halt::WrongSigner)), "{err:#}");
+    assert!(stand_in.with(|i| i.posts.is_empty()));
+}
+
 /// A stop that cannot read the account still cancels, then says it cannot confirm the result.
 #[tokio::test]
 async fn a_stop_without_the_account_cancels_and_is_incomplete() {
@@ -149,6 +188,33 @@ async fn a_declined_close_is_an_incomplete_stop() {
     assert!(err.to_string().contains("a position of 1 are left"), "{err:#}");
     let posts = stand_in.with(|i| i.posts.clone());
     assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/positions/close-all"]);
+}
+
+/// A position larger than one close takes, long or short, is closed by further reduce-only closes on
+/// fresh nonces until none is left, each quoted at the node's mark.
+#[tokio::test]
+async fn a_stop_closes_what_one_close_leaves_open() {
+    for (held, nonces) in [("2500000000", 3), ("-2500000000", 3)] {
+        let stand_in = StandIn::start().await;
+        stand_in.with(|i| {
+            i.markets = json!([btc_usd(Some("99"))]);
+            let position = json!({ "1": { "qty": held, "entry": "99" } });
+            i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
+            i.close_cap = Some(engine_core::Fixed::MAX_INPUT);
+            i.nonce = 7;
+        });
+        stand_in.tick(T0 + MINUTE);
+        let dir = tempfile::tempdir().unwrap();
+        run(config(&stand_in, dir.path(), "1m"), async {}).await.unwrap();
+        let posts = stand_in.with(|i| i.posts.clone());
+        assert_eq!(posts.len(), nonces, "{held}: {posts:?}");
+        for (n, (path, body)) in posts.iter().enumerate() {
+            assert_eq!(path, "/v1/positions/close-all", "{held}");
+            assert_eq!(body["closes"], json!([{ "market": 1, "quoted": "99" }]), "{held}");
+            assert_eq!(body["auth"]["nonce"], 7 + n as u64, "{held}: a fresh nonce for each close");
+        }
+        assert!(stand_in.with(|i| i.accounts[&account().to_string()]["positions"].as_object().unwrap().is_empty()));
+    }
 }
 
 /// A stop that never sees the log pass the last order's expiry cannot say that order is settled,

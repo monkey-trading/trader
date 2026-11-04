@@ -37,8 +37,10 @@ answer that fails the check is an error, never data, and one signed by another k
   decision. An order never exceeds the engine's input bound
 - On SIGINT or SIGTERM, once the log has passed every order that could still enter it, a cancel of
   the account's resting orders and, when configured, a close of its position at the node's current
-  mark; a stop that leaves either behind, or cannot confirm it did not, exits non-zero with an
-  alert. A stop can take the order expiry window (30 s) and a few calls of `request_timeout`, and
+  mark, repeated on fresh nonces while a close leaves part of the position (the node closes at most
+  a billion units a request), for at most a minute; a stop that leaves either behind, or cannot
+  confirm it did not, exits non-zero with an alert. A stop can take the order expiry window (30 s),
+  a few calls of `request_timeout`, and a further close's, and
   a second signal does not cut it short, so a supervisor's grace period should be longer
 - The account key from an encrypted Web3 Secret Storage keystore, or, in a dev build, a hex file;
   held only as a signing key that zeroes its secret on drop, and never printed. A release build

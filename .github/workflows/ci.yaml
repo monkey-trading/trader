@@ -235,6 +235,8 @@ jobs:
         run: ./scripts/ci-test.sh
       - name: Test the line cap
         run: ./scripts/check-file-loc-test.sh
+      - name: Test the dev stack's paths
+        run: ./scripts/dev-stack-test.sh
 
   # The bot's dev scenario (scripts/dev-trade-one.sh): a dev node from the engine commit Cargo.lock
   # pins, and the bot trading one account on it for fifteen minutes. The node, its tools and its dev

@@ -17,6 +17,9 @@ use crate::node::CallError;
 use crate::stream::message::{CommandMessage, Head};
 use crate::stream::{Stream, StreamError};
 
+/// The longest the stop goes on closing a position that one close did not take whole.
+const MAX_CLOSE_WAIT: Duration = Duration::from_secs(60);
+
 /// The longest the stop waits for the log to pass the last order's expiry.
 const MAX_EXPIRY_WAIT: Duration = Duration::from_millis(EXPIRES_IN_MS as u64 + 5_000);
 
@@ -54,29 +57,30 @@ impl Bot {
                 }
             }
         }
-        if let (true, false, Some(quoted)) = (self.close_on_stop, held.is_zero(), quoted) {
-            info!(position = %held, %quoted, "closing the position");
-            if let Some((nonce, now)) = self.next_nonce().await? {
-                let expires_at = now.saturating_add(EXPIRES_IN_MS);
-                let mut request = CloseAllRequest {
-                    account,
-                    closes: vec![CloseEntry { market: self.market, quoted }],
-                    max_slippage_bps: Some(self.max_slippage_bps),
-                    auth: None,
-                };
-                let hash = close_all_hash(&self.domain, &request, nonce, expires_at);
-                request.auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
-                match self.node.close_all(&request).await {
-                    Ok(answer) => log_order_events(&answer.body),
-                    Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-                    Err(e) => warn!("the close failed: {e}"),
+        let closing = self.close_on_stop && !held.is_zero() && quoted.is_some();
+        let deadline = Instant::now() + MAX_CLOSE_WAIT;
+        let mut before = held;
+        let left = loop {
+            if closing {
+                let quoted = self.node_mark().await?.or(quoted).or(self.mark);
+                if let Some(quoted) = quoted {
+                    self.close_position(before, quoted).await?;
                 }
             }
-        }
-        let left = match self.read_account().await {
-            Ok(left) => left,
-            Err(Halt::WrongSigner) => return Err(Halt::WrongSigner),
-            Err(e) => return Err(incomplete(format!("the account cannot be read to confirm it: {e}"))),
+            let left = match self.read_account().await {
+                Ok(left) => left,
+                Err(Halt::WrongSigner) => return Err(Halt::WrongSigner),
+                Err(e) => return Err(incomplete(format!("the account cannot be read to confirm it: {e}"))),
+            };
+            let remaining = left.positions.get(&self.market).map_or(Fixed::ZERO, |p| p.qty);
+            // One close takes at most `Fixed::MAX_INPUT` units, so a confirmed close that leaves
+            // part of the position is followed by another on a fresh nonce; one that changed
+            // nothing is not repeated.
+            if closing && !remaining.is_zero() && remaining.abs() < before.abs() && Instant::now() < deadline {
+                before = remaining;
+                continue;
+            }
+            break left;
         };
         let position = left.positions.get(&self.market).map_or(Fixed::ZERO, |p| p.qty);
         if !left.orders.is_empty() || (self.close_on_stop && !position.is_zero()) {
@@ -125,6 +129,31 @@ impl Bot {
                 }
             }
         }
+    }
+
+    /// Signs and sends one close of the position `held`, on the account's next nonce, quoted at
+    /// `quoted`. A failed close is logged: the account read that follows shows what it did.
+    /// Error cases:
+    /// - an answer signed by another key than the signer
+    async fn close_position(&self, held: Fixed, quoted: Fixed) -> Result<(), Halt> {
+        let account = self.key.address();
+        info!(position = %held, %quoted, "closing the position");
+        let Some((nonce, now)) = self.next_nonce().await? else { return Ok(()) };
+        let expires_at = now.saturating_add(EXPIRES_IN_MS);
+        let mut request = CloseAllRequest {
+            account,
+            closes: vec![CloseEntry { market: self.market, quoted }],
+            max_slippage_bps: Some(self.max_slippage_bps),
+            auth: None,
+        };
+        let hash = close_all_hash(&self.domain, &request, nonce, expires_at);
+        request.auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
+        match self.node.close_all(&request).await {
+            Ok(answer) => log_order_events(&answer.body),
+            Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
+            Err(e) => warn!("the close failed: {e}"),
+        }
+        Ok(())
     }
 
     /// The market's mark as the node gives it now, if it gives one.

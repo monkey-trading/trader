@@ -117,6 +117,9 @@ pub struct Inner {
     /// Whether a cancel-all clears the account's resting orders and a close-all its positions in
     /// the markets it names, as the engine's do when they succeed.
     pub settle: bool,
+    /// The most units of a position one close-all takes, as the pinned engine's `Fixed::MAX_INPUT`;
+    /// the rest stays open.
+    pub close_cap: Option<engine_core::Fixed>,
 }
 
 /// A running stand-in.
@@ -148,6 +151,7 @@ impl StandIn {
                 answers: Some(Answers::Signed),
                 time_ms: 1_800_000_000_000,
                 settle: true,
+                close_cap: None,
                 ..Inner::default()
             }),
             appended: Notify::new(),
@@ -359,7 +363,18 @@ async fn record(State(s): State<Arc<StandIn>>, uri: Uri, body: Bytes) -> Respons
                 "/v1/orders/cancel-all" => view["orders"] = json!({}),
                 "/v1/positions/close-all" => {
                     for close in body["closes"].as_array().unwrap() {
-                        view["positions"].as_object_mut().unwrap().remove(&close["market"].to_string());
+                        let positions = view["positions"].as_object_mut().unwrap();
+                        let market = close["market"].to_string();
+                        let held: engine_core::Fixed = positions[&market]["qty"].as_str().unwrap().parse().unwrap();
+                        match i.close_cap {
+                            Some(cap) if held.abs() > cap => {
+                                let left = if held.is_positive() { held - cap } else { held + cap };
+                                positions[&market]["qty"] = json!(left.to_string());
+                            }
+                            _ => {
+                                positions.remove(&market);
+                            }
+                        }
                     }
                 }
                 _ => {}

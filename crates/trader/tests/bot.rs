@@ -254,7 +254,9 @@ async fn a_bar_read_late_places_no_order() {
         _ = stopped.await;
     }));
     warm(&stand_in).await;
-    // The frames carry the time they were signed at, minute 2, but the node's time is minute 10.
+    // The frames carry the time they were signed at, minute 2, so the bot takes minute 1's bar as
+    // live, but the node's time is minute 10.
+    let reads = stand_in.with(|i| i.nonce_reads);
     stand_in.with(|i| {
         i.time_ms = (T0 + 10 * MINUTE) as u64;
         i.frame_time = Some((T0 + 2 * MINUTE) as u64);
@@ -262,9 +264,11 @@ async fn a_bar_read_late_places_no_order() {
     for (seq, ts, mid) in [(14, T0 + MINUTE, "101"), (15, T0 + 2 * MINUTE, "102")] {
         stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
     }
-    // Minute 1's bar is long and asks for a nonce, whose answer is minute 10. A bar closed at the
-    // node's time orders.
-    while stand_in.with(|i| i.nonce_reads) == 0 {
+    // Minute 1's bar is long and asks for a nonce, whose answer is minute 10: the bar is history by
+    // the node's time and places nothing. The frames keep minute 2 until that read, so the bar
+    // reaches it. A bar closed at the node's time orders, and the bot handles one frame at a time,
+    // so that order being the first post shows the late bar placed none.
+    while stand_in.with(|i| i.nonce_reads) == reads {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     stand_in.with(|i| i.frame_time = None);

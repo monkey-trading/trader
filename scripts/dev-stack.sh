@@ -45,14 +45,25 @@ dev_stack_engine_commit() {
   echo "$commits"
 }
 
+# Sets dev_stack_cache, the directory that keeps the pinned commit's checkout, and dev_stack_dist,
+# the directory that keeps its built binaries. Sourcing this script runs it, so a shell that only
+# sources the script can call dev_stack_declare and dev_stack_admin without building.
+dev_stack_locate() {
+  local commit
+  commit="$(dev_stack_engine_commit)"
+  dev_stack_commit="$commit"
+  dev_stack_cache="${TRADER_ENGINE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/monkeytrading-trader/engine}/$commit"
+  dev_stack_dist="$dev_stack_cache/dist"
+}
+
 # Fetches the pinned commit and builds the node and the scenario tools once per commit, into
 # $dev_stack_dist with the commit's dev config: all a dev node needs, so caching that directory alone
 # by commit (as CI does) is enough to run one.
 dev_stack_build() {
   local commit cache channel cargo_cmd target
-  commit="$(dev_stack_engine_commit)"
-  cache="${TRADER_ENGINE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/monkeytrading-trader/engine}/$commit"
-  dev_stack_dist="$cache/dist"
+  dev_stack_locate
+  commit="$dev_stack_commit"
+  cache="$dev_stack_cache"
   if [[ -x "$dev_stack_dist/engine" && -x "$dev_stack_dist/access_source" && -x "$dev_stack_dist/sign_request" \
     && -f "$dev_stack_dist/dev.toml" ]]; then
     echo "==> engine $commit: built"
@@ -77,7 +88,9 @@ dev_stack_build() {
     "${cargo_cmd[@]}" build -q --locked -p engine-node --bin engine --example access_source
     "${cargo_cmd[@]}" build -q --locked -p engine-core --example sign_request
   )
-  target="${CARGO_TARGET_DIR:-$cache/src/target}"
+  # Cargo ran in the checkout, so it read a relative CARGO_TARGET_DIR from there.
+  target="${CARGO_TARGET_DIR:-target}"
+  [[ "$target" == /* ]] || target="$cache/src/$target"
   rm -rf "$dev_stack_dist.tmp"
   mkdir -p "$dev_stack_dist.tmp"
   cp "$target/debug/engine" "$target/debug/examples/access_source" "$target/debug/examples/sign_request" \
@@ -216,6 +229,8 @@ dev_stack_declare() {
   jq -e 'any(.[]; .type == "eligibility_attested")' <<< "$events" > /dev/null \
     || dev_stack_fail "the declaration for $account was not recorded: $events"
 }
+
+dev_stack_locate
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   trap dev_stack_stop EXIT

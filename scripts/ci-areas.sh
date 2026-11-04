@@ -19,7 +19,8 @@ while IFS= read -r file; do
     # The merge queue's approval gate and its test.
     scripts/check-merge-approved.sh | scripts/check-merge-approved-test.sh) areas+=" merge_approval" ;;
     # This classifier, the ci-passed predicate, and their test; the line cap's test.
-    scripts/ci-areas.sh | scripts/check-ci-passed.sh | scripts/ci-test.sh | scripts/check-file-loc-test.sh)
+    scripts/ci-areas.sh | scripts/check-ci-passed.sh | scripts/ci-test.sh | scripts/check-file-loc-test.sh \
+      | scripts/dev-stack-test.sh)
       areas+=" ci_scripts" ;;
     # The line cap is read by the Rust jobs, and its test by the CI scripts job.
     scripts/check-file-loc.sh) areas+=" rust ci_scripts" ;;
@@ -29,9 +30,11 @@ while IFS= read -r file; do
       areas+=" agent_docs" ;;
     # Read by no build, test, or script.
     crates/*/README.md) ;;
-    # The Rust jobs, and the dev scenario, its stack, and the example config the tests load.
+    # The dev stack is read by the dev scenario and tested by the CI scripts job.
+    scripts/dev-stack.sh) areas+=" rust ci_scripts" ;;
+    # The Rust jobs, and the dev scenario and the example config the tests load.
     crates/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | deny.toml | config/* \
-      | scripts/dev-stack.sh | scripts/dev-trade-one.sh)
+      | scripts/dev-trade-one.sh)
       areas+=" rust" ;;
     console/*) areas+=" console" ;;
     *)
