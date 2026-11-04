@@ -48,15 +48,30 @@ list.
   sign (`fills.rs`), and on SIGINT or SIGTERM, once the log has passed those orders, cancels resting
   orders and optionally closes the position, exiting non-zero when it leaves either behind or
   cannot confirm it did not (`stop.rs`). A halt (an answer or frame signed by another key, a log
-  it cannot follow, someone else's fill) stops the bot and leaves the account as it is.
-  `tests/` runs it against a local stand-in node (`tests/common/`) that signs its answers and
-  frames and injects faults. Its `README.md` lists every file.
-- **config/** — `example.toml`, the bot's documented example config, which the config tests load.
+  it cannot follow, someone else's fill) stops the bot and leaves the account as it is. The
+  account's side of the console is `bot/link.rs`: the status it publishes on a `watch` channel, the
+  requests it takes on a bounded channel (start, stop, a strategy's periods within
+  `[strategy.bounds]`, flatten), and the controls they set, saved per account under the console's
+  data directory (`link/saved.rs`), so a restart keeps a stop. `console/` is the console server
+  (with a `[console]` section): HTTPS on `bind` (every interface, port 8443, by default) with a
+  configured certificate or one generated into `data_dir` on first run, whose SHA-256 fingerprint
+  every start prints (`tls.rs`); one generated password, printed once and kept as an Argon2id hash,
+  with a per-client rate limit (`login.rs`); in-memory sessions in a `__Host-` cookie
+  (`session.rs`); the request span, security headers, `Origin` check and session check
+  (`guard.rs`); the API's routes (`routes.rs`) over shared state (`server.rs`); the live WebSocket
+  feed (`live.rs`); the figures, views and totals (`board.rs`) the refresher reads from the node
+  (`refresh.rs`); and the embedded app (`assets.rs`), which `build.rs` lists from `console/dist`.
+  `files.rs` writes files only the bot's user can read. No route moves funds away from an account's
+  own key or returns a key. `tests/` runs it against a local stand-in node (`tests/common/`) that
+  signs its answers and frames and injects faults. Its `README.md` lists every file.
+- **config/** — `example.toml`, the bot's documented example config, with a `[console]` section,
+  which the config tests load.
 - **console/** — the Vite, React and TypeScript app (`src/` with `main.tsx`, `App.tsx`,
   `styles.css`, and its tests; `index.html`, the page that mounts `src/main.tsx`;
   `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`,
   `tsconfig.json`; Node.js from `.nvmrc`, exact versions pinned by `.npmrc` and
-  `package-lock.json`). `npm run build` writes the gitignored `dist/`.
+  `package-lock.json`). `npm run build` writes the gitignored `dist/`, which the `trader` binary
+  embeds when built after it.
 - **Cargo.toml** — workspace manifest, shared dependencies, and the Cargo profiles (release keeps
   overflow checks on); `Cargo.lock` is committed.
 - **rust-toolchain.toml** — the one stable toolchain for local builds and CI.
@@ -67,7 +82,8 @@ list.
   private reporting address, response times, disclosure, safe harbour, scope), and Apache License
   2.0.
 - **.github/workflows/** — `ci.yaml`: fmt, the file line cap, clippy, tests, `cargo-deny`, the dev
-  scenario (`dev-trade-one`, which caches the engine's built binaries by the pinned commit), the
+  scenarios (`dev-trade-one`, which caches the engine's built binaries by the pinned commit, and
+  `dev-console-api`, which also builds the console app to embed it), the
   console's audit, lint, type check, tests and build, the agent docs' links, the review-delta
   helper's test, the merge approval gate's test, and the CI scripts' test, on every push to `main`, every PR, and every
   merge group of the merge queue. On a PR, the first job, `changes`, sorts the changed files into
@@ -97,7 +113,10 @@ list.
   source, printing the bot's `[node]` config; sourced, it gives scenarios functions to start and
   stop it, fund and declare an account, and sign admin commands. `dev-trade-one.sh`, the dev
   scenario on it: one account trading BTC-USD for fifteen minutes, checked against its history and
-  emissions; `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
+  emissions; `dev-console-api.sh`, the console's dev scenario: the bot with the console app
+  embedded, its printed fingerprint and password, refusals without the session or from a foreign
+  `Origin`, a stop through the console that stops the strategy, and the API's figures against the
+  node's answers; `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
   `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
@@ -121,7 +140,8 @@ Run from the repo root:
 - Dev node: `./scripts/dev-stack.sh` (needs git, cargo, python3, curl and jq, and the public
   Roughtime servers the engine's dev config names); dev scenario: `./scripts/dev-trade-one.sh`
   (about seventeen minutes; `TRADE_SECONDS` shortens the run, `TRADER_BIN` uses a built bot,
-  `SCENARIO_ARTIFACTS` keeps the logs)
+  `SCENARIO_ARTIFACTS` keeps the logs); the console's: `./scripts/dev-console-api.sh` (about ten
+  minutes; also needs Node.js and npm to build the app; the same variables)
 - Test one crate: `cargo test -p trader-core` or `cargo test -p trader`; the workspace:
   `cargo test --workspace --locked`
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`

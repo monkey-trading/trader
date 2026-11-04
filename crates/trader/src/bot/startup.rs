@@ -14,7 +14,7 @@ use trader_core::bars::BarBuilder;
 use trader_core::marks::IndexMarks;
 use trader_core::strategy::SmaCrossover;
 
-use crate::bot::{Bot, Halt, orders, supported};
+use crate::bot::{Bot, Halt, Link, orders, supported};
 use crate::config::Config;
 use crate::keys::AccountKey;
 use crate::node::api::MarkBucket;
@@ -56,7 +56,7 @@ pub fn stop_signal() -> anyhow::Result<impl Future<Output = ()>> {
 /// - the node cannot be reached, or an answer does not verify, or is refused
 /// - the market is not listed, or is one the bot does not trade
 /// - the account has never been credited
-pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot, Stream)> {
+pub(super) async fn start(cfg: &Config, key: AccountKey, link: Link) -> anyhow::Result<(Bot, Stream)> {
     let node_cfg = &cfg.node;
     let tls = Tls::new(node_cfg.url.clone(), node_cfg.tls_key_sha256)?;
     let deployment = Deployment { chain_id: node_cfg.chain_id, vault: node_cfg.vault.0 };
@@ -91,6 +91,7 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
 
     let bar_ms = Millis::try_from(strategy_cfg.bar.as_millis()).context("bar length")?;
     let now = Millis::try_from(now).context("node time")?;
+    let params = link.params();
     let bot = Bot {
         domain: eip712::domain(node_cfg.chain_id, node_cfg.vault),
         node,
@@ -101,10 +102,10 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         close_on_stop: cfg.account.close_on_stop,
         marks: IndexMarks::new(market.spec.price_rules),
         bar_ms,
-        history_bars: i64::try_from(strategy_cfg.slow).context("slow period")?,
+        history_bars: i64::try_from(params.slow).context("slow period")?,
         bars: None,
         warm_up_after: Millis::MIN,
-        strategy: SmaCrossover::new(strategy_cfg.fast, strategy_cfg.slow)?,
+        strategy: SmaCrossover::new(params.fast, params.slow)?,
         close_first: false,
         signed_orders: VecDeque::with_capacity(SIGNED_ORDERS),
         position,
@@ -117,6 +118,7 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         // An order an earlier process signed before this start expires by now plus its window.
         trading_from: now.saturating_add(orders::EXPIRES_IN_MS),
         log_ts: Millis::MIN,
+        link,
     };
     let stream = Stream::new(tls, node_cfg.signer.0, deployment, node_cfg.stream_timeout, head_seq + 1);
     Ok((bot, stream))
@@ -193,6 +195,7 @@ impl Bot {
             self.on_bar(bar, ts, node_time.saturating_sub(ts)).await?;
         }
         self.bars = Some(live);
+        self.publish();
         Ok(())
     }
 }

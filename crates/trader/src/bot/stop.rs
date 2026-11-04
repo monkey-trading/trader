@@ -2,12 +2,14 @@
 //! account's resting orders and, when configured, a close of its position, each signed on the
 //! account's next nonce, then a verified read that confirms what is left.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use engine_core::Fixed;
 use engine_core::auth::RequestAuth;
 use engine_core::command::{CancelAllRequest, CloseAllRequest, CloseEntry};
 use engine_core::eip712::{cancel_all_hash, close_all_hash};
+use engine_core::types::{MarketId, Millis};
 use tokio::time::{Instant, timeout_at};
 use tracing::{error, info, warn};
 
@@ -17,8 +19,8 @@ use crate::node::CallError;
 use crate::stream::message::{CommandMessage, Head};
 use crate::stream::{Stream, StreamError};
 
-/// The longest the stop goes on closing a position that one close did not take whole.
-const MAX_CLOSE_WAIT: Duration = Duration::from_secs(60);
+/// The longest the stop, or a flatten, goes on closing a position that one close did not take whole.
+pub(super) const MAX_CLOSE_WAIT: Duration = Duration::from_secs(60);
 
 /// The longest the stop waits for the log to pass the last order's expiry.
 const MAX_EXPIRY_WAIT: Duration = Duration::from_millis(EXPIRES_IN_MS as u64 + 5_000);
@@ -33,9 +35,8 @@ impl Bot {
     /// - an answer or frame signed by another key than the signer
     /// - orders still rest, a position it was to close is still held, or neither can be confirmed
     pub(super) async fn stop(&mut self, stream: &mut Stream) -> Result<(), Halt> {
-        let account = self.key.address();
         let settled = self.wait_for_log_past(stream).await?;
-        let quoted = self.node_mark().await?.or(self.mark);
+        let quoted = self.node_marks().await?.get(&self.market).copied().or(self.mark);
         let (resting, held) = match self.read_account().await {
             Ok(view) => (Some(view.orders.len()), view.positions.get(&self.market).map_or(Fixed::ZERO, |p| p.qty)),
             Err(Halt::WrongSigner) => return Err(Halt::WrongSigner),
@@ -46,25 +47,17 @@ impl Bot {
         };
         if resting != Some(0) {
             info!(?resting, "cancelling the account's resting orders");
-            if let Some((nonce, now)) = self.next_nonce().await? {
-                let expires_at = now.saturating_add(EXPIRES_IN_MS);
-                let hash = cancel_all_hash(&self.domain, account, nonce, expires_at);
-                let auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
-                match self.node.cancel_all(&CancelAllRequest { account, auth }).await {
-                    Ok(answer) => log_order_events(&answer.body),
-                    Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-                    Err(e) => warn!("the cancel failed: {e}"),
-                }
-            }
+            self.cancel_resting().await?;
         }
         let closing = self.close_on_stop && !held.is_zero() && quoted.is_some();
         let deadline = Instant::now() + MAX_CLOSE_WAIT;
         let mut before = held;
         let left = loop {
             if closing {
-                let quoted = self.node_mark().await?.or(quoted).or(self.mark);
+                let quoted = self.node_marks().await?.get(&self.market).copied().or(quoted).or(self.mark);
                 if let Some(quoted) = quoted {
-                    self.close_position(before, quoted).await?;
+                    info!(position = %before, %quoted, "closing the position");
+                    self.close_positions(vec![CloseEntry { market: self.market, quoted }]).await?;
                 }
             }
             let left = match self.read_account().await {
@@ -101,7 +94,7 @@ impl Bot {
     /// Error cases:
     /// - a frame signed by another key than the signer
     async fn wait_for_log_past(&mut self, stream: &mut Stream) -> Result<bool, Halt> {
-        let barrier = self.order_expires_at.map_or(self.trading_from, |expires_at| expires_at.max(self.trading_from));
+        let barrier = self.order_barrier();
         if self.log_ts > barrier {
             return Ok(true);
         }
@@ -131,18 +124,44 @@ impl Bot {
         }
     }
 
-    /// Signs and sends one close of the position `held`, on the account's next nonce, quoted at
-    /// `quoted`. A failed close is logged: the account read that follows shows what it did.
+    /// The latest expiry an order signed so far can carry, this process's or an earlier one's: until
+    /// the log passes it, such an order may still enter the log.
+    pub(super) fn order_barrier(&self) -> Millis {
+        self.order_expires_at.map_or(self.trading_from, |expires_at| expires_at.max(self.trading_from))
+    }
+
+    /// Cancels every resting order of the account, signed on its next nonce. Returns whether the
+    /// node answered; a call it did not answer is logged.
     /// Error cases:
     /// - an answer signed by another key than the signer
-    async fn close_position(&self, held: Fixed, quoted: Fixed) -> Result<(), Halt> {
+    pub(super) async fn cancel_resting(&self) -> Result<bool, Halt> {
         let account = self.key.address();
-        info!(position = %held, %quoted, "closing the position");
-        let Some((nonce, now)) = self.next_nonce().await? else { return Ok(()) };
+        let Some((nonce, now)) = self.next_nonce().await? else { return Ok(false) };
+        let expires_at = now.saturating_add(EXPIRES_IN_MS);
+        let hash = cancel_all_hash(&self.domain, account, nonce, expires_at);
+        let auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
+        match self.node.cancel_all(&CancelAllRequest { account, auth }).await {
+            Ok(answer) => log_order_events(&answer.body),
+            Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
+            Err(e) => {
+                warn!("the cancel failed: {e}");
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Closes the account's whole position in each market `closes` names, at its quoted mark, as one
+    /// reduce-only request signed on the account's next nonce. Returns whether the node answered; a
+    /// call it did not answer is logged.
+    /// Error cases:
+    /// - an answer signed by another key than the signer
+    pub(super) async fn close_positions(&self, closes: Vec<CloseEntry>) -> Result<bool, Halt> {
+        let Some((nonce, now)) = self.next_nonce().await? else { return Ok(false) };
         let expires_at = now.saturating_add(EXPIRES_IN_MS);
         let mut request = CloseAllRequest {
-            account,
-            closes: vec![CloseEntry { market: self.market, quoted }],
+            account: self.key.address(),
+            closes,
             max_slippage_bps: Some(self.max_slippage_bps),
             auth: None,
         };
@@ -151,21 +170,24 @@ impl Bot {
         match self.node.close_all(&request).await {
             Ok(answer) => log_order_events(&answer.body),
             Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-            Err(e) => warn!("the close failed: {e}"),
+            Err(e) => {
+                warn!("the close failed: {e}");
+                return Ok(false);
+            }
         }
-        Ok(())
+        Ok(true)
     }
 
-    /// The market's mark as the node gives it now, if it gives one.
+    /// Every market's mark as the node gives it now; none when the node gives no answer to rely on.
     /// Error cases:
     /// - an answer signed by another key than the signer
-    async fn node_mark(&self) -> Result<Option<Fixed>, Halt> {
+    pub(super) async fn node_marks(&self) -> Result<BTreeMap<MarketId, Fixed>, Halt> {
         match self.node.markets().await {
-            Ok(markets) => Ok(markets.body.iter().find(|m| m.spec.id == self.market).and_then(|m| m.mark)),
+            Ok(markets) => Ok(markets.body.iter().filter_map(|m| Some((m.spec.id, m.mark?))).collect()),
             Err(CallError::WrongSigner { .. }) => Err(Halt::WrongSigner),
             Err(e) => {
-                warn!("the market's mark was not read: {e}");
-                Ok(None)
+                warn!("the markets' marks were not read: {e}");
+                Ok(BTreeMap::new())
             }
         }
     }

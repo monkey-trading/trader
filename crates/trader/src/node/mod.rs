@@ -23,6 +23,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::time::timeout;
 
+use crate::config::NodeSection;
+
 /// The largest answer body the bot reads: a page of marks history is a few hundred kilobytes.
 const MAX_ANSWER_BYTES: usize = 4 << 20;
 
@@ -65,6 +67,15 @@ impl Node {
     /// The node `tls` connects to, whose answers `signer` signs for `deployment`.
     pub fn new(tls: Tls, signer: [u8; 20], deployment: Deployment, timeout: Duration) -> Self {
         Self { tls, signer, deployment, timeout }
+    }
+
+    /// The node the config's section names.
+    /// Error cases:
+    /// - its TLS settings are refused (see `Tls::new`)
+    pub fn from_section(cfg: &NodeSection) -> anyhow::Result<Self> {
+        let tls = Tls::new(cfg.url.clone(), cfg.tls_key_sha256)?;
+        let deployment = Deployment { chain_id: cfg.chain_id, vault: cfg.vault.0 };
+        Ok(Self::new(tls, cfg.signer.0, deployment, cfg.request_timeout))
     }
 
     /// `GET path_and_query`, verified.

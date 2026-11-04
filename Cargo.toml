@@ -17,6 +17,10 @@ engine-core = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721
 engine-wire = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721b0062e48ee944ab063205f3dbccb01ae6", version = "0.1.0" }
 
 anyhow = "1"
+# The console's login: one Argon2id hash of the generated password.
+argon2 = { version = "0.6", features = ["zeroize"] }
+# The console's HTTPS server and WebSocket.
+axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 # Web3 Secret Storage keystores, the encrypted key files wallets export.
@@ -25,11 +29,13 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 hex = "0.4"
 http-body-util = "0.1"
 humantime-serde = "1"
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper = { version = "1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
 # The same curve crate engine-core signs with, so a key loads straight into its signing type.
 k256 = { version = "0.14.0", default-features = false, features = ["ecdsa"] }
 rand = "0.8"
+# The console's self-signed certificate, generated on first run.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 # TLS on ring alone, as the node uses, so no OpenSSL or aws-lc build.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["alloc"] }
@@ -47,9 +53,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 webpki-roots = "1"
 zeroize = "1"
 
-# Tests only: the local stand-in node's server and self-signed certificate, and scratch files.
-axum = { version = "0.8", features = ["ws"] }
-rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+# Tests only: scratch files.
 tempfile = "3"
 
 [profile.release]

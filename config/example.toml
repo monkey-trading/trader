@@ -42,5 +42,28 @@ qty = "0.01"
 # How far from the quoted mark a market order may fill, in bps.
 max_slippage_bps = 25
 
+# The periods the console may set, each [lowest, highest]. Leave the section out to keep the console
+# from changing them.
+[strategy.bounds]
+fast = [2, 20]
+slow = [10, 100]
+
+# The console: the bot's figures and controls in a browser, over HTTPS, behind a login. Leave the
+# section out to serve no console. On first run the bot generates a self-signed certificate and a
+# login password, keeps the certificate and only a hash of the password in data_dir, and prints
+# the password once; every start prints the certificate's SHA-256 fingerprint, which the browser's
+# certificate details must show. Delete data_dir's login.argon2 for a new password. Nothing the
+# console can do moves funds away from an account's own key, and no route returns a key.
+[console]
+# Every interface, so the console is reachable at the host's IP: https://<host>:8443.
+bind = "0.0.0.0:8443"
+# The generated certificate and key, the login's hash, and the controls the console set, which a
+# restart keeps.
+data_dir = "data"
+# How often the console reads each account from the node.
+refresh_interval = "5s"
+# PEM files to serve instead of the generated certificate.
+# tls = { cert = "console.crt", key = "console.key" }
+
 [logging]
 level = "info"

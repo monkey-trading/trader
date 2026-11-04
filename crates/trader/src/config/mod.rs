@@ -4,18 +4,23 @@
 
 mod validation;
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
 use engine_core::Fixed;
 use engine_core::types::AccountId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The default time a call to the node may take, connection included.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The default longest silence on the stream; the node sends a heartbeat every few seconds.
 const DEFAULT_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
+/// The console's default address: every interface, so it is reachable at the host's IP.
+const DEFAULT_CONSOLE_BIND: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8443);
+/// How often, by default, the console reads each account from the node.
+const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The whole config file.
 #[derive(Debug, Deserialize)]
@@ -24,6 +29,9 @@ pub struct Config {
     pub node: NodeSection,
     pub account: AccountSection,
     pub strategy: StrategySection,
+    /// The console; without the section the bot serves none.
+    #[serde(default)]
+    pub console: Option<ConsoleSection>,
     #[serde(default)]
     pub logging: LoggingSection,
 }
@@ -107,6 +115,50 @@ pub struct StrategySection {
     pub qty: Fixed,
     /// How far, in bps, a market order may fill from the mark it was quoted at.
     pub max_slippage_bps: i64,
+    /// The periods the console may set; without them the console cannot change the parameters.
+    #[serde(default)]
+    pub bounds: Option<SmaBounds>,
+}
+
+/// The SMA crossover's periods, in bars.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmaParams {
+    pub fast: usize,
+    pub slow: usize,
+}
+
+/// The lowest and highest period, each inclusive, the console may set for each average.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmaBounds {
+    pub fast: [usize; 2],
+    pub slow: [usize; 2],
+}
+
+/// The console: an HTTPS server on the host's address, behind a login.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsoleSection {
+    #[serde(default = "default_console_bind")]
+    pub bind: SocketAddr,
+    /// Where the console keeps its generated certificate, its login, and the controls it set.
+    #[serde(default = "default_console_data_dir")]
+    pub data_dir: PathBuf,
+    /// A certificate and key to serve instead of the generated ones.
+    #[serde(default)]
+    pub tls: Option<ConsoleTls>,
+    /// How often the console reads each account from the node.
+    #[serde(default = "default_refresh_interval", with = "humantime_serde")]
+    pub refresh_interval: Duration,
+}
+
+/// PEM files: a certificate chain, and its private key.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsoleTls {
+    pub cert: PathBuf,
+    pub key: PathBuf,
 }
 
 /// Log output.
@@ -165,6 +217,28 @@ impl Config {
             }
             KeySource::HexFile { path } => resolve(path),
         }
+        if let Some(console) = &mut self.console {
+            resolve(&mut console.data_dir);
+            if let Some(tls) = &mut console.tls {
+                resolve(&mut tls.cert);
+                resolve(&mut tls.key);
+            }
+        }
+    }
+}
+
+impl StrategySection {
+    /// The periods the config sets.
+    pub fn params(&self) -> SmaParams {
+        SmaParams { fast: self.fast, slow: self.slow }
+    }
+}
+
+impl SmaBounds {
+    /// Whether `params` lie within the bounds.
+    pub fn admit(&self, params: SmaParams) -> bool {
+        let within = |[low, high]: [usize; 2], value| (low..=high).contains(&value);
+        within(self.fast, params.fast) && within(self.slow, params.slow)
     }
 }
 
@@ -176,6 +250,21 @@ fn default_request_timeout() -> Duration {
 /// `DEFAULT_STREAM_TIMEOUT`, for serde.
 fn default_stream_timeout() -> Duration {
     DEFAULT_STREAM_TIMEOUT
+}
+
+/// `DEFAULT_CONSOLE_BIND`, for serde.
+fn default_console_bind() -> SocketAddr {
+    DEFAULT_CONSOLE_BIND
+}
+
+/// `data`, beside the config file, for serde.
+fn default_console_data_dir() -> PathBuf {
+    PathBuf::from("data")
+}
+
+/// `DEFAULT_REFRESH_INTERVAL`, for serde.
+fn default_refresh_interval() -> Duration {
+    DEFAULT_REFRESH_INTERVAL
 }
 
 #[cfg(test)]

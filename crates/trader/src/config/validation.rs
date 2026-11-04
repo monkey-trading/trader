@@ -16,6 +16,9 @@ const MIN_BAR: Duration = Duration::from_secs(60);
 const MAX_BAR: Duration = Duration::from_secs(24 * 60 * 60);
 /// The widest slippage bound an order may name: the whole price.
 const MAX_SLIPPAGE_BPS: i64 = 10_000;
+/// The shortest interval between the console's reads of an account, which keeps them within the
+/// node's rate limits.
+const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 impl Config {
     /// Checks the values serde cannot: the strategy's periods, bar length, size and slippage bound,
@@ -26,6 +29,8 @@ impl Config {
     /// - a bar that is not whole minutes from one minute to one day
     /// - a size that is not above zero and within the engine's input bound
     /// - a slippage bound below zero or above 10,000 bps
+    /// - period bounds whose low end is above the high end, or that leave out the periods set
+    /// - a console refresh interval under a second
     /// - a log level that is not a tracing filter directive
     pub(super) fn validate(&self, dev_build: bool) -> anyhow::Result<()> {
         if matches!(self.account.key, KeySource::HexFile { .. }) && !dev_build {
@@ -47,6 +52,19 @@ impl Config {
             (0..=MAX_SLIPPAGE_BPS).contains(&strategy.max_slippage_bps),
             "strategy.max_slippage_bps: from 0 to {MAX_SLIPPAGE_BPS}"
         );
+        if let Some(bounds) = &strategy.bounds {
+            ensure!(
+                bounds.fast[0] <= bounds.fast[1] && bounds.slow[0] <= bounds.slow[1],
+                "strategy.bounds: each range is [lowest, highest]"
+            );
+            ensure!(bounds.admit(strategy.params()), "strategy.bounds: the fast and slow periods set lie outside them");
+        }
+        if let Some(console) = &self.console {
+            ensure!(
+                console.refresh_interval >= MIN_REFRESH_INTERVAL,
+                "console.refresh_interval: at least {MIN_REFRESH_INTERVAL:?}"
+            );
+        }
         EnvFilter::try_new(&self.logging.level).map_err(|e| anyhow!("logging.level: {e}"))?;
         ensure!(!self.node.request_timeout.is_zero(), "node.request_timeout: above zero");
         ensure!(!self.node.stream_timeout.is_zero(), "node.stream_timeout: above zero");

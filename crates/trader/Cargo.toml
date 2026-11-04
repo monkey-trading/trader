@@ -8,6 +8,8 @@ description = "The monkeytrading bot: runs strategies against the engine's node 
 
 [dependencies]
 anyhow = { workspace = true }
+argon2 = { workspace = true }
+axum = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
 engine-core = { workspace = true }
@@ -21,6 +23,7 @@ hyper = { workspace = true }
 hyper-util = { workspace = true }
 k256 = { workspace = true }
 rand = { workspace = true }
+rcgen = { workspace = true }
 rustls = { workspace = true }
 rustls-webpki = { workspace = true }
 serde = { workspace = true }
@@ -38,8 +41,6 @@ webpki-roots = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-axum = { workspace = true }
-hyper = { workspace = true, features = ["server"] }
-hyper-util = { workspace = true, features = ["server", "service"] }
-rcgen = { workspace = true }
 tempfile = { workspace = true }
+# Paused time, for the console's sessions and login limit.
+tokio = { workspace = true, features = ["test-util"] }

@@ -2,9 +2,12 @@
 //! account, and the market's recent marks from the node; from then on it follows the public log:
 //! each `Prices` command moves the index mark, each completed bar goes to the strategy, and the
 //! account's fills move its position. A target the position is not at sends a signed market order,
-//! unless the bar is history the stream is replaying, or the last order could still enter the log.
+//! unless the bar is history the stream is replaying, or the last order could still enter the log,
+//! or the console stopped the account. The console's requests reach the account here too (`link`).
 
 mod fills;
+pub mod link;
+pub use link::{AccountLink, Link};
 mod orders;
 mod startup;
 pub use startup::stop_signal;
@@ -19,11 +22,13 @@ use engine_core::event::Event;
 use engine_core::market::{MarketSpec, QuoteCurrency};
 use engine_core::session::Schedule;
 use engine_core::types::{MarketId, Millis};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 use trader_core::bars::{Bar, BarBuilder};
 use trader_core::marks::IndexMarks;
 use trader_core::strategy::{SmaCrossover, order_for};
 
+use crate::bot::link::AccountRequest;
 use crate::config::Config;
 use crate::keys::AccountKey;
 use crate::node::{CallError, Node};
@@ -92,13 +97,14 @@ pub struct Bot {
     trading_from: Millis,
     /// The time of the last command read from the log.
     log_ts: Millis,
+    /// The console's controls of the account, and its view of it.
+    link: Link,
 }
 
-/// Runs the bot until `stop` completes, then cancels the account's resting orders and, when
-/// configured, closes its position; or until it halts on its own, leaving the account as it is.
+/// Runs the bot, with no console, until `stop` completes or it halts (see `run_linked`).
 /// Error cases:
-/// - the key or the startup reads fail (see `startup::start`)
-/// - the bot halts (see `Halt`)
+/// - the key does not load (see `AccountKey::load`)
+/// - see `run_linked`
 pub async fn run(
     cfg: Config,
     env: impl Fn(&str) -> Option<String>,
@@ -106,7 +112,23 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let key = AccountKey::load(&cfg.account.key, env).await?;
     info!(account = %key.address(), "account key unlocked");
-    let (mut bot, mut stream) = match startup::start(&cfg, key).await {
+    let link = Link::detached(&cfg);
+    run_linked(cfg, key, link, stop).await
+}
+
+/// Runs the bot under `link`'s controls until `stop` completes, then cancels the account's resting
+/// orders and, when configured, closes its position; or until it halts on its own, leaving the
+/// account as it is.
+/// Error cases:
+/// - the startup reads fail (see `startup::start`)
+/// - the bot halts (see `Halt`)
+pub async fn run_linked(
+    cfg: Config,
+    key: AccountKey,
+    link: Link,
+    stop: impl Future<Output = ()>,
+) -> anyhow::Result<()> {
+    let (mut bot, mut stream) = match startup::start(&cfg, key, link).await {
         Ok(started) => started,
         Err(e) => {
             if let Some(CallError::WrongSigner { .. }) = e.downcast_ref::<CallError>() {
@@ -115,6 +137,7 @@ pub async fn run(
             return Err(e);
         }
     };
+    bot.started();
     let result = match bot.follow(&mut stream, stop).await {
         Ok(()) => bot.stop(&mut stream).await,
         // What the bot saw is not what it trades on: it changes nothing, and leaves the account to
@@ -128,15 +151,20 @@ pub async fn run(
     if let Err(Halt::WrongSigner) = &result {
         error!(alert = "node_signer_mismatch", "{}", Halt::WrongSigner);
     }
+    if let Err(halt) = &result {
+        bot.link.halted(halt.to_string(), bot.bars.is_some());
+    }
     Ok(result?)
 }
 
 impl Bot {
-    /// Applies the log's messages until `stop` completes or the bot halts.
+    /// Applies the log's messages and the console's requests until `stop` completes or the bot
+    /// halts.
     /// Error cases:
     /// - see `Halt`
     async fn follow(&mut self, stream: &mut Stream, stop: impl Future<Output = ()>) -> Result<(), Halt> {
         tokio::pin!(stop);
+        let mut requests = self.link.take_requests();
         loop {
             tokio::select! {
                 biased;
@@ -144,12 +172,14 @@ impl Bot {
                     info!("stop signal");
                     return Ok(());
                 }
+                Some(request) = next_request(&mut requests) => self.on_request(request).await?,
                 frame = stream.next() => {
                     let frame = frame.map_err(|e| match e {
                         StreamError::WrongSigner => Halt::WrongSigner,
                         StreamError::Unreadable(e) => Halt::Unfollowable(e),
                     })?;
                     self.apply(&frame).await?;
+                    self.flatten_when_settled().await?;
                 }
             }
         }
@@ -236,7 +266,12 @@ impl Bot {
         let target = self.strategy.on_close(bar.close);
         let (fast, slow) = self.strategy.averages();
         debug!(start = bar.start, close = %bar.close, ?fast, ?slow, ?target, lag, "bar");
+        self.targeted(target);
         let Some(target) = target else { return Ok(()) };
+        if !self.link.trading() {
+            debug!(?target, "the console stopped the account or its strategy: no order");
+            return Ok(());
+        }
         let Some(intent) = order_for(target, self.qty, self.position, self.close_first) else { return Ok(()) };
         if lag > REPLAY_LAG_MS {
             info!(?target, lag, "the bar is history the stream is replaying: no order");
@@ -253,6 +288,15 @@ impl Bot {
         }
         info!(?target, position = %self.position, "moving to the target");
         self.place(intent, bar, ts).await
+    }
+}
+
+/// The next request from the console, or never without a console. A dropped future loses no request:
+/// `recv` is cancellation-safe.
+async fn next_request(requests: &mut Option<mpsc::Receiver<AccountRequest>>) -> Option<AccountRequest> {
+    match requests {
+        Some(requests) => requests.recv().await,
+        None => std::future::pending().await,
     }
 }
 

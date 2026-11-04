@@ -6,6 +6,10 @@
 mod bot;
 #[allow(unused_imports)]
 pub use bot::*;
+pub mod console;
+mod reads;
+#[allow(unused_imports)]
+pub use reads::{emissions_answer, history_fill};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
@@ -120,6 +124,13 @@ pub struct Inner {
     /// The most units of a position one close-all takes, as the pinned engine's `Fixed::MAX_INPUT`;
     /// the rest stays open.
     pub close_cap: Option<engine_core::Fixed>,
+    /// Each account's fill history, newest first, by lower-case address, and the most events a page
+    /// of it holds, below the request's limit.
+    pub history: BTreeMap<String, Vec<Value>>,
+    pub history_page: Option<usize>,
+    pub history_reads: usize,
+    /// Each account's emissions answer, by lower-case address; an absent one answers 404.
+    pub emissions: BTreeMap<String, Value>,
 }
 
 /// A running stand-in.
@@ -165,6 +176,8 @@ impl StandIn {
             .route("/v1/markets/{id}/marks", get(marks))
             .route("/v1/accounts/{address}", get(account_view_route))
             .route("/v1/accounts/{address}/nonce", get(nonce))
+            .route("/v1/accounts/{address}/history", get(reads::history))
+            .route("/v1/accounts/{address}/emissions", get(reads::emissions))
             .route("/v1/orders", post(record))
             .route("/v1/orders/cancel-all", post(record))
             .route("/v1/positions/close-all", post(record))
