@@ -16,7 +16,8 @@ use trader_core::hours::GapTracker;
 use trader_core::marks::IndexMarks;
 use trader_core::strategies::is_valid_close;
 
-use crate::bot::day::{DayFile, holding};
+use crate::bot::day::{Saved, StateFile, holding};
+use crate::bot::fills::other_market;
 use crate::bot::{Bot, Halt, orders, supported};
 use crate::config::Config;
 use crate::keys::AccountKey;
@@ -89,6 +90,11 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         Err(e) => return Err(e.into()),
     };
     let (now, view) = (view.time_ms, view.body);
+    if let Some(other) = other_market(&view, market_id) {
+        bail!(
+            "{account} holds a position in market {other}: close it first, as this bot trades one market per account"
+        );
+    }
     let held = view.positions.get(&market_id);
     let position = held.map_or(Fixed::ZERO, |p| p.qty);
     info!(%account, market = market_id, %position, balance = %view.balance, head_seq, "account read");
@@ -96,10 +102,13 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
     let bar_ms = Millis::try_from(strategy_cfg.bar.as_millis()).context("bar length")?;
     let now = Millis::try_from(now).context("node time")?;
     let strategy = strategy_cfg.params.build()?;
-    let day_file = DayFile::new(&cfg.account.state_dir, account);
-    let restored = day_file.load().await?;
-    let mut controls = Controls::new(cfg.risk.clone(), cfg.sizing.clone(), restored)?;
+    let state_file = StateFile::new(&cfg.account.state_dir, account);
+    let saved = state_file.load().await?;
+    let mut controls = Controls::new(cfg.risk.clone(), cfg.sizing.clone(), saved.day)?;
     controls.check_market(&market.spec).with_context(|| format!("sizing for {}", strategy_cfg.market))?;
+    // The opening time of a position the account no longer holds is no use.
+    controls
+        .restore_opened(saved.opened.into_iter().filter(|(id, _)| *id == market_id && !position.is_zero()).collect());
     if let Some(mark) = market.mark {
         // The day's opening equity is the account's now, unless a restart finds today's already kept.
         let entry = held.map_or(Fixed::ZERO, |p| p.entry);
@@ -107,12 +116,8 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         let holdings = holding.as_slice();
         controls.observe(now, &Account { balance: view.balance, holdings });
     }
-    let saved_day = controls.day_state();
-    if saved_day != restored
-        && let Some(state) = saved_day
-    {
-        day_file.save(state).await.context("keeping the day's state")?;
-    }
+    let saved_state = Saved { day: controls.day_state(), opened: controls.opened().clone() };
+    state_file.save(saved_state.clone()).await.context("keeping the saved state")?;
     let bot = Bot {
         domain: eip712::domain(node_cfg.chain_id, node_cfg.vault),
         node,
@@ -129,13 +134,14 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         strategy,
         controls,
         gaps: GapTracker::new(),
-        day_file,
-        saved_day,
-        day_unsaved: false,
+        state_file,
+        saved_state,
+        state_unsaved: false,
+        loss_alert: false,
         flatten_after: Millis::MIN,
         cash_alert: false,
-        resync_position: false,
         account_behind: false,
+        read_retry_after: Millis::MIN,
         close_first: false,
         signed_orders: VecDeque::with_capacity(SIGNED_ORDERS),
         position,
@@ -202,7 +208,7 @@ impl Bot {
         let past = logged.iter().filter(|bucket| bucket.ts < live_from).map(|bucket| (bucket.ts, Some(bucket.close)));
         for (at, close) in past.chain([(live_from, None)]) {
             if let Some(bar) = history.on_command(at, close) {
-                self.gaps.on_bar(&self.spec.schedule, bar.start);
+                self.gaps.on_bar(&self.spec.schedule, bar.start, bar_ms);
                 if is_valid_close(bar.close) {
                     self.strategy.on_close(bar.close);
                 }

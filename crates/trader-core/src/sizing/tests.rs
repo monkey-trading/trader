@@ -13,35 +13,35 @@ fn fraction(bps: i64, leverage: &str) -> Sizing {
 /// is 0.333333333, whose notional is a nano-unit short of 1,000 rather than over.
 #[test]
 fn a_fixed_notional_in_units() {
-    assert_eq!(fixed("1000", "10").qty(fx("40000"), fx("5000")), fx("0.025"));
-    assert_eq!(fixed("1000", "10").qty(fx("3000"), fx("5000")), fx("0.333333333"));
+    assert_eq!(fixed("1000", "10").qty(fx("40000"), fx("5000"), Fixed::ZERO), fx("0.025"));
+    assert_eq!(fixed("1000", "10").qty(fx("3000"), fx("5000"), Fixed::ZERO), fx("0.333333333"));
 }
 
 /// A fraction takes its share of equity: 20% of 5,000 is 1,000; 12.5% (1,250 bps) of 4,000 is 500.
 #[test]
 fn a_fraction_of_equity() {
-    assert_eq!(fraction(2_000, "10").qty(fx("40000"), fx("5000")), fx("0.025"));
-    assert_eq!(fraction(1_250, "10").qty(fx("50"), fx("4000")), fx("10"));
+    assert_eq!(fraction(2_000, "10").qty(fx("40000"), fx("5000"), Fixed::ZERO), fx("0.025"));
+    assert_eq!(fraction(1_250, "10").qty(fx("50"), fx("4000"), Fixed::ZERO), fx("10"));
 }
 
 /// The leverage cap cuts either method: 3x of 1,000 equity is 3,000, below a notional of 10,000 and a
 /// fraction of 500%.
 #[test]
 fn the_leverage_cap_cuts_the_position() {
-    assert_eq!(fixed("10000", "3").qty(fx("100"), fx("1000")), fx("30"));
-    assert_eq!(fraction(50_000, "3").qty(fx("100"), fx("1000")), fx("30"));
-    assert_eq!(fixed("2000", "3").qty(fx("100"), fx("1000")), fx("20"));
-    assert_eq!(fixed("10000", "0.5").qty(fx("100"), fx("1000")), fx("5"));
+    assert_eq!(fixed("10000", "3").qty(fx("100"), fx("1000"), Fixed::ZERO), fx("30"));
+    assert_eq!(fraction(50_000, "3").qty(fx("100"), fx("1000"), Fixed::ZERO), fx("30"));
+    assert_eq!(fixed("2000", "3").qty(fx("100"), fx("1000"), Fixed::ZERO), fx("20"));
+    assert_eq!(fixed("10000", "0.5").qty(fx("100"), fx("1000"), Fixed::ZERO), fx("5"));
 }
 
 /// No equity or no mark means no position, and a huge position is cut to the order bound.
 #[test]
 fn degenerate_inputs_size_to_zero_or_the_bound() {
-    assert_eq!(fixed("1000", "10").qty(fx("100"), Fixed::ZERO), Fixed::ZERO);
-    assert_eq!(fixed("1000", "10").qty(fx("100"), fx("-5")), Fixed::ZERO);
-    assert_eq!(fixed("1000", "10").qty(Fixed::ZERO, fx("1000")), Fixed::ZERO);
+    assert_eq!(fixed("1000", "10").qty(fx("100"), Fixed::ZERO, Fixed::ZERO), Fixed::ZERO);
+    assert_eq!(fixed("1000", "10").qty(fx("100"), fx("-5"), Fixed::ZERO), Fixed::ZERO);
+    assert_eq!(fixed("1000", "10").qty(Fixed::ZERO, fx("1000"), Fixed::ZERO), Fixed::ZERO);
     let rich = Fixed::MAX_INPUT;
-    assert_eq!(fixed("1000000000", "1000").qty(Fixed::from_raw(1), rich), Fixed::MAX_INPUT);
+    assert_eq!(fixed("1000000000", "1000").qty(Fixed::from_raw(1), rich, Fixed::ZERO), Fixed::MAX_INPUT);
 }
 
 /// The section is checked against itself and its market: the market's 100x (1% first tier) bounds the
@@ -77,4 +77,14 @@ fn the_config_section() {
     assert!(parse("by = 'equity_fraction'\nbps = 500").is_err());
     assert!(parse("by = 'fixed_notional'\nnotional = '250'\nmax_leverage = 5\nbps = 5").is_err());
     assert!(parse("by = 'kelly'\nmax_leverage = 5").is_err());
+}
+
+/// Positions held elsewhere use up the leverage cap: 3x of 1,000 equity is 3,000, of which 2,500 is held,
+/// leaving 500; 3,000 or more held leaves nothing.
+#[test]
+fn the_leverage_cap_counts_positions_elsewhere() {
+    let sizing = fixed("10000", "3");
+    assert_eq!(sizing.qty(fx("100"), fx("1000"), fx("2500")), fx("5"));
+    assert_eq!(sizing.qty(fx("100"), fx("1000"), fx("3000")), Fixed::ZERO);
+    assert_eq!(sizing.qty(fx("100"), fx("1000"), fx("4000")), Fixed::ZERO);
 }

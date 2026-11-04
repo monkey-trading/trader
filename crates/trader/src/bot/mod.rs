@@ -25,10 +25,9 @@ use trader_core::bars::{Bar, BarBuilder};
 use trader_core::controls::{Account, BarTarget, Controls, Decision, Refusal};
 use trader_core::hours::GapTracker;
 use trader_core::marks::IndexMarks;
-use trader_core::risk::DayState;
 use trader_core::strategies::{Strategy, is_valid_close};
 
-use crate::bot::day::{DayFile, holding};
+use crate::bot::day::{Saved, StateFile, holding};
 use crate::config::Config;
 use crate::keys::AccountKey;
 use crate::node::{CallError, Node};
@@ -38,6 +37,9 @@ use crate::stream::{Frame, Stream, StreamError};
 /// How far behind the node's time a bar may close and still be acted on; one further behind is
 /// history the stream is replaying, quoted at marks long gone.
 pub(super) const REPLAY_LAG_MS: Millis = 30_000;
+
+/// How long, in sequenced time, between reads of the account while the last one was not at the log.
+const READ_RETRY_MS: Millis = 5_000;
 
 /// Why the bot stopped on its own.
 #[derive(Debug, thiserror::Error)]
@@ -77,19 +79,22 @@ pub struct Bot {
     controls: Controls,
     /// The first bar after a closure of the market.
     gaps: GapTracker,
-    /// Where the day's loss is kept, what was last written, and whether the last write failed.
-    day_file: DayFile,
-    saved_day: Option<DayState>,
-    day_unsaved: bool,
+    /// Where the day's loss and the positions' opening times are kept, what was last written, and
+    /// whether the last write failed.
+    state_file: StateFile,
+    saved_state: Saved,
+    state_unsaved: bool,
+    /// Whether the daily loss alert is raised.
+    loss_alert: bool,
     /// The earliest sequenced time the daily loss limit tries to close the position again.
     flatten_after: Millis,
     /// Whether the account is in the cash alert: its cash is not positive and an order was refused.
     cash_alert: bool,
-    /// Whether the position is read again from the node: a split changed it without a fill.
-    resync_position: bool,
-    /// Whether the last read of the account was behind the log, or failed, so its balance and entry
-    /// are older than the position.
+    /// Whether the last read of the account was not at the log, or failed, so its balance and entry
+    /// are not the position's: nothing is valued or ordered until a read agrees.
     account_behind: bool,
+    /// The earliest sequenced time the account is read again while it is behind.
+    read_retry_after: Millis,
     /// Whether the next reversal is only a close: the engine refused the last one whole.
     close_first: bool,
     /// The signatures of the last orders this process signed, to tell its fills from others': a
@@ -208,11 +213,18 @@ impl Bot {
         }
         let mut filled = false;
         for event in &events {
-            if let Event::CorporateActionFailed { market, reason, .. } = event
-                && *market == self.market
-            {
-                let reason = format!("a corporate action failed for the market, which stops dealing in it: {reason}");
-                return Err(Halt::Unfollowable(anyhow::anyhow!(reason)));
+            match event {
+                Event::CorporateActionFailed { market, reason, .. } if *market == self.market => {
+                    let reason =
+                        format!("a corporate action failed for the market, which stops dealing in it: {reason}");
+                    return Err(Halt::Unfollowable(anyhow::anyhow!(reason)));
+                }
+                // A split changes the units of every price the strategy has seen.
+                Event::CorporateSplit { market, .. } if *market == self.market => {
+                    let reason = "the market split, which changes its units: the bot does not follow a split";
+                    return Err(Halt::Unfollowable(anyhow::anyhow!(reason)));
+                }
+                _ => {}
             }
             filled |= self.on_event(message.seq, message.ts, event);
         }
@@ -229,9 +241,15 @@ impl Bot {
             (self.mark, self.exact_mark) = (mark, mark);
         }
         let node_time = Millis::try_from(frame.time).unwrap_or(Millis::MAX);
-        if moved.is_some() || filled {
-            self.check_day(message.ts, node_time.saturating_sub(message.ts)).await?;
+        let lag = node_time.saturating_sub(message.ts);
+        if self.account_behind && message.ts >= self.read_retry_after {
+            self.read_retry_after = message.ts.saturating_add(READ_RETRY_MS);
+            self.refresh_balance().await?;
         }
+        if moved.is_some() || filled {
+            self.check_day(message.ts).await?;
+        }
+        self.retry_flatten(message.ts, lag).await?;
         if self.bars.is_none() {
             return self.warm_up(message.ts, moved, node_time).await;
         }
@@ -273,7 +291,7 @@ impl Bot {
         if self.account_behind {
             self.refresh_balance().await?;
         }
-        let gap = self.gaps.on_bar(&self.spec.schedule, bar.start);
+        let gap = self.gaps.on_bar(&self.spec.schedule, bar.start, self.bar_ms);
         let target = if is_valid_close(bar.close) {
             self.strategy.on_close(bar.close)
         } else {
@@ -282,11 +300,23 @@ impl Bot {
         };
         debug!(start = bar.start, close = %bar.close, ?target, gap, lag, "bar");
         let (Some(target), Some(mark)) = (target, self.mark) else { return Ok(()) };
+        if self.account_behind {
+            info!(?target, "the account read is not at the log: no order");
+            return Ok(());
+        }
         let holding = holding(&self.spec, self.market, self.position, self.entry, mark);
         let holdings = holding.as_slice();
         let account = Account { balance: self.balance, holdings };
-        let wanted =
-            BarTarget { ts, market: self.market, spec: &self.spec, mark, target, gap, close_first: self.close_first };
+        let wanted = BarTarget {
+            ts,
+            market: self.market,
+            spec: &self.spec,
+            mark,
+            target,
+            gap,
+            close_first: self.close_first,
+            max_slippage_bps: self.max_slippage_bps,
+        };
         let decision = self.controls.decide(&account, &wanted);
         self.track_cash_alert(&decision);
         let intent = match decision {

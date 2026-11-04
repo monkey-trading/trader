@@ -265,7 +265,7 @@ log="$work/bot-tiny.log"
 trip="$(grep -n 'alert="daily_loss_limit"' "$log" | head -n 1 | cut -d: -f1 || true)"
 [[ -n "$trip" ]] || fail "tiny: the daily loss limit was never reached"
 grep -q 'closing the position' <(tail -n +"$trip" "$log") || fail "tiny: the position was not closed when the limit was reached"
-! tail -n +"$((trip + 1))" "$log" | grep -q 'placing a market order' || fail "tiny: an order was placed after the limit was reached"
+! grep -q 'placing a market order' <(tail -n +"$((trip + 1))" "$log") || fail "tiny: an order was placed after the limit was reached"
 echo "tiny: flattened at log line $trip, and no order after it"
 
 echo "PASS: six strategies traded within their limits, and the account with the tiny limit was flattened and stopped"

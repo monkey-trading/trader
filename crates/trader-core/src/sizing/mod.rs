@@ -77,11 +77,12 @@ impl Sizing {
         }
     }
 
-    /// The units of a new position at `mark` for an account with `equity`: the configured notional
-    /// or fraction, cut to the leverage cap times equity, and rounded down to a whole nano-unit so
+    /// The units of a new position at `mark` for an account with `equity` that already holds
+    /// `other_notional` USD of positions elsewhere: the configured notional or fraction, cut to what
+    /// the leverage cap times equity leaves, and rounded down to a whole nano-unit so
     /// the notional never exceeds either. Zero when equity or the mark is not positive. At most
     /// `Fixed::MAX_INPUT`, the most an order takes.
-    pub fn qty(&self, mark: Fixed, equity: Fixed) -> Fixed {
+    pub fn qty(&self, mark: Fixed, equity: Fixed, other_notional: Fixed) -> Fixed {
         if !equity.is_positive() || !mark.is_positive() {
             return Fixed::ZERO;
         }
@@ -89,7 +90,8 @@ impl Sizing {
             Self::FixedNotional { notional, .. } => notional,
             Self::EquityFraction { bps, .. } => equity.mul_bps_rounded(bps, Rounding::Down),
         };
-        let capped = wanted.min(equity.mul_rounded(self.max_leverage(), Rounding::Down));
+        let room = (equity.mul_rounded(self.max_leverage(), Rounding::Down) - other_notional).max(Fixed::ZERO);
+        let capped = wanted.min(room);
         capped.div_rounded(mark, Rounding::Down).min(Fixed::MAX_INPUT)
     }
 }

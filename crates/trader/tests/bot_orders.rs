@@ -73,6 +73,10 @@ async fn a_reversal_refused_whole_closes_first() {
     }));
     rising(&stand_in, 11, &["100", "100", "101", "102"]);
     let first = order(&stand_in, 1).await;
+    stand_in.with(|i| {
+        let position = json!({ "1": { "qty": "1", "entry": "101" } });
+        i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
+    });
     stand_in.append((15, 0), own_fill(15, T0 + 2 * MINUTE + 1, &first, "1"));
     stand_in.with(|i| {
         i.replies.push_back(json!([{ "type": "order_rejected", "account": account(), "client_id": T0 + 3 * MINUTE,

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use super::*;
@@ -23,7 +24,16 @@ fn holding<'a>(spec: &'a MarketSpec, qty: &str, entry: &str, mark: &str) -> Hold
 }
 
 fn bar<'a>(spec: &'a MarketSpec, mark: &str, target: Target) -> BarTarget<'a> {
-    BarTarget { ts: TS, market: spec.id, spec, mark: fx(mark), target, gap: false, close_first: false }
+    BarTarget {
+        ts: TS,
+        market: spec.id,
+        spec,
+        mark: fx(mark),
+        target,
+        gap: false,
+        close_first: false,
+        max_slippage_bps: 0,
+    }
 }
 
 fn order(side: Side, qty: &str, reduce_only: bool) -> Decision {
@@ -114,7 +124,7 @@ fn a_position_found_at_startup_counts_as_held() {
         order(Side::Sell, "4", true)
     );
     controls.on_fill(TS, 1, Fixed::ZERO, fx("4"));
-    controls.forget_opening(1);
+    controls.restore_opened(BTreeMap::new());
     assert_eq!(
         controls.decide(&account("5000", &held), &bar(&market, "100", Target::Flat)),
         order(Side::Sell, "4", true)
@@ -274,10 +284,8 @@ fn cash_stays_positive() {
         controls.decide(&account("0", &held), &bar(&two, "100", Target::Long)),
         Decision::Refused(Refusal::NoCash)
     );
-    assert_eq!(
-        controls.decide(&account("-5", &held), &bar(&one, "100", Target::Short)),
-        Decision::Refused(Refusal::NoCash)
-    );
+    // A reversal whose opening leg cash refuses still closes the side the strategy has left.
+    assert_eq!(controls.decide(&account("-5", &held), &bar(&one, "100", Target::Short)), order(Side::Sell, "1", true));
     assert_eq!(controls.decide(&account("-5", &held), &bar(&one, "100", Target::Flat)), order(Side::Sell, "1", true));
     assert_eq!(
         controls.decide(&account("0.000000001", &held), &bar(&two, "100", Target::Long)),
@@ -354,4 +362,81 @@ fn construction_and_the_market_check() {
     risk.max_open_positions = 1;
     let controls = Controls::new(risk, sizing, None).unwrap();
     assert!(matches!(controls.check_market(&spec(1)), Err(SizingError::AboveMarket { .. })));
+}
+
+/// A reversal whose opening leg breaks a limit closes the old side instead, and the position's own
+/// minimum hold still applies to that close.
+#[test]
+fn a_refused_reversal_still_closes() {
+    let market = spec(1);
+    let held = [holding(&market, "4", "100", "100")];
+    // The margin buffer: equity of 12 against a requirement of 10 at a 100% buffer.
+    let mut buffered = self::controls(10_000, Duration::ZERO);
+    assert_eq!(
+        buffered.decide(&account("12", &held), &bar(&market, "100", Target::Short)),
+        order(Side::Sell, "4", true)
+    );
+    // Held for a minimum, the close waits too.
+    let mut holding_on = self::controls(0, Duration::from_secs(3600));
+    holding_on.on_fill(TS, 1, Fixed::ZERO, fx("4"));
+    assert_eq!(
+        holding_on.decide(&account("12", &held), &bar(&market, "100", Target::Short)),
+        Decision::Refused(Refusal::MinHold { until: TS + HOUR })
+    );
+}
+
+/// The margin buffer is judged after the slippage an order may cost: 1,000 of notional with 50 bps of
+/// slippage costs 5, so equity of 25 passes a 100% buffer (20) and 24.999999999 does not.
+#[test]
+fn the_buffer_is_kept_after_slippage() {
+    let market = spec(1);
+    let mut controls = controls(10_000, Duration::ZERO);
+    let with = |slippage| BarTarget { max_slippage_bps: slippage, ..bar(&market, "100", Target::Long) };
+    assert_eq!(controls.decide(&account("25", &[]), &with(50)), order(Side::Buy, "10", false));
+    assert_eq!(
+        controls.decide(&account("24.999999999", &[]), &with(50)),
+        Decision::Refused(Refusal::Margin { equity: fx("19.999999999"), needed: fx("20") })
+    );
+}
+
+/// Leverage counts every position: with 3,000 held elsewhere against a cap of 90 on 5,000 equity there is
+/// room, but a cap sized to the equity leaves a new market none.
+#[test]
+fn the_leverage_cap_counts_the_other_markets() {
+    let (one, two) = (spec(1), spec(2));
+    let risk = RiskParams {
+        max_open_positions: 2,
+        max_total_notional: fx("50000"),
+        daily_loss: LossLimit::Usd(fx("100")),
+        margin_buffer_bps: 0,
+        min_hold: Duration::ZERO,
+    };
+    let sizing = Sizing::FixedNotional { notional: fx("1000"), max_leverage: fx("2") };
+    let mut controls = Controls::new(risk, sizing, None).unwrap();
+    let held = [holding(&one, "9", "100", "100")];
+    // 2x of 1,000 equity is 2,000; 900 is held, leaving 1,100, so 1,000 fits.
+    assert_eq!(
+        controls.decide(&account("1000", &held), &bar(&two, "100", Target::Long)),
+        order(Side::Buy, "10", false)
+    );
+    let held = [holding(&one, "15", "100", "100")];
+    // 1,500 held leaves 500.
+    assert_eq!(controls.decide(&account("1000", &held), &bar(&two, "100", Target::Long)), order(Side::Buy, "5", false));
+    let held = [holding(&one, "20", "100", "100")];
+    assert_eq!(
+        controls.decide(&account("1000", &held), &bar(&two, "100", Target::Long)),
+        Decision::Refused(Refusal::NoSize)
+    );
+}
+
+/// A market that cannot be valued gets no order even when nothing held is in it.
+#[test]
+fn a_market_quoted_in_another_currency_gets_no_order() {
+    let mut dax = spec(3);
+    dax.quote_currency = engine_core::market::QuoteCurrency::Eur { fx_market: 9 };
+    let mut controls = controls(0, Duration::ZERO);
+    assert_eq!(
+        controls.decide(&account("5000", &[]), &bar(&dax, "100", Target::Long)),
+        Decision::Refused(Refusal::Unvalued)
+    );
 }

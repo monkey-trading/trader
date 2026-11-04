@@ -24,13 +24,14 @@ impl GapTracker {
         Self::default()
     }
 
-    /// Takes the start of the next bar, which does not come before the last, and returns whether the
-    /// market was shut at any time from the start of the bar before it to the start of this one. The
-    /// first bar seen is no gap.
-    pub fn on_bar(&mut self, schedule: &Schedule, start: Millis) -> bool {
+    /// Takes the start of the next bar, which is `length` ms long and does not come before the last,
+    /// and returns whether the market was shut at any time from the end of the bar before it to the
+    /// end of this one: a closure is counted once, by the bar that spans it. The first bar seen is no
+    /// gap.
+    pub fn on_bar(&mut self, schedule: &Schedule, start: Millis, length: Millis) -> bool {
         let previous = self.previous.replace(start);
         let Some(previous) = previous.filter(|previous| *previous < start) else { return false };
-        start - previous > MAX_SCAN_MS || !schedule.open_throughout(previous, start)
+        start - previous > MAX_SCAN_MS || !schedule.open_throughout(previous + length, start + length - 1)
     }
 }
 

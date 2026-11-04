@@ -200,6 +200,10 @@ async fn only_moves_of_the_mark_make_bars() {
     stand_in.append((14, 0), command(14, T0 + 2 * MINUTE, prices(1, "101", T0 + 2 * MINUTE), json!([])));
     let first = order(&stand_in, 1).await;
     check_order(&first, T0 + MINUTE, "buy", "0.990099009", "101", false, 0);
+    stand_in.with(|i| {
+        let position = json!({ "1": { "qty": "1", "entry": "101" } });
+        i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
+    });
     stand_in.append((15, 0), own_fill(15, T0 + 2 * MINUTE + 1, &first, "1"));
     stand_in.append((16, 0), command(16, T0 + 3 * MINUTE, prices(1, "101", T0 + 3 * MINUTE), json!([])));
     stand_in.append((17, 0), command(17, T0 + 4 * MINUTE, prices(1, "100", T0 + 4 * MINUTE), json!([])));

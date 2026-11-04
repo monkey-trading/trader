@@ -23,7 +23,7 @@ fn an_always_open_market_is_always_open_and_never_gaps() {
     let mut tracker = GapTracker::new();
     assert!(is_open(&Schedule::AlwaysOpen, MONDAY + 3 * HOUR));
     for hours in 0..100 {
-        assert!(!tracker.on_bar(&Schedule::AlwaysOpen, MONDAY + hours * HOUR));
+        assert!(!tracker.on_bar(&Schedule::AlwaysOpen, MONDAY + hours * HOUR, HOUR));
     }
 }
 
@@ -43,27 +43,43 @@ fn open_and_closed_by_the_clock() {
 fn the_first_bar_after_a_closure_is_a_gap() {
     let schedule = exchange();
     let mut tracker = GapTracker::new();
-    assert!(!tracker.on_bar(&schedule, MONDAY + 15 * HOUR), "the first bar seen");
-    assert!(!tracker.on_bar(&schedule, MONDAY + 16 * HOUR));
-    assert!(!tracker.on_bar(&schedule, MONDAY + 20 * HOUR));
-    assert!(tracker.on_bar(&schedule, MONDAY + DAY + 15 * HOUR), "Tuesday after Monday's close");
-    assert!(!tracker.on_bar(&schedule, MONDAY + DAY + 16 * HOUR));
+    assert!(!tracker.on_bar(&schedule, MONDAY + 15 * HOUR, HOUR), "the first bar seen");
+    assert!(!tracker.on_bar(&schedule, MONDAY + 16 * HOUR, HOUR));
+    assert!(!tracker.on_bar(&schedule, MONDAY + 20 * HOUR, HOUR));
+    assert!(tracker.on_bar(&schedule, MONDAY + DAY + 15 * HOUR, HOUR), "Tuesday after Monday's close");
+    assert!(!tracker.on_bar(&schedule, MONDAY + DAY + 16 * HOUR, HOUR));
+}
+
+/// A session that opens partway through a bar: with 14:30 opens and hourly bars, the 14:00 bar is the gap,
+/// and the 15:00 bar after it is not; with four-hour bars the bar spanning the open is the only gap.
+#[test]
+fn a_closure_is_counted_once_by_the_bar_that_spans_it() {
+    let schedule = exchange();
+    let mut hourly = GapTracker::new();
+    hourly.on_bar(&schedule, MONDAY + 19 * HOUR, HOUR);
+    assert!(hourly.on_bar(&schedule, MONDAY + DAY + 14 * HOUR, HOUR));
+    assert!(!hourly.on_bar(&schedule, MONDAY + DAY + 15 * HOUR, HOUR));
+    assert!(!hourly.on_bar(&schedule, MONDAY + DAY + 20 * HOUR, HOUR), "the last bar of the session");
+    let mut four = GapTracker::new();
+    four.on_bar(&schedule, MONDAY + 12 * HOUR, 4 * HOUR);
+    assert!(four.on_bar(&schedule, MONDAY + DAY + 12 * HOUR, 4 * HOUR));
+    assert!(!four.on_bar(&schedule, MONDAY + DAY + 16 * HOUR, 4 * HOUR));
 }
 
 #[test]
 fn a_holiday_and_a_weekend_gap() {
     let schedule = exchange();
     let mut tracker = GapTracker::new();
-    tracker.on_bar(&schedule, MONDAY + 2 * DAY + 20 * HOUR);
-    assert!(tracker.on_bar(&schedule, MONDAY + 4 * DAY + 15 * HOUR), "Friday after the Thursday holiday");
-    assert!(!tracker.on_bar(&schedule, MONDAY + 4 * DAY + 16 * HOUR));
-    assert!(tracker.on_bar(&schedule, MONDAY + 7 * DAY + 15 * HOUR), "Monday after the weekend");
+    tracker.on_bar(&schedule, MONDAY + 2 * DAY + 20 * HOUR, HOUR);
+    assert!(tracker.on_bar(&schedule, MONDAY + 4 * DAY + 15 * HOUR, HOUR), "Friday after the Thursday holiday");
+    assert!(!tracker.on_bar(&schedule, MONDAY + 4 * DAY + 16 * HOUR, HOUR));
+    assert!(tracker.on_bar(&schedule, MONDAY + 7 * DAY + 15 * HOUR, HOUR), "Monday after the weekend");
 }
 
 #[test]
 fn a_long_silence_is_a_gap_without_a_scan() {
     let mut tracker = GapTracker::new();
-    tracker.on_bar(&Schedule::AlwaysOpen, MONDAY);
-    assert!(!tracker.on_bar(&Schedule::AlwaysOpen, MONDAY + MAX_SCAN_MS));
-    assert!(tracker.on_bar(&Schedule::AlwaysOpen, MONDAY + 2 * MAX_SCAN_MS + 1));
+    tracker.on_bar(&Schedule::AlwaysOpen, MONDAY, HOUR);
+    assert!(!tracker.on_bar(&Schedule::AlwaysOpen, MONDAY + MAX_SCAN_MS, HOUR));
+    assert!(tracker.on_bar(&Schedule::AlwaysOpen, MONDAY + 2 * MAX_SCAN_MS + 1, HOUR));
 }

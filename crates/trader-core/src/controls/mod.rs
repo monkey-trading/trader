@@ -36,6 +36,8 @@ pub struct BarTarget<'a> {
     pub gap: bool,
     /// A reversal is only a close, as the engine refused the last one whole.
     pub close_first: bool,
+    /// The most, in bps, a market order may fill from the mark: equity is judged after that loss.
+    pub max_slippage_bps: i64,
 }
 
 /// What to do about a target.
@@ -132,10 +134,19 @@ impl Controls {
         }
     }
 
-    /// Forgets when a position opened, as when the account is read again from the node and a position
-    /// is found that no fill of this run opened.
-    pub fn forget_opening(&mut self, market: MarketId) {
-        self.opened.remove(&market);
+    /// When each open position was opened, to keep across a restart.
+    pub fn opened(&self) -> &BTreeMap<MarketId, Millis> {
+        &self.opened
+    }
+
+    /// Takes the opening times kept from an earlier run, for the positions the account still holds.
+    pub fn restore_opened(&mut self, opened: BTreeMap<MarketId, Millis>) {
+        self.opened = opened;
+    }
+
+    /// Whether the day's loss limit has stopped the account for the day.
+    pub fn is_stopped(&self) -> bool {
+        self.day.is_stopped()
     }
 
     /// The order that takes the account toward `bar.target`, or why there is none. Sizing sets the
@@ -160,7 +171,8 @@ impl Controls {
         }
         let position = account.holdings.iter().find(|h| h.market == bar.market).map_or(Fixed::ZERO, |h| h.qty);
         let on_side = matches!((bar.target, position.signum()), (Target::Long, 1) | (Target::Short, -1));
-        let size = if on_side { position.abs() } else { self.sizing.qty(bar.mark, equity) };
+        let others: Fixed = (account.holdings.iter()).filter(|h| h.market != bar.market).map(Holding::notional).sum();
+        let size = if on_side { position.abs() } else { self.sizing.qty(bar.mark, equity, others) };
         // With no size to open, a target that opens something can only close what is held.
         let target = if size.is_zero() { Target::Flat } else { bar.target };
         let Some(intent) = order_for(target, size, position, bar.close_first) else {
@@ -175,6 +187,10 @@ impl Controls {
         }
         let adds = crosses || after.abs() > position.abs();
         if adds && let Some(refusal) = self.refuse_adding(account, bar, equity, after, intent) {
+            // A reversal whose opening leg is refused still closes the side the strategy has left.
+            if crosses && let Some(close) = order_for(Target::Flat, Fixed::ZERO, position, false) {
+                return Decision::Order(close);
+            }
             return Decision::Refused(refusal);
         }
         Decision::Order(intent)
@@ -212,8 +228,14 @@ impl Controls {
         if after_holdings.iter().map(Holding::notional).sum::<Fixed>() > self.risk.max_total_notional {
             return Some(Refusal::TotalNotional);
         }
-        // A fill at the mark leaves equity as it is, so the order is judged by the requirement after it.
-        let (_, required) = equity_and_margin(account.balance, &after_holdings)?;
+        // A fill at the mark leaves equity as it is; one at the worst price the order allows costs the
+        // slippage on its notional. The order is judged on that equity against the requirement after it.
+        let Some((_, required)) = equity_and_margin(account.balance, &after_holdings) else {
+            return Some(Refusal::Unvalued);
+        };
+        let slippage =
+            intent.qty.mul_rounded(bar.mark, Rounding::Up).mul_bps_rounded(bar.max_slippage_bps, Rounding::Up);
+        let equity = equity - slippage;
         let needed = required.mul_bps_rounded(10_000 + self.risk.margin_buffer_bps, Rounding::Up);
         (equity < needed).then_some(Refusal::Margin { equity, needed })
     }

@@ -38,7 +38,10 @@ fn own_close(seq: u64, ts: i64, body: &Value) -> Value {
 
 /// How many requests the stand-in has seen, after letting the bot catch up with the log.
 async fn posts_after_settling(stand_in: &StandIn) -> usize {
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    let last = stand_in.with(|i| i.log.last().map(|(offset, _)| *offset));
+    if let Some(last) = last {
+        stand_in.applied(last).await;
+    }
     stand_in.with(|i| i.posts.len())
 }
 
@@ -83,18 +86,19 @@ async fn the_daily_loss_limit_flattens_and_holds_across_a_restart() {
     let (path, body) = posted(&stand_in, 1).await;
     assert_eq!(path, "/v1/positions/close-all");
     assert_eq!(body["closes"], json!([{ "market": 1, "quoted": "94" }]));
-    assert_eq!(day_file(dir.path())["tripped"], true);
-    assert_eq!(day_file(dir.path())["start_equity"], "1000");
+    assert_eq!(day_file(dir.path())["day"]["tripped"], true);
+    assert_eq!(day_file(dir.path())["day"]["start_equity"], "1000");
 
-    // The close is declined or not yet in the log: it is tried again on a later move of the mark, once
-    // five seconds have passed since the last try, without waiting for a bar.
+    // The close is declined or not yet in the log: it is tried again once five seconds have passed since
+    // the last try, on any command, though the mark has not moved.
     price_at(&stand_in, T0 + MINUTE + 2_000, "96");
     assert_eq!(posts_after_settling(&stand_in).await, 1, "too soon after the last try");
-    price_at(&stand_in, T0 + MINUTE + 6_000, "95");
+    let seq = next_seq(&stand_in);
+    stand_in.append((seq, 0), command(seq, T0 + MINUTE + 6_000, json!({ "type": "tick" }), json!([])));
     let (path, body) = posted(&stand_in, 2).await;
     assert_eq!(
         (path.as_str(), &body["closes"]),
-        ("/v1/positions/close-all", &json!([{ "market": 1, "quoted": "95" }]))
+        ("/v1/positions/close-all", &json!([{ "market": 1, "quoted": "96" }]))
     );
 
     // The close lands, and is the bot's own fill; no bar after it orders, whatever the strategy says.
@@ -132,7 +136,7 @@ async fn the_daily_loss_limit_flattens_and_holds_across_a_restart() {
     assert_eq!((path.as_str(), body["side"].as_str()), ("/v1/orders", Some("buy")));
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
-    assert_eq!(day_file(dir.path())["tripped"], false);
+    assert_eq!(day_file(dir.path())["day"]["tripped"], false);
 }
 
 /// A halt in the market's hours: the bar the halt closes places no order, the first bar after the
@@ -248,32 +252,129 @@ async fn the_margin_buffer_holds_back_an_order() {
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
 }
 
-/// A split changes the position without a fill, so the bot reads it again: with 2 held instead of 1, a
-/// short target sells 2 and the new 100 USD of size.
+/// A split changes the units of every price the strategy has seen, so the bot halts rather than trade on them.
 #[tokio::test]
-async fn a_split_moves_the_position() {
+async fn a_split_halts() {
     let stand_in = StandIn::start().await;
     let dir = tempfile::tempdir().unwrap();
     stand_in.with(|i| {
         i.markets = json!([btc_usd(Some("99"))]);
-        let position = json!({ "1": { "qty": "1", "entry": "99" } });
-        i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    let (_stop, bot) = start(&stand_in, dir.path(), &[]);
+    warm(&stand_in).await;
+    let split = json!({ "type": "corporate_split", "id": "s1", "market": 1, "new_units": 2, "old_units": 1 });
+    let seq = next_seq(&stand_in);
+    stand_in.append((seq, 0), command(seq, T0 + MINUTE, json!({ "type": "tick" }), json!([split])));
+    let err = tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap_err();
+    assert!(err.to_string().contains("does not follow a split"), "{err:#}");
+}
+
+/// An account that holds a position in another market is refused at the start, and halts the bot when one
+/// appears: its limits are the account's, and the bot sees one market.
+#[tokio::test]
+async fn a_position_in_another_market_is_refused() {
+    let stand_in = StandIn::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        let held = json!({ "2": { "qty": "-1", "entry": "5" } });
+        i.accounts.insert(account().to_string(), account_view("1000", held, json!({})));
+        i.head_seq = 10;
+    });
+    let err = run(config_with(&stand_in, dir.path(), "1m", &[]), async {}).await.unwrap_err();
+    assert!(err.to_string().contains("holds a position in market 2"), "{err:#}");
+    assert!(stand_in.with(|i| i.posts.is_empty()));
+}
+
+/// A read of the account that is not at the log values nothing: a short opened from flat, read as
+/// still flat, would be valued at an entry of zero, a loss of its whole notional. The daily limit
+/// does not trip on it, and once a read agrees the account is valued from its entry.
+#[tokio::test]
+async fn a_read_behind_the_log_trips_nothing() {
+    let stand_in = StandIn::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
         i.head_seq = 10;
         i.nonce = 3;
     });
-    let (stop, bot) = start(&stand_in, dir.path(), &[]);
+    let (stop, bot) =
+        start(&stand_in, dir.path(), &[("daily_loss = { usd = \"100000\" }", "daily_loss = { usd = \"5\" }")]);
     warm(&stand_in).await;
+    price_at(&stand_in, T0 + MINUTE, "98");
+    price_at(&stand_in, T0 + 2 * MINUTE, "97");
+    let (_, sell) = posted(&stand_in, 1).await;
+    assert_eq!(sell["side"], "sell");
+    // The sell fills, but the node's account still reads flat.
+    let seq = next_seq(&stand_in);
+    stand_in.append((seq, 0), own_fill(seq, T0 + 2 * MINUTE + 100, &sell, "-1.030927835"));
+    price_at(&stand_in, T0 + 2 * MINUTE + 1_000, "97.5");
+    assert_eq!(posts_after_settling(&stand_in).await, 1, "no close: the day's loss is not read from a stale view");
+    assert_eq!(day_file(dir.path())["day"]["tripped"], false);
+    // A later read agrees; the 0.5 USD loss per unit is far inside the limit.
     stand_in.with(|i| {
-        let position = json!({ "1": { "qty": "2", "entry": "50" } });
+        let position = json!({ "1": { "qty": "-1.030927835", "entry": "97" } });
         i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
     });
-    let split = json!({ "type": "corporate_split", "id": "s1", "market": 1, "new_units": 2, "old_units": 1 });
+    price_at(&stand_in, T0 + 2 * MINUTE + 8_000, "97.6");
+    price_at(&stand_in, T0 + 2 * MINUTE + 9_000, "97.7");
+    assert_eq!(posts_after_settling(&stand_in).await, 1);
+    assert_eq!(day_file(dir.path())["day"]["tripped"], false);
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+}
+
+/// The time a position opened is kept in the state file, so a restart finds the hold still running.
+#[tokio::test]
+async fn the_hold_survives_a_restart() {
+    let hold = [("min_hold = \"0s\"", "min_hold = \"5m\"")];
+    let stand_in = StandIn::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+        i.nonce = 3;
+    });
+    let (stop, bot) = start(&stand_in, dir.path(), &hold);
+    warm(&stand_in).await;
+    price_at(&stand_in, T0 + MINUTE, "101");
+    price_at(&stand_in, T0 + 2 * MINUTE, "102");
+    let (_, buy) = posted(&stand_in, 1).await;
+    stand_in.with(|i| {
+        let position = json!({ "1": { "qty": "0.980392156", "entry": "102" } });
+        i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
+    });
     let seq = next_seq(&stand_in);
-    stand_in.append((seq, 0), command(seq, T0 + 7_000, json!({ "type": "tick" }), json!([split])));
-    price_at(&stand_in, T0 + MINUTE, "99");
-    price_at(&stand_in, T0 + 2 * MINUTE, "98");
-    let (_, order) = posted(&stand_in, 1).await;
-    assert_eq!((order["side"].as_str(), order["qty"].as_str()), (Some("sell"), Some("3.020408163")));
+    stand_in.append((seq, 0), own_fill(seq, T0 + 2 * MINUTE + 100, &buy, "0.980392156"));
+    price_at(&stand_in, T0 + 2 * MINUTE + 1_000, "102.5");
+    posts_after_settling(&stand_in).await;
+    assert_eq!(day_file(dir.path())["opened"], json!({ "1": T0 + 2 * MINUTE + 100 }));
+    // A crash: the bot ends with the position open.
+    drop(stop);
+    bot.abort();
+    _ = bot.await;
+
+    let again = StandIn::start().await;
+    again.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        let position = json!({ "1": { "qty": "0.980392156", "entry": "102" } });
+        i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
+        i.head_seq = 10;
+        i.nonce = 8;
+    });
+    let (stop, bot) = start(&again, dir.path(), &hold);
+    warm(&again).await;
+    for (_, minute, mid) in [(0, 3, "90"), (0, 4, "80"), (0, 5, "79"), (0, 6, "78")] {
+        price_at(&again, T0 + minute * MINUTE, mid);
+    }
+    assert_eq!(posts_after_settling(&again).await, 0, "held until 08:07");
+    price_at(&again, T0 + 8 * MINUTE, "77");
+    let (_, sell) = posted(&again, 1).await;
+    assert_eq!(sell["side"], "sell");
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
 }

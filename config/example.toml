@@ -66,12 +66,14 @@ notional = "1000"
 max_leverage = "5"
 
 [risk]
-# The limits hold for the account across its markets.
+# The limits hold for the account. The bot trades one market, and refuses an account that holds a
+# position in another.
 max_open_positions = 1
 # The most the positions' notional may add up to, in USD.
 max_total_notional = "5000"
 # At this loss in a UTC day the account is flattened and stopped until the next day: { usd = "..." },
-# or { equity_bps = ... } of the day's opening equity.
+# or { equity_bps = ... } of the day's opening equity. The loss is the fall in equity, so a withdrawal
+# counts as a loss and a deposit hides one.
 daily_loss = { usd = "100" }
 # No order adds to a position unless equity stays this many bps of the margin requirement above it.
 # The engine closes positions when equity falls below half the requirement.
