@@ -99,6 +99,7 @@ fn strategy_values_are_checked() {
         ("max_slippage_bps = 25", "max_slippage_bps = 10001"),
         ("level = \"info\"", "level = \"[\""),
         ("request_timeout = \"10s\"", "request_timeout = \"0s\""),
+        ("stream_timeout = \"30s\"", "stream_timeout = \"0s\""),
     ];
     for (from, to) in refused {
         assert!(parse(&example().replacen(from, to, 1)).is_err(), "{to} was accepted");

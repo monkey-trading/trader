@@ -11,8 +11,8 @@ use serde_json::json;
 use tokio::time::timeout;
 use trader::config::{NodeUrl, TlsPin};
 use trader::node::Tls;
-use trader::stream::Stream;
 use trader::stream::message::Offset;
+use trader::stream::{Stream, StreamError};
 
 /// From the first seq, the messages arrive in order, live ones included, and a heartbeat is not a
 /// message.
@@ -58,8 +58,8 @@ async fn resumes_after_each_failed_connection() {
     assert_eq!(challenges.len(), 4);
 }
 
-/// A frame signed by another key, or altered after signing, stops the stream: nothing it says is
-/// trusted.
+/// A frame signed by another key, or altered after signing, stops the stream as a wrong signer, not
+/// as an unreadable log: nothing it says is trusted.
 #[tokio::test]
 async fn a_frame_not_the_signers_stops_the_stream() {
     for fault in [Fault::OtherSigner, Fault::BadSignature] {
@@ -69,7 +69,8 @@ async fn a_frame_not_the_signers_stops_the_stream() {
         stand_in.with(|i| i.faults.insert((0, (2, 0)), fault));
         let mut stream = stream(&stand_in, 1, Duration::from_secs(30));
         assert_eq!(next(&mut stream).await, (1, 0));
-        assert!(timeout(Duration::from_secs(10), stream.next()).await.unwrap().is_err(), "{fault:?}");
+        let stopped = timeout(Duration::from_secs(10), stream.next()).await.unwrap();
+        assert!(matches!(stopped, Err(StreamError::WrongSigner)), "{fault:?}");
     }
 }
 

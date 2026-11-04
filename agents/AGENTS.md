@@ -99,6 +99,7 @@ list.
   scenario on it: one account trading BTC-USD for fifteen minutes, checked against its history and
   emissions; `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
+  `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
   running it against a stubbed GitHub API; `ci-areas.sh`, the path classifier, and
   `check-ci-passed.sh`, the `ci-passed` predicate, with `ci-test.sh` testing both and checking
@@ -130,7 +131,8 @@ Run from the repo root:
 - Console, from `console/` (Node.js from `.nvmrc`): `npm ci`, then `npm run lint`,
   `npm run typecheck`, `npm test`, `npm run build`; `npm audit --audit-level=high`; `npm run dev`
   serves it on loopback
-- CI scripts test: `./scripts/ci-test.sh` (needs `jq` and `yq`)
+- CI scripts test: `./scripts/ci-test.sh` (needs `jq` and `yq`); the dev stack's: `./scripts/dev-stack-test.sh`
+  (needs `git`)
 - Merge approval gate tests: `scripts/check-merge-approved-test.sh` (stubs the GitHub API; needs
   only `jq`)
 - Agent docs links: `./scripts/check-agent-links.sh` (needs `python3`); its test: `./scripts/check-agent-links-test.sh`
