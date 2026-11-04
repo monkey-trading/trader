@@ -1,0 +1,6 @@
+# Vendored skill packs — pinned to an upstream commit, pulled on demand by pull.sh.
+# Format (tab-separated): <pack>\t<tarball-url pinned to commit>\t<subtree>
+#   subtree "." extracts the whole repo into skills/vendor/<pack>/;
+#   otherwise only that subdirectory of the repo becomes the pack root.
+# Refresh: bump the commit in the URL (latest default-branch hash) and re-run `pull.sh --force <pack>`.
+rust-skills	https://github.com/actionbook/rust-skills/archive/fa60f7931223646fb71c4586b4a6c8545016076a.tar.gz	.
