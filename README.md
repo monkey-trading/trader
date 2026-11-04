@@ -6,8 +6,8 @@ crossover, across one or many funded keys, each its own account, and serves a we
 host's address.
 
 > **Early development.** The bot trades one account in one market with a simple moving-average
-> crossover, against a local development node. It has not been released, the console is an empty
-> page, and nothing here has held real funds.
+> crossover, against a local development node. It has not been released, the console shows what the
+> bot's console server will serve (the server is to come), and nothing here has held real funds.
 
 ## Supported node
 
@@ -72,8 +72,14 @@ The console needs the Node.js version in `console/.nvmrc` and npm:
 cd console
 npm ci
 npm run build   # writes console/dist/
-npm run dev     # Vite's dev server on 127.0.0.1
+npm run dev     # Vite's dev server on 127.0.0.1, proxying /api to CONSOLE_BOT_URL
+npm run stub    # a stand-in console API with three accounts, for the dev server or the browser test
 ```
+
+The console signs in with the bot's password, lists every account with its equity, profit and loss,
+margin level, positions and MONKEY, and opens each account's page to start and stop its strategies,
+change their parameters within the bot's bounds, and flatten it. Figures update over the bot's
+WebSocket; a failed control says so at the control.
 
 ## Checks
 

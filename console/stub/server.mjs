@@ -1,0 +1,181 @@
+// A stand-in for the bot's console server: serves dist/ and the console API over plain HTTP on loopback, for the
+// console's browser test and for `npm run dev` before a bot is at hand. Prints its URL on one line.
+import { Buffer } from "node:buffer";
+import { randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { extname, join, normalize } from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+import { createModel, detail, flatten, live, summary, tick, units } from "./model.mjs";
+import { accept } from "./websocket.mjs";
+
+const PASSWORD = process.env.STUB_PASSWORD ?? "stub-password";
+const TICK_MS = Number(process.env.STUB_TICK_MS ?? 1000);
+const DIST = fileURLToPath(new URL("../dist", import.meta.url));
+const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" };
+const SECURITY_HEADERS = {
+  "Content-Security-Policy":
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+};
+
+const model = createModel(() => Date.now());
+const sessions = new Set();
+const feeds = new Set();
+let failedLogins = 0;
+
+function send(response, status, body, headers = {}) {
+  response.writeHead(status, { "Content-Type": "application/json", ...SECURITY_HEADERS, ...headers });
+  response.end(JSON.stringify(body));
+}
+
+async function readJson(request) {
+  const chunks = [];
+  for await (const chunk of request) {
+    chunks.push(chunk);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function signedIn(request) {
+  const match = /(?:^|; )session=([0-9a-f]+)/.exec(request.headers.cookie ?? "");
+  return match !== null && sessions.has(match[1]);
+}
+
+async function login(request, response) {
+  if (failedLogins >= 5) {
+    return send(response, 429, { error: "Too many login attempts." }, { "Retry-After": "30" });
+  }
+  const body = await readJson(request);
+  if (body?.password !== PASSWORD) {
+    failedLogins += 1;
+    return send(response, 401, { error: "wrong password" });
+  }
+  failedLogins = 0;
+  const token = randomBytes(16).toString("hex");
+  sessions.add(token);
+  return send(response, 200, {}, { "Set-Cookie": `session=${token}; HttpOnly; SameSite=Strict; Path=/` });
+}
+
+function read(item) {
+  return { seq: model.seq, account: detail(model, item) };
+}
+
+function broadcast(messages) {
+  for (const feed of feeds) {
+    for (const message of messages) {
+      feed.send(JSON.stringify(message));
+    }
+  }
+}
+
+async function control(request, response, parts) {
+  const [address, ...rest] = parts;
+  const item = model.accounts.find((candidate) => candidate.address === address);
+  if (item === undefined) {
+    return send(response, 404, { error: "no such account" });
+  }
+  const [what, id, action] = rest;
+  if (request.method === "GET" && what === undefined) {
+    return send(response, 200, read(item));
+  }
+  const body = await readJson(request);
+  if (request.method === "POST" && what === "flatten") {
+    flatten(model, item);
+  } else if (request.method === "POST" && (what === "start" || what === "stop")) {
+    item.state = what === "start" ? "running" : "stopped";
+  } else if (what === "strategies") {
+    const found = item.strategies.find((candidate) => candidate.id === id);
+    if (found === undefined) {
+      return send(response, 404, { error: "no such strategy" });
+    }
+    if (request.method === "POST" && item.blocked !== undefined && action === "start") {
+      return send(response, 409, { error: `cannot start: ${item.blocked}` });
+    }
+    if (request.method === "POST") {
+      found.state = action === "start" ? "running" : "stopped";
+    } else {
+      for (const param of found.params) {
+        const value = units(body?.params?.[param.name]);
+        if (value === null || value < units(param.min) || value > units(param.max)) {
+          return send(response, 400, { error: `${param.name} is outside ${param.min} to ${param.max}` });
+        }
+        param.value = String(body.params[param.name]);
+      }
+    }
+  } else {
+    return send(response, 404, { error: "not found" });
+  }
+  model.seq += 1;
+  broadcast([{ type: "account", seq: model.seq, account: live(model, item) }]);
+  return send(response, 200, read(item));
+}
+
+async function api(request, response, url) {
+  if (request.method !== "GET" && request.headers.origin !== `http://${request.headers.host}`) {
+    return send(response, 403, { error: "foreign origin" });
+  }
+  if (url.pathname === "/api/login" && request.method === "POST") {
+    return login(request, response);
+  }
+  if (!signedIn(request)) {
+    return send(response, 401, { error: "sign in" });
+  }
+  const parts = url.pathname.split("/").slice(2).map(decodeURIComponent);
+  if (parts[0] === "session") {
+    return send(response, 200, {});
+  }
+  if (parts[0] === "logout") {
+    sessions.clear();
+    return send(response, 200, {}, { "Set-Cookie": "session=; Max-Age=0; Path=/" });
+  }
+  if (parts[0] === "accounts" && parts.length === 1) {
+    return send(response, 200, { seq: model.seq, accounts: model.accounts.map((item) => summary(model, item)) });
+  }
+  if (parts[0] === "accounts") {
+    return control(request, response, parts.slice(1));
+  }
+  return send(response, 404, { error: "not found" });
+}
+
+async function files(response, pathname) {
+  const wanted = normalize(join(DIST, pathname === "/" ? "index.html" : pathname));
+  const file = wanted.startsWith(DIST) ? wanted : join(DIST, "index.html");
+  const body = await readFile(file).catch(() => readFile(join(DIST, "index.html")));
+  const type = TYPES[extname(file)] ?? "text/html";
+  response.writeHead(200, { "Content-Type": type, ...SECURITY_HEADERS });
+  response.end(body);
+}
+
+const server = createServer((request, response) => {
+  const url = new URL(request.url ?? "/", "http://stub");
+  const handled = url.pathname.startsWith("/api/") ? api(request, response, url) : files(response, url.pathname);
+  handled.catch(() => {
+    send(response, 500, { error: "stub failure" });
+  });
+});
+
+server.on("upgrade", (request, socket) => {
+  if (!signedIn(request) || request.url !== "/api/live") {
+    socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n");
+    return;
+  }
+  const feed = accept(request, socket, () => feeds.delete(feed));
+  feeds.add(feed);
+});
+
+setInterval(() => {
+  broadcast(tick(model));
+}, TICK_MS).unref();
+
+server.listen(Number(process.env.PORT ?? 0), "127.0.0.1", () => {
+  const { port } = server.address();
+  process.stdout.write(`stub console on http://127.0.0.1:${String(port)} (password: ${PASSWORD})\n`);
+});
