@@ -1,7 +1,7 @@
 //! The console's live feed: one WebSocket per tab. It opens with every account and the totals,
 //! then, at most once every `PUSH_INTERVAL`, sends each account whose status or figures changed,
-//! its fills when they changed, and the totals. It closes when the session ends; the browser
-//! sends nothing on it.
+//! its fills when they changed, and the totals. Each account carries only its equity curve's newest
+//! point. It closes when the session ends; the browser sends nothing on it.
 
 use std::sync::Arc;
 use std::time::Duration;

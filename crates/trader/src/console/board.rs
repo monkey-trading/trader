@@ -126,7 +126,7 @@ pub struct AccountView<'a> {
     pub status: &'a AccountStatus,
     pub figures: Option<&'a Figures>,
     pub error: Option<&'a str>,
-    /// The account's equity curve, oldest first.
+    /// The account's equity curve, oldest first: the whole of it, or its newest point.
     pub curve: &'a [CurvePoint],
 }
 

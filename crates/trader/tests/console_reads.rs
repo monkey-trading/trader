@@ -128,7 +128,8 @@ async fn a_failed_read_keeps_the_last_figures_and_another_signer_clears_them() {
 }
 
 /// The live feed opens with every account and the totals, then sends what changes: the account with
-/// its equity curve, its fills, and the totals. It closes once the session ends.
+/// its equity curve's newest point, its fills, and the totals. It closes once the session ends. The
+/// overview, too, carries only the curve's newest point, and the account's read the whole curve.
 #[tokio::test]
 async fn the_live_feed_follows_the_accounts() {
     let stand_in = StandIn::start().await;
@@ -167,6 +168,23 @@ async fn the_live_feed_follows_the_accounts() {
     let totals = feed.next_of("totals").await;
     assert_eq!(totals["totals"]["equity"], "1020");
 
+    let t = stand_in.with(|i| {
+        i.time_ms += 60_000;
+        i.accounts.get_mut(&a).unwrap()["equity"] = json!("1030");
+        i.time_ms
+    });
+    let newest = json!([{ "time_ms": t, "equity": "1030" }]);
+    loop {
+        let message = feed.next_of("account").await;
+        if message["account"]["figures"]["equity"] == "1030" {
+            assert_eq!(message["account"]["curve"], newest, "the feed sends the newest point only");
+            break;
+        }
+    }
+    let whole = json!([{ "time_ms": t - 60_000, "equity": "1020" }, { "time_ms": t, "equity": "1030" }]);
+    assert_eq!(running.get(&format!("/api/accounts/{a}"), &cookie).await.body["curve"], whole);
+    assert_eq!(running.get("/api/accounts", &cookie).await.body["accounts"][0]["curve"], newest);
+
     running.post(&format!("/api/accounts/{a}/stop"), &cookie).await;
     let stopped = feed.next_of("account").await;
     assert_eq!(stopped["account"]["state"], "stopped");
@@ -175,6 +193,8 @@ async fn the_live_feed_follows_the_accounts() {
     assert_eq!(running.post("/api/logout", &cookie).await.status, 204);
     while feed.next().await.is_some() {}
     let mut kept = running.live(SAME, Some(&other)).await.unwrap();
-    assert_eq!(kept.next_of("snapshot").await["accounts"][0]["state"], "stopped");
+    let snapshot = kept.next_of("snapshot").await;
+    assert_eq!(snapshot["accounts"][0]["state"], "stopped");
+    assert_eq!(snapshot["accounts"][0]["curve"], newest, "the snapshot sends the newest point only");
     running.stop_after(&stand_in).await.unwrap();
 }

@@ -64,9 +64,11 @@ and one signed by another key stops the bot.
   (equity less balance) and realised profit (over the account's whole fill history, after profit
   fees), the latest fills, and the MONKEY entitlement in token base units, each from the node's
   verified answers, read every `refresh_interval`; the vault's claimed amount needs a chain read the
-  bot does not make yet. Each account's view carries its equity curve: the latest read of each
-  minute for the last 24 hours, in memory, so a restart starts it again. `GET /api/session` says whether the
-  session is live. A live WebSocket feed sends what changes, once a second
+  bot does not make yet. Each account keeps an equity curve: the latest read of each minute for the
+  last 24 hours, in memory, so a restart starts it again. An account's read carries the whole
+  curve; the list of accounts and the live feed carry only its newest point, as a `curve` of at most
+  one, for a client to append to the curve it read. `GET /api/session` says whether the session is
+  live. A live WebSocket feed sends what changes, once a second
 - A control API that starts and stops an account or its strategy, sets the strategy's periods
   within the config's bounds, and flattens an account: it stops it, waits for the log to pass its
   last order, cancels its resting orders and closes every position. The account's own task acts on
@@ -165,8 +167,8 @@ know, and relative paths are read from the file's directory:
   each `[lowest, highest]`, the periods the console may set
 - `[console]`: `bind` (default `0.0.0.0:8443`), `data_dir` (default `data`), `refresh_interval`
   (default `5s`, at least a second; each account's equity curve keeps the latest read of each
-  minute for the last 24 hours, in memory), and `tls = { cert, key }`, PEM files to serve instead of
-  the generated certificate
+  minute for the last 24 hours, in memory, served whole only in the account's own read), and
+  `tls = { cert, key }`, PEM files to serve instead of the generated certificate
 - `[logging]`: `level`, a tracing filter directive
 
 `CONFIG_PATH`: the config file, when `--config` is not given. The keystore password variable is the

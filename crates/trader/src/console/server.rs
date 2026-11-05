@@ -117,10 +117,10 @@ impl Server {
         self.overview_of(&mut self.watch(), false)
     }
 
-    /// `address`'s view, if it is one of the bot's accounts.
+    /// `address`'s view, with its whole equity curve, if it is one of the bot's accounts.
     pub fn account_view(&self, address: &str) -> Option<Value> {
         let account = self.find(address)?;
-        Some(view(account.link.address, &account.link.status.borrow(), &account.node.borrow()))
+        Some(view(account.link.address, &account.link.status.borrow(), &account.node.borrow(), Curve::Whole))
     }
 
     /// `address`'s latest fills, newest first, if it is one of the bot's accounts.
@@ -141,7 +141,8 @@ impl Server {
             .collect()
     }
 
-    /// The views of `watched` and their totals; with `seen`, each is marked as sent.
+    /// The views of `watched`, each with only its curve's newest point, and their totals; with
+    /// `seen`, each is marked as sent.
     pub fn overview_of(&self, watched: &mut [Watched], seen: bool) -> (Vec<Value>, Totals) {
         let mut views = Vec::with_capacity(watched.len());
         let mut nodes = Vec::with_capacity(watched.len());
@@ -151,7 +152,7 @@ impl Server {
             } else {
                 (account.status.borrow().clone(), account.node.borrow().clone())
             };
-            views.push(view(account.address, &status, &node));
+            views.push(view(account.address, &status, &node, Curve::Newest));
             if seen {
                 account.fills = node.fills.clone();
             }
@@ -160,8 +161,9 @@ impl Server {
         (views, totals(nodes.iter().map(|node| node.figures.as_deref())))
     }
 
-    /// The messages that bring a feed up to date with `watched`: each changed account, its fills
-    /// when they changed, and then the totals; none when nothing changed.
+    /// The messages that bring a feed up to date with `watched`: each changed account, with only its
+    /// curve's newest point, its fills when they changed, and then the totals; none when nothing
+    /// changed.
     pub fn changes(&self, watched: &mut [Watched]) -> Vec<Value> {
         let mut messages = Vec::new();
         for account in watched.iter_mut() {
@@ -171,7 +173,8 @@ impl Server {
             }
             let status = account.status.borrow_and_update().clone();
             let node = account.node.borrow_and_update().clone();
-            messages.push(json!({ "type": "account", "account": view(account.address, &status, &node) }));
+            let view = view(account.address, &status, &node, Curve::Newest);
+            messages.push(json!({ "type": "account", "account": view }));
             if !Arc::ptr_eq(&account.fills, &node.fills) && *account.fills != *node.fills {
                 messages.push(json!({ "type": "fills", "address": account.address, "fills": *node.fills }));
             }
@@ -195,15 +198,22 @@ impl Server {
     }
 }
 
-/// An account's view as JSON.
-fn view(address: AccountId, status: &AccountStatus, node: &NodeView) -> Value {
-    let view = AccountView {
-        address,
-        status,
-        figures: node.figures.as_deref(),
-        error: node.error.as_deref(),
-        curve: &node.curve,
+/// How much of an account's equity curve its view carries. A day of points per account is too much
+/// to send for every account at once, so the overview and the live feed send only the newest point,
+/// which a client appends to the curve it read for the account it shows.
+#[derive(Clone, Copy)]
+enum Curve {
+    Whole,
+    Newest,
+}
+
+/// An account's view as JSON, with `curve` of its equity curve.
+fn view(address: AccountId, status: &AccountStatus, node: &NodeView, curve: Curve) -> Value {
+    let curve = match curve {
+        Curve::Whole => &node.curve[..],
+        Curve::Newest => &node.curve[node.curve.len().saturating_sub(1)..],
     };
+    let view = AccountView { address, status, figures: node.figures.as_deref(), error: node.error.as_deref(), curve };
     serde_json::to_value(view).expect("an account's view serializes")
 }
 

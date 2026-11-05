@@ -61,7 +61,9 @@ bind = "0.0.0.0:8443"
 # restart keeps.
 data_dir = "data"
 # How often the console reads each account from the node. Each account's equity curve keeps the
-# latest read of each minute for the last 24 hours, in memory: a restart starts it again.
+# latest read of each minute for the last 24 hours, in memory: a restart starts it again. The
+# account's own read serves the whole curve; the list of accounts and the live feed, its newest
+# point.
 refresh_interval = "5s"
 # PEM files to serve instead of the generated certificate.
 # tls = { cert = "console.crt", key = "console.key" }
