@@ -136,8 +136,8 @@ impl Lifecycle {
     /// Pays each of the account's unpaid payouts once its authorization is signed and usable,
     /// asking for a replacement of one that expired, until none is left unpaid and the queue holds
     /// nothing more of request `requested_seq`, when there is one. A read that fails is read again
-    /// at the next poll, and an authorization the vault refuses at the chain's time or signer epoch
-    /// waits for its replacement.
+    /// at the next poll, and an authorization the vault refuses for now, out of the chain's time or
+    /// of a signer epoch gone, is tried again on each poll until it is paid, expires or is replaced.
     /// Error cases:
     /// - an answer is signed by another key, or an authorization does not match the account, vault
     ///   and chain
@@ -155,9 +155,9 @@ impl Lifecycle {
         let mut done = BTreeSet::new();
         let mut position = None;
         // Each expired authorization the bot asked to replace, and the polls since it asked; and each
-        // the vault refused as the chain stands, by payout nonce and expiry.
+        // the vault refused for now, by payout nonce and expiry, tried again on each poll.
         let mut reissued: BTreeMap<(u64, u64), u32> = BTreeMap::new();
-        let mut unusable = BTreeSet::new();
+        let mut refused = BTreeSet::new();
         let mut unread = false;
         loop {
             let read = async {
@@ -231,7 +231,7 @@ impl Lifecycle {
                     *polls += 1;
                     continue;
                 }
-                if expires_at <= now_s.saturating_add(EXPIRY_MARGIN_S) || unusable.contains(&(nonce, expires_at)) {
+                if expires_at <= now_s.saturating_add(EXPIRY_MARGIN_S) {
                     continue;
                 }
                 let what = format!("paying withdrawal {nonce} of {} USDC", payout.amount);
@@ -249,16 +249,17 @@ impl Lifecycle {
                     }
                     Err(
                         TxError::WouldRevert { revert: Some(data), .. } | TxError::Reverted { revert: Some(data), .. },
-                    ) if replaceable(&data) => {
-                        // Expired, or of a signer epoch gone, as the chain stands: the node replaces it, on
-                        // the signer's change or, once it expired, on the account's request.
-                        warn!(
-                            nonce,
-                            expires_at,
-                            "the vault refuses the authorization: {}; waiting for another",
-                            revert_reason(&data)
-                        );
-                        unusable.insert((nonce, expires_at));
+                    ) if refused_for_now(&data) => {
+                        // Of a signer epoch gone, which the node replaces on the signer's change; or out of
+                        // the chain's time, which it may yet reach, or pass, and the bot asks for another.
+                        if refused.insert((nonce, expires_at)) {
+                            warn!(
+                                nonce,
+                                expires_at,
+                                "the vault refuses the authorization for now: {}",
+                                revert_reason(&data)
+                            );
+                        }
                         continue;
                     }
                     Err(e) => return Err(e.into()),
@@ -378,9 +379,9 @@ fn not_read(unread: &mut bool, error: &dyn std::fmt::Display) {
     }
 }
 
-/// Whether revert data is the vault's refusal of an authorization at the chain's time or signer
-/// epoch, which a replacement cures.
-fn replaceable(data: &[u8]) -> bool {
+/// Whether revert data is the vault's refusal of an authorization that time or a replacement cures:
+/// out of the chain's time (issued after its latest block, or expired), or of a signer epoch gone.
+fn refused_for_now(data: &[u8]) -> bool {
     matches!(
         Vault::VaultErrors::abi_decode(data),
         Ok(Vault::VaultErrors::InvalidWithdrawalTime(_) | Vault::VaultErrors::InvalidSignerEpoch(_))

@@ -205,7 +205,7 @@ async fn a_nonce_that_is_undone_takes_back_the_evidence() {
     let chain = Chain::connect(&section(&s, &[s.chain.url()]), CHAIN_ID).await.unwrap();
     let nonce_reads = || s.chain.with(|l| l.methods.get("eth_getTransactionCount").copied().unwrap_or_default());
     let undo = async {
-        until("nonce reads", || nonce_reads() >= 3).await;
+        until("nonce reads after the broadcast", || nonce_reads() >= 5).await;
         s.chain.with(|l| l.nonces.insert(wallet(), 0));
         let reads = nonce_reads();
         until("more nonce reads", || nonce_reads() >= reads + 10).await;

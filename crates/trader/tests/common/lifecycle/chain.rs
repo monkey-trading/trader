@@ -69,6 +69,8 @@ pub struct Ledger {
     pub replace: bool,
     /// The gas every estimate gives, when not the default 100,000.
     pub estimate: Option<u64>,
+    /// How many transactions of each sender wait in the pool: the pending nonce counts them.
+    pub pending: u64,
     /// Whether a raw transaction is taken, and mined, but its answer fails as an outage.
     pub swallow: bool,
     /// How many blocks behind its own transactions the endpoint says it is.
@@ -160,7 +162,8 @@ impl Ledger {
             }
             "eth_getTransactionCount" => {
                 let address: Address = serde_json::from_value(params[0].clone()).unwrap();
-                Ok(quantity(self.nonces.get(&address).copied().unwrap_or_default().into()))
+                let pending = if params[1] == "pending" { self.pending } else { 0 };
+                Ok(quantity((self.nonces.get(&address).copied().unwrap_or_default() + pending).into()))
             }
             "eth_estimateGas" | "eth_call" => {
                 let call = &params[0];

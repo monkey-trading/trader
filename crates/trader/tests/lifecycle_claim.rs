@@ -88,6 +88,20 @@ async fn a_claim_another_sender_made_first_is_nothing_to_claim() {
     assert!(format!("{err:#}").contains("InvalidEntitlementProof"), "{err:#}");
 }
 
+/// While a transaction of the payer's is still pending, as a claim that outlived its receipt wait,
+/// no claim is sent beside it; once it is mined or dropped, the claim goes.
+#[tokio::test]
+async fn no_claim_is_sent_beside_a_pending_transaction() {
+    let s = Setup::start(false).await;
+    s.answer(&emissions_path(), 200, proof(2 * MONKEY, 2 * MONKEY, true));
+    s.chain.with(|l| l.pending = 1);
+    let err = within(s.lifecycle.claim(&s.key, U256::from(1))).await.unwrap_err();
+    assert!(format!("{err:#}").contains("has a transaction pending"), "{err:#}");
+    assert!(s.chain.sent().is_empty());
+    s.chain.with(|l| l.pending = 0);
+    assert!(matches!(within(s.lifecycle.claim(&s.key, U256::from(1))).await.unwrap(), Claimed::Minted { .. }));
+}
+
 /// A proof for another account is refused, and nothing is sent.
 #[tokio::test]
 async fn a_proof_for_another_account_is_refused() {

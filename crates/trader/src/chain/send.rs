@@ -119,6 +119,21 @@ impl Chain {
             let reason = format!("its fee of {max_fee} wei per gas is over chain.max_fee_gwei ({} wei)", self.max_fee);
             return Err(not_sent(reason));
         }
+        // A transaction of the payer's still pending, such as a copy of this call that outlived its
+        // receipt wait, holds every later nonce: nothing is sent beside it.
+        let (mined, pending) = self
+            .read(|endpoint| async move {
+                let mined = endpoint.get_transaction_count(from).latest().await?;
+                Ok((mined, endpoint.get_transaction_count(from).pending().await?))
+            })
+            .await
+            .map_err(|e| not_sent(format!("its nonce: {e}")))?;
+        if pending > mined {
+            let reason = format!(
+                "{from} has a transaction pending at nonce {mined}: nothing is sent until it is mined or dropped"
+            );
+            return Err(not_sent(reason));
+        }
         // Each transaction signed for the call, and its gas limit.
         let mut signed: Vec<(B256, u64)> = Vec::new();
         for attempt in 1..=NONCE_ATTEMPTS {

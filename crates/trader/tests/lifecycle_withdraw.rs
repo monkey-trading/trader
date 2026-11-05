@@ -271,6 +271,25 @@ async fn an_authorization_the_vault_refuses_waits_for_its_replacement() {
     assert_eq!(Vault::withdrawCall::abi_decode(&s.chain.sent()[1].input).unwrap().withdrawal.expiresAt, NOW_S + 90_000);
 }
 
+/// An authorization issued after the chain's latest block is refused until the chain reaches its
+/// time, and is then paid as it is.
+#[tokio::test]
+async fn an_authorization_ahead_of_the_chain_is_paid_once_the_chain_reaches_it() {
+    let s = Setup::start(false).await;
+    s.answer(&payouts_path(), 200, payouts(vec![payout(5, "50", Some(NOW_S + 86_400))]));
+    s.chain.with(|l| l.reverts.insert(Vault::withdrawCall::SELECTOR, Vault::InvalidWithdrawalTime {}.abi_encode()));
+    let catch_up = async {
+        until("estimates", || s.chain.with(|l| l.methods.get("eth_estimateGas").copied().unwrap_or_default()) >= 3)
+            .await;
+        s.chain.with(|l| l.reverts.clear());
+    };
+    let (paid, ()) = tokio::join!(within(s.lifecycle.withdraw(&s.key, None)), catch_up);
+    assert_eq!(paid.unwrap().len(), 1);
+    let sent = s.chain.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(Vault::withdrawCall::abi_decode(&sent[0].input).unwrap().withdrawal.expiresAt, NOW_S + 86_400);
+}
+
 /// A queued withdrawal is waited for through failed reads; one still queued at the deadline is an
 /// error that says it is queued and how to pay it, so it is not requested again.
 #[tokio::test]
