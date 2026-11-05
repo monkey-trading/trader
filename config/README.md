@@ -50,16 +50,55 @@ which proves nothing, and reads the signer and TLS key from it.
 | --- | --- | --- |
 | `key` | yes | The account's key: `{ type = "keystore", path = "...", password = { file = "..." } }` or `password = { env = "VARIABLE" }` for an encrypted Web3 Secret Storage keystore, as wallets export it (a password file's one trailing newline is not part of the password); or, **dev build only**, `{ type = "hex_file", path = "..." }`, a file holding the key as 64 hex characters. A production build also refuses the keys this repository publishes for development. |
 | `close_on_stop` | no, `false` | Whether stopping the bot closes the strategy's position. A stop always cancels resting orders. |
+| `state_dir` | no, `"state"` | The directory where the bot keeps each account's day (its opening equity and whether the daily loss limit stopped it), its positions' opening times and a split's halt across restarts, one file per account. |
 
 ## `[strategy]`
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `market` | yes | The market's symbol, such as `BTC-USD`: a USD market priced from spot quotes that never closes. |
+| `market` | yes | The market's symbol, such as `BTC-USD`: a USD market priced from spot quotes. A market with trading hours is traded only while it is open. |
 | `bar` | yes | The bar length: whole minutes from `"1m"` to `"1d"`, aligned to the Unix epoch. |
-| `fast`, `slow` | yes | The moving averages' periods, in bars: at least one, `fast` below `slow`, `slow` at most 10,000. |
-| `qty` | yes | The position size in the market's units, long or short: a decimal string above zero and at most 1,000,000,000. |
 | `max_slippage_bps` | yes | How far from the quoted mark a market order may fill, in bps, from 0 to 10,000. |
+| `kind` | yes | The strategy, with its parameters in bars of `bar`; a parameter another kind takes is refused. |
+
+Each `kind`'s parameters, with their defaults:
+
+- `sma_crossover`: `fast`, `slow` (required). Long while the fast simple moving average of closes is
+  above the slow one, short while below. At least 1, `fast` below `slow`, `slow` at most 10,000.
+- `ema_crossover`: `fast`, `slow` (required). The same with exponential moving averages.
+- `macd`: `fast` (12), `slow` (26), `signal` (9). Long while the MACD line is above its signal line.
+- `rsi_reversion`: `period` (14), `oversold` (`"30"`), `exit` (`"50"`), `overbought` (`"70"`). Long
+  when the index falls to `oversold`, short when it rises to `overbought`, flat at `exit`; the levels
+  satisfy 0 < `oversold` ≤ `exit` ≤ `overbought` < 100.
+- `bollinger_reversion`: `period` (20, from 2 to 1,000), `width` (`"2"`, standard deviations, at
+  most 10). Long on a close below the lower band, short above the upper, flat at the middle band.
+- `donchian_breakout`: `entry` (20), `exit` (10, at most `entry`). Long on a close above the highest
+  of the last `entry` closes, short below their lowest, flat on a close beyond the last `exit`
+  closes.
+
+Decimal values are strings, such as `width = "1.5"`.
+
+## `[sizing]`
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `by` | yes | `"fixed_notional"`, a position of `notional` USD, or `"equity_fraction"`, a position of `bps` of the account's equity. A position on the strategy's side keeps its size. |
+| `notional` | with `fixed_notional` | The position's notional in USD: above 0, at most 1,000,000,000. |
+| `bps` | with `equity_fraction` | The position's notional in bps of equity, from 1 to 100,000. |
+| `max_leverage` | yes | The most leverage the account takes on, as notional over equity: above 0, at most 1,000, and below the market's own, which its first margin tier sets. |
+
+## `[risk]`
+
+The limits hold for the account. The bot trades one market, and refuses an account that holds a
+position in another.
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `max_open_positions` | yes | The most positions the account holds at once, from 1 to 1,000. |
+| `max_total_notional` | yes | The most the positions' notional may add up to, in USD: above 0, at most 1,000,000,000. |
+| `daily_loss` | yes | At this loss in a UTC day the account is flattened and stopped until the next day: `{ usd = "..." }`, above 0, or `{ equity_bps = ... }`, from 1 to 10,000 bps of the day's opening equity. The loss is the fall in equity, so a withdrawal counts as a loss and a deposit hides one. |
+| `margin_buffer_bps` | no, `10000` | No order adds to a position unless equity stays this many bps of the margin requirement above it, from 0 to 100,000. The engine closes positions when equity falls below half the requirement. |
+| `min_hold` | no, `"1h"` | How long a position is held before a strategy closes it, at most `"7d"`. |
 
 ## `[logging]`
 

@@ -12,7 +12,7 @@ use engine_core::types::{AccountId, MarketId, Millis};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use trader_core::controls::Account;
-use trader_core::margin::Holding;
+use trader_core::margin::{Holding, equity_and_margin};
 use trader_core::risk::{DayState, DayStatus};
 
 use crate::bot::{Bot, Halt, REPLAY_LAG_MS};
@@ -86,15 +86,19 @@ impl StateFile {
 }
 
 impl Bot {
-    /// Reads the account's equity at the sequenced time `ts`, as the mark moves or a fill lands, and
-    /// keeps the day's state and the positions' opening times in their file. A reading is taken only
-    /// while the account's balance and entry are those of the position the log gives.
+    /// Reads the account's equity at the sequenced time `ts`, as the mark moves or a fill lands,
+    /// records it and the margin level in the account's metrics, and keeps the day's state and the
+    /// positions' opening times in their file. A reading is taken only while the account's balance
+    /// and entry are those of the position the log gives.
     pub(super) async fn check_day(&mut self, ts: Millis) -> Result<(), Halt> {
         self.save_state().await;
         let Some(mark) = self.mark.filter(|_| !self.account_behind) else { return Ok(()) };
         let holding = holding(&self.spec, self.market, self.position, self.entry, mark);
         let holdings = holding.as_slice();
         let account = Account { balance: self.balance, holdings };
+        if let Some((equity, requirement)) = equity_and_margin(account.balance, account.holdings) {
+            self.metrics.set_equity(equity, requirement);
+        }
         let Some(status) = self.controls.observe(ts, &account) else { return Ok(()) };
         match status {
             DayStatus::Stopped { newly } => {

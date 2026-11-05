@@ -9,8 +9,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::{
-    MINUTE, SevSnp, StandIn, T0, account, account_view, btc_usd, bucket, check_order, command, order, prices, run,
-    MOCK_ATTESTATION, config_with, sev_snp,
+    MINUTE, MOCK_ATTESTATION, SevSnp, StandIn, T0, account, account_view, btc_usd, bucket, check_order, command,
+    config_with, order, prices, run, sev_snp,
 };
 use serde_json::json;
 use tokio::sync::oneshot;

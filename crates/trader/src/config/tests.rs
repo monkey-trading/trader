@@ -67,9 +67,13 @@ fn unknown_keys_are_refused() {
 #[test]
 fn required_keys_are_required() {
     let keys = ["chain_id = ", "releases = ", "listen = ", "market = ", "max_slippage_bps = ", "kind = ", "by = "];
-    for key in
-        keys.into_iter().chain(["notional = ", "max_leverage = ", "max_open_positions = ", "max_total_notional = ", "daily_loss = "])
-    {
+    for key in keys.into_iter().chain([
+        "notional = ",
+        "max_leverage = ",
+        "max_open_positions = ",
+        "max_total_notional = ",
+        "daily_loss = ",
+    ]) {
         let text: String = example().lines().filter(|l| !l.starts_with(key)).collect::<Vec<_>>().join("\n");
         let err = parse(&text).expect_err(key);
         assert!(format!("{err:#}").contains(key.trim_end_matches(" = ")), "{key}: {err:#}");

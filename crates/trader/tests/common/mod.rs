@@ -80,8 +80,7 @@ pub enum Fault {
 /// What the stand-in holds and has seen.
 #[derive(Default)]
 pub struct Inner {
-    /// What `/v1/attestation` and `/v1/attestation/collateral` serve, unsigned as the node serves
-    /// them; no collateral answers 404, as a mock node's does.
+    /// What `/v1/attestation` and `/v1/attestation/collateral` serve; no collateral answers 404.
     pub attestation: Value,
     pub collateral: Option<Vec<u8>>,
     pub answers: Option<Answers>,

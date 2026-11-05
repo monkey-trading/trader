@@ -1,6 +1,6 @@
 //! The bot's metrics against the stand-in: each order it places and each the node or the engine
-//! declines, the account's fills, and the stream's lag; and the run serving them on the configured
-//! address.
+//! declines, the account's fills, its equity and margin level, and the stream's lag; and the run
+//! serving them on the configured address.
 
 mod common;
 
@@ -20,7 +20,7 @@ use trader::config::Config;
 use trader::metrics::Metrics;
 
 #[tokio::test]
-async fn the_bot_records_its_orders_fills_and_lag() {
+async fn the_bot_records_its_orders_fills_equity_and_lag() {
     let stand_in = StandIn::start().await;
     let account = account();
     stand_in.with(|i| {
@@ -48,6 +48,9 @@ async fn the_bot_records_its_orders_fills_and_lag() {
         stand_in.append((seq, 0), command(seq, T0 + minute * MINUTE, prices(1, mark, T0 + minute * MINUTE), json!([])));
     }
     let third = order(&stand_in, 3).await;
+    // The fill leaves the account long 1 from 104, as the next read of it shows.
+    let held = json!({ "1": { "qty": "1", "entry": "104" } });
+    stand_in.with(|i| i.accounts.insert(account.to_string(), account_view("1000", held, json!({}))));
     stand_in.append((17, 0), own_fill(17, T0 + 4 * MINUTE + 1, &third, "1"));
     stand_in.applied((17, 0)).await;
     let read_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as f64;
@@ -70,6 +73,22 @@ async fn the_bot_records_its_orders_fills_and_lag() {
         .unwrap();
     let expected = (read_at - (T0 + 4 * MINUTE + 1) as f64) / 1000.0;
     assert!((expected - 10.0..=expected).contains(&lag), "lag {lag}, expected just under {expected}");
+
+    // At a mark of 105 the account's equity is its 1,000 and the position's profit of 1, against a
+    // requirement of 1% of the position's 105 notional.
+    stand_in.append((18, 0), command(18, T0 + 4 * MINUTE + 2, prices(1, "105", T0 + 4 * MINUTE + 2), json!([])));
+    stand_in.applied((18, 0)).await;
+    let text = metrics.encode();
+    let value = |name: &str| -> f64 {
+        let prefix = format!("{name}{{account=\"{account}\"}} ");
+        text.lines()
+            .find_map(|l| l.strip_prefix(prefix.as_str()))
+            .unwrap_or_else(|| panic!("no {name} in\n{text}"))
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(value("trader_account_equity_usd"), 1001.0);
+    assert!((value("trader_account_margin_level") - 1001.0 / 1.05).abs() < 1e-9, "{text}");
 
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
