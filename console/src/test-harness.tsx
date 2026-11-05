@@ -26,7 +26,7 @@ export function stubApi(
     logout: vi.fn<Api["logout"]>(done),
     // An account read is the overview's account with the whole curve, as the bot serves it.
     account: vi.fn<Api["account"]>((address) => {
-      const found = views.find((view) => view.address.toLowerCase() === address.toLowerCase());
+      const found = views.find((view) => view.address?.toLowerCase() === address.toLowerCase());
       return Promise.resolve(
         found === undefined
           ? { status: "refused", message: "no such account", retryAfterSeconds: null }

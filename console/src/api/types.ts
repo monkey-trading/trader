@@ -91,7 +91,12 @@ export interface DayStop {
 
 /** One account as the bot shows it. */
 export interface AccountView {
-  readonly address: string;
+  /** The account's address; null when its key would not unlock, so it has no page and no controls. */
+  readonly address: string | null;
+  /** Names the account's key source, such as its file; the way to tell apart accounts with no address. */
+  readonly label: string | null;
+  /** What kind of failure halted the account at startup, such as `key_locked`; null for an account that started. */
+  readonly code: string | null;
   readonly state: AccountState;
   /** Why the account halted. */
   readonly halt: string | null;

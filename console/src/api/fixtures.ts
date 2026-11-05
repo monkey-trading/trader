@@ -49,6 +49,23 @@ export function viewBody(overrides: Record<string, unknown> = {}): Record<string
   };
 }
 
+/** An account that failed at startup: no address when its key would not unlock, no figures and no strategies. */
+export function failedBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    address: null,
+    label: "keys/locked.json",
+    state: "halted",
+    halt: "the key would not unlock",
+    code: "key_locked",
+    error: "the keystore password is wrong",
+    day_stop: null,
+    strategies: [],
+    figures: null,
+    curve: [],
+    ...overrides,
+  };
+}
+
 /** The totals over the fixtures' one account. */
 export function totalsBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {

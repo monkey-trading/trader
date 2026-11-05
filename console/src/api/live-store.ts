@@ -2,7 +2,7 @@
 import { reconnectDelay } from "@/lib/backoff";
 
 import type { Outcome } from "./client";
-import { EMPTY_BOOK, keyOf, withAccount, withCurve, withFills, withMessage, type Book } from "./live-state";
+import { EMPTY_BOOK, identityOf, keyOf, withAccount, withCurve, withFills, withMessage, type Book } from "./live-state";
 import type { Connection, FeedSocket, LiveDeps, LiveSnapshot } from "./live-types";
 import { parseWith, readLiveMessage } from "./parsers";
 
@@ -97,7 +97,7 @@ export class LiveStore {
       this.book =
         (this.viewVersions.get(key) ?? 0) === version
           ? withAccount(this.book, outcome.value)
-          : withCurve(this.book, address, outcome.value.curve);
+          : withCurve(this.book, key, outcome.value.curve);
       this.publish();
     } else if (outcome.status === "unauthenticated") {
       this.endSession();
@@ -190,9 +190,9 @@ export class LiveStore {
     }
     const message = parsed.value;
     if (message.type === "account") {
-      this.bump(this.viewVersions, message.account.address);
+      this.bump(this.viewVersions, identityOf(message.account));
     } else if (message.type === "fills") {
-      this.bump(this.fillVersions, message.address);
+      this.bump(this.fillVersions, keyOf(message.address));
     }
     this.book = withMessage(this.book, message);
     if (message.type === "snapshot") {
@@ -200,7 +200,7 @@ export class LiveStore {
       this.attempt = 0;
       this.connection = "live";
       for (const account of message.overview.accounts) {
-        this.bump(this.viewVersions, account.address);
+        this.bump(this.viewVersions, identityOf(account));
       }
       for (const address of this.tracked.keys()) {
         void this.readFills(address, epoch);
@@ -220,8 +220,7 @@ export class LiveStore {
     this.publish();
   }
 
-  private bump(versions: Map<string, number>, address: string): void {
-    const key = keyOf(address);
+  private bump(versions: Map<string, number>, key: string): void {
     versions.set(key, (versions.get(key) ?? 0) + 1);
   }
 

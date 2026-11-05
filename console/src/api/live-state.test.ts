@@ -1,6 +1,6 @@
 /** Tests of the pure book steps. */
-import { ADDRESS, FULL_CURVE, fillBody, overviewBody, totalsBody, viewBody } from "./fixtures";
-import { CURVE_CAP, CURVE_WINDOW_MS, EMPTY_BOOK, FILL_CAP, keyOf, mergeCurve, withAccount, withMessage, withSnapshot } from "./live-state";
+import { ADDRESS, FULL_CURVE, failedBody, fillBody, overviewBody, totalsBody, viewBody } from "./fixtures";
+import { CURVE_CAP, CURVE_WINDOW_MS, EMPTY_BOOK, FILL_CAP, identityOf, keyOf, mergeCurve, withAccount, withMessage, withSnapshot } from "./live-state";
 import { readAccount, readFills, readLiveMessage, readOverview } from "./parsers";
 import type { CurvePoint } from "./types";
 
@@ -18,6 +18,15 @@ describe("withSnapshot", () => {
     expect([...second.accounts.keys()]).toEqual([ADDRESS]);
     expect(second.fills.size).toBe(0);
     expect(held.fills.get(OTHER)).toHaveLength(2);
+  });
+
+  it("holds an account with no address under its label, in the bot's order, and replaces it in place", () => {
+    const book = withSnapshot(EMPTY_BOOK, overview(failedBody(), viewBody(), failedBody({ label: "account_dir/b.json" })));
+    expect([...book.accounts.keys()]).toEqual(["label:keys/locked.json", ADDRESS, "label:account_dir/b.json"]);
+
+    const next = withMessage(book, readLiveMessage({ type: "account", account: failedBody({ halt: "still locked" }) }));
+    expect([...next.accounts.values()].map((a) => a.halt)).toEqual(["still locked", null, "the key would not unlock"]);
+    expect(identityOf({ address: null, label: "x" })).toBe("label:x");
   });
 
   it("keeps the fills of an account that stays", () => {

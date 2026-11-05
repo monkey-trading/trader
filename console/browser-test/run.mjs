@@ -6,7 +6,7 @@
 //   CONSOLE_PASSWORD   the login password
 //   PLAYWRIGHT_DIR     the scratch directory holding node_modules/playwright
 //   REFUSING_ACCOUNT   (optional) the address of an account whose strategies refuse to start
-//   EXPECT_ACCOUNTS    (optional) how many accounts the overview must list
+//   EXPECT_ACCOUNTS    (optional) how many accounts the overview must list, accounts that failed to start included
 import { createRequire } from "node:module";
 import process from "node:process";
 
@@ -122,6 +122,15 @@ try {
       return matches ? true : { cells, want };
     });
   }
+
+  // An account with no address is listed by its label, with its reason and no link, and the totals count it.
+  for (const failed of listed.filter((a) => a.address === null)) {
+    const row = page.getByRole("row").filter({ hasText: failed.label });
+    await row.getByText(failed.error).waitFor();
+    check((await row.getByRole("link").count()) === 0, "an account with no address has a link");
+  }
+  const { totals } = await api("/api/accounts");
+  await page.getByText(`${totals.reporting} of ${totals.accounts} accounts reporting.`).waitFor();
 
   // Phone width: nothing scrolls sideways at 320 CSS px.
   await page.setViewportSize({ width: 320, height: 700 });

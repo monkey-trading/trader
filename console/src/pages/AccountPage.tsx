@@ -59,31 +59,31 @@ export function AccountPage({ address }: { readonly address: string }) {
   const { accounts, curves, fills, fillFailures, loaded, connection } = useLive();
   useEffect(() => live.track(address), [live, address]);
   const key = keyOf(address);
-  const account = accounts.find((candidate) => keyOf(candidate.address) === key);
+  const account = accounts.find((candidate) => candidate.address !== null && keyOf(candidate.address) === key);
   const accountFills = fills.get(key) ?? [];
   const failure = fillFailures.get(key);
 
   return (
     <>
       <p className="mb-2"><Link to="/">All accounts</Link></p>
-      <PageTitle>{account === undefined ? "Account" : shortAddress(account.address)}</PageTitle>
+      <PageTitle>{account === undefined ? "Account" : shortAddress(address)}</PageTitle>
       {account === undefined ? (
         <p className="text-muted">{loaded ? "The bot has no such account." : "Loading account…"}</p>
       ) : (
         <div className={`flex flex-col gap-6 ${connection === "live" ? "" : "opacity-70"}`}>
           <p className="break-all text-sm text-muted">
-            {account.address} · {account.state}
+            {address} · {account.state}
             {account.halt === null ? "" : ` (${account.halt})`}
           </p>
           {account.dayStop === null ? null : <p><DayStopNote dayStop={account.dayStop} /></p>}
           {account.error === null ? null : <p className="text-loss">{`The last read of the node failed: ${account.error}`}</p>}
-          <AccountControls account={account} />
+          <AccountControls account={account} address={address} />
           {account.figures === null ? <p className="text-muted">The bot has not read this account's figures yet.</p> : <FigureList figures={account.figures} />}
           <Section id="curve" title="Equity"><EquityCurve points={curves.get(key) ?? []} /></Section>
           <Section id="strategies" title="Strategies">
             <div className="grid gap-3 md:grid-cols-2">
               {account.strategies.map((strategy) => (
-                <StrategyCard key={strategy.id} address={account.address} strategy={strategy} />
+                <StrategyCard key={strategy.id} address={address} strategy={strategy} />
               ))}
             </div>
           </Section>

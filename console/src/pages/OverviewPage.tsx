@@ -9,6 +9,7 @@ import { Link } from "@/components/Link";
 import { PageTitle } from "@/components/PageTitle";
 import { Pnl } from "@/components/Pnl";
 import { formatBpsPercent, formatMonkey, formatUsdc, shortAddress } from "@/lib/format";
+import { identityOf } from "@/api/live-state";
 import { accountPath } from "@/lib/route";
 
 const HEAD = [
@@ -39,8 +40,15 @@ function AccountRow({ account }: { readonly account: AccountView }) {
   return (
     <tr className="border-t border-line">
       <th scope="row" className={`${CELL} font-medium`}>
-        <Link to={accountPath(account.address)}>{shortAddress(account.address)}</Link>
-        {account.error === null ? null : <span className="ml-2 text-loss">{`Read failed: ${account.error}`}</span>}
+        {account.address === null ? (
+          // No address means no page: the label names the key source.
+          <span>{account.label}</span>
+        ) : (
+          <Link to={accountPath(account.address)}>{shortAddress(account.address)}</Link>
+        )}
+        {account.error === null ? null : (
+          <span className="ml-2 text-loss">{`${account.code === null ? "Read failed: " : ""}${account.error}`}</span>
+        )}
       </th>
       <td className="min-w-48 px-2 py-1">
         {account.halt === null ? account.state : `${account.state} (${account.halt})`}
@@ -72,7 +80,7 @@ export function OverviewPage() {
         <div className={connection === "live" ? "" : "opacity-70"}>
           <DataTable label="Accounts" head={HEAD} numeric={NUMERIC}>
             {accounts.map((account) => (
-              <AccountRow key={account.address} account={account} />
+              <AccountRow key={identityOf(account)} account={account} />
             ))}
             <tr className="border-t-2 border-line font-semibold">
               <th scope="row" className={CELL}>Total</th>
@@ -86,11 +94,9 @@ export function OverviewPage() {
               <Num>{totals.monkey.claimed === null ? NOT_READ : formatMonkey(totals.monkey.claimed)}</Num>
             </tr>
           </DataTable>
-          {totals.reporting < totals.accounts ? (
-            <p className="mt-2 text-sm text-muted">
-              {`Totals cover ${String(totals.reporting)} of ${String(totals.accounts)} accounts: the rest have no figures yet.`}
-            </p>
-          ) : null}
+          <p className="mt-2 text-sm text-muted">
+            {`${String(totals.reporting)} of ${String(totals.accounts)} accounts reporting.`}
+          </p>
         </div>
       )}
     </>

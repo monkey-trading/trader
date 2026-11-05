@@ -1,5 +1,5 @@
 /** Tests of the parsers at the API boundary. */
-import { fillBody, figuresBody, overviewBody, totalsBody, viewBody } from "./fixtures";
+import { failedBody, fillBody, figuresBody, overviewBody, totalsBody, viewBody } from "./fixtures";
 import { parseWith, readAccount, readError, readFills, readLiveMessage, readOverview } from "./parsers";
 
 describe("readOverview", () => {
@@ -14,6 +14,8 @@ describe("readOverview", () => {
       });
       expect(parsed.value.accounts[0]).toEqual({
         address: `0x${"11".repeat(20)}`,
+        label: null,
+        code: null,
         state: "running",
         halt: null,
         dayStop: null,
@@ -44,6 +46,30 @@ describe("readOverview", () => {
   it("reads an account with no figures yet and the reason", () => {
     const parsed = parseWith(readAccount, viewBody({ figures: null, error: "the node did not answer" }));
     expect(parsed.status === "ok" && [parsed.value.figures, parsed.value.error]).toEqual([null, "the node did not answer"]);
+  });
+
+  it("reads an account that failed at startup: no address, a label, a code, no figures and no strategies", () => {
+    const parsed = parseWith(readAccount, failedBody());
+    expect(parsed).toMatchObject({
+      status: "ok",
+      value: {
+        address: null, label: "keys/locked.json", code: "key_locked", state: "halted", halt: "the key would not unlock",
+        error: "the keystore password is wrong", figures: null, strategies: [], dayStop: null,
+      },
+    });
+  });
+
+  it("reads a failed account that has an address, and a healthy account's absent label and code as null", () => {
+    const failed = parseWith(readAccount, failedBody({ address: ADDRESS_A, label: null, code: "no_balance" }));
+    expect(failed.status === "ok" && [failed.value.address, failed.value.label, failed.value.code]).toEqual([ADDRESS_A, null, "no_balance"]);
+    const healthy = parseWith(readAccount, viewBody());
+    expect(healthy.status === "ok" && [healthy.value.label, healthy.value.code]).toEqual([null, null]);
+  });
+
+  it("refuses an account with neither an address nor a label, which nothing could tell apart or open", () => {
+    expect(parseWith(readAccount, failedBody({ label: null }))).toEqual({
+      status: "invalid", message: "an account has neither an address nor a label",
+    });
   });
 
   it("reads the day stop that the daily loss limit sets, and null when it is not set", () => {

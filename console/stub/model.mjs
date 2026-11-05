@@ -77,7 +77,22 @@ export function createModel(now) {
   accounts[2].blocked = "the account is over its daily loss limit";
   const midnight = new Date(now()).setUTCHours(24, 0, 0, 0);
   accounts[2].dayStop = { until_ms: midnight, loss: "100" };
-  return { accounts, marks: { 1: parse("61000"), 2: parse("2950") }, seed: 7n, now };
+  // An account whose key would not unlock stays in the list with no address, no figures and no strategies.
+  const failed = [
+    {
+      address: null,
+      label: "keys/locked.json",
+      state: "halted",
+      halt: "the key would not unlock",
+      code: "key_locked",
+      error: "the keystore password is wrong",
+      day_stop: null,
+      strategies: [],
+      figures: null,
+      curve: [],
+    },
+  ];
+  return { failed, accounts, marks: { 1: parse("61000"), 2: parse("2950") }, seed: 7n, now };
 }
 
 function unrealised(model, position) {
@@ -141,9 +156,9 @@ export function overview(model) {
   const req = model.accounts.reduce((sum, item) => sum + margin(model, item), 0n);
   const sum = (pick) => model.accounts.reduce((total, item) => total + pick(item), 0n);
   return {
-    accounts: model.accounts.map((item) => view(model, item)),
+    accounts: [...model.accounts.map((item) => view(model, item)), ...model.failed],
     totals: {
-      accounts: model.accounts.length,
+      accounts: model.accounts.length + model.failed.length,
       reporting: model.accounts.length,
       balance: text(sum((item) => item.balance)),
       equity: text(eq),

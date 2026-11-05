@@ -2,7 +2,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-import { figuresBody, overviewBody, totalsBody, viewBody } from "@/api/fixtures";
+import { failedBody, figuresBody, overviewBody, totalsBody, viewBody } from "@/api/fixtures";
 import { ADDRESS, mount, stubApi } from "@/test-harness";
 
 describe("App", () => {
@@ -71,14 +71,42 @@ describe("App", () => {
     ]);
   });
 
-  it("shows an account without figures as unavailable with the reason, and says the totals cover fewer", async () => {
+  it("shows an account without figures as unavailable with the reason, and how many accounts report", async () => {
     const overview = overviewBody([viewBody({ figures: null, error: "the node did not answer" })], totalsBody({ accounts: 2, reporting: 1 }));
     mount(stubApi(overview));
 
     const table = await screen.findByRole("table", { name: "Accounts" });
     expect(within(table).getByText("Read failed: the node did not answer")).toBeInTheDocument();
     expect(within(table).getAllByRole("row")[1]?.textContent).toContain("—");
-    expect(screen.getByText("Totals cover 1 of 2 accounts: the rest have no figures yet.")).toBeInTheDocument();
+    expect(screen.getByText("1 of 2 accounts reporting.")).toBeInTheDocument();
+  });
+
+  it("lists an account whose key would not unlock by its label, with the reason and no link", async () => {
+    const overview = overviewBody([viewBody(), failedBody()], totalsBody({ accounts: 2, reporting: 1 }));
+    mount(stubApi(overview));
+
+    const table = await screen.findByRole("table", { name: "Accounts" });
+    const rows = within(table).getAllByRole("row");
+    expect(within(rows[2] ?? table).getByText("keys/locked.json")).toBeInTheDocument();
+    expect(within(rows[2] ?? table).queryByRole("link")).not.toBeInTheDocument();
+    expect(within(rows[2] ?? table).getByText("halted (the key would not unlock)")).toBeInTheDocument();
+    expect(within(rows[2] ?? table).getByText("the keystore password is wrong")).toBeInTheDocument();
+    expect(within(rows[1] ?? table).getByRole("link", { name: "0x1111…1111" })).toBeInTheDocument();
+    expect(screen.getByText("1 of 2 accounts reporting.")).toBeInTheDocument();
+  });
+
+  it("lists two accounts that failed to start apart, by label, and an account that failed with an address links to its page", async () => {
+    const overview = overviewBody(
+      [failedBody({ label: "a.json" }), failedBody({ label: "b.json" }), viewBody({ state: "halted", halt: "no balance", code: "no_balance", figures: null, strategies: [] })],
+      totalsBody({ accounts: 3, reporting: 0 }),
+    );
+    mount(stubApi(overview));
+
+    const table = await screen.findByRole("table", { name: "Accounts" });
+    expect(screen.getByText("a.json")).toBeInTheDocument();
+    expect(screen.getByText("b.json")).toBeInTheDocument();
+    expect(within(table).getAllByRole("link")).toHaveLength(1);
+    expect(screen.getByText("0 of 3 accounts reporting.")).toBeInTheDocument();
   });
 
   it("shows an account the bot halted, with the reason, on the overview and on its page", async () => {

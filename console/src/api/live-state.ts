@@ -26,6 +26,11 @@ export function keyOf(address: string): string {
   return address.toLowerCase();
 }
 
+/** The key an account is held under: its address when it has one, its label otherwise. */
+export function identityOf(account: { readonly address: string | null; readonly label: string | null }): string {
+  return account.address === null ? `label:${account.label ?? ""}` : keyOf(account.address);
+}
+
 /**
  * Merges curve points into a held curve: one point per time (the incoming one wins), oldest first, kept to
  * `CURVE_WINDOW_MS` before the newest point and to `CURVE_CAP` points.
@@ -43,27 +48,27 @@ export function mergeCurve(held: readonly CurvePoint[], incoming: readonly Curve
   return sorted.filter((point) => point.timeMs >= newest - CURVE_WINDOW_MS).slice(-CURVE_CAP);
 }
 
-/** Adds an account's curve points to the book's curve for it. */
-export function withCurve(book: Book, address: string, points: readonly CurvePoint[]): Book {
-  const key = keyOf(address);
+/** Adds points to the curve held under `key`. */
+export function withCurve(book: Book, key: string, points: readonly CurvePoint[]): Book {
   return { ...book, curves: new Map(book.curves).set(key, mergeCurve(book.curves.get(key) ?? [], points)) };
 }
 
 /** Takes the feed's opening snapshot: the accounts and totals replace what was known, fills and curves of kept accounts stay. */
 export function withSnapshot(book: Book, overview: Overview): Book {
-  const accounts = new Map(overview.accounts.map((account) => [keyOf(account.address), account]));
+  const accounts = new Map(overview.accounts.map((account) => [identityOf(account), account]));
   const fills = new Map([...book.fills].filter(([key]) => accounts.has(key)));
   const kept = new Map([...book.curves].filter(([key]) => accounts.has(key)));
   let next: Book = { accounts, curves: kept, totals: overview.totals, fills };
   for (const account of overview.accounts) {
-    next = withCurve(next, account.address, account.curve);
+    next = withCurve(next, identityOf(account), account.curve);
   }
   return next;
 }
 
 /** Takes one account's view, which replaces what the book held of it; an account the book never listed is added last. */
 export function withAccount(book: Book, account: AccountView): Book {
-  return withCurve({ ...book, accounts: new Map(book.accounts).set(keyOf(account.address), account) }, account.address, account.curve);
+  const key = identityOf(account);
+  return withCurve({ ...book, accounts: new Map(book.accounts).set(key, account) }, key, account.curve);
 }
 
 /** Takes an account's fills; fills of an account the book does not list are dropped. */

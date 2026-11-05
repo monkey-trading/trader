@@ -136,8 +136,16 @@ function dayStopOf(fields: Fields): DayStop {
 }
 
 function accountOf(fields: Fields): AccountView {
+  const address = nullableText(fields, "address");
+  const label = fields["label"] === undefined ? null : nullableText(fields, "label");
+  if (address === null && label === null) {
+    // Without either, an account could be neither listed apart from the others nor opened.
+    throw new ShapeError("an account has neither an address nor a label");
+  }
   return {
-    address: text(fields, "address"),
+    address,
+    label,
+    code: fields["code"] === undefined ? null : nullableText(fields, "code"),
     state: choice(fields, "state", ["starting", "running", "stopped", "flattening", "halted"]),
     halt: nullableText(fields, "halt"),
     dayStop: fields["day_stop"] === null ? null : dayStopOf(object(fields["day_stop"], "day_stop")),

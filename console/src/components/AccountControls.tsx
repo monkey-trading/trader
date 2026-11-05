@@ -66,11 +66,11 @@ function FlattenControl({ address }: { readonly address: string }) {
   );
 }
 
-/** The account's controls; an account that is starting, flattening or halted takes none. */
-export function AccountControls({ account }: { readonly account: AccountView }) {
+/** The controls of the account at `address`; an account that is starting, flattening or halted takes none. */
+export function AccountControls({ account, address }: { readonly account: AccountView; readonly address: string }) {
   const { api } = useServices();
   const running = account.state === "running";
-  const toggle = useAction(account.address);
+  const toggle = useAction(address);
   if (account.state !== "running" && account.state !== "stopped") {
     return <p className="text-sm text-muted">{WAITING[account.state]}</p>;
   }
@@ -80,9 +80,9 @@ export function AccountControls({ account }: { readonly account: AccountView }) 
         label={running ? "Stop account" : "Start account"}
         pendingLabel={running ? "Stopping…" : "Starting…"}
         action={toggle}
-        call={() => api.setAccountRunning(account.address, !running)}
+        call={() => api.setAccountRunning(address, !running)}
       />
-      <FlattenControl address={account.address} />
+      <FlattenControl address={address} />
     </div>
   );
 }
