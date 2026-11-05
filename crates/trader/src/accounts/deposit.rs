@@ -1,21 +1,25 @@
 //! USDC into an account: the payer approves the vault for the amount and deposits it, from the
 //! account's own wallet with `deposit` or from the funding key's with `depositFor`, and the bot waits
-//! for the node to credit it.
+//! for the node to credit it. A deposit is sent again only once the vault holds none of the
+//! transactions signed for it, at a block by which another transaction took the last one's nonce:
+//! it never goes in twice, whatever the endpoints' receipts say.
 
 use alloy_primitives::{Address, B256, U256};
-use alloy_rpc_types_eth::TransactionReceipt;
+use alloy_rpc_types_eth::{Filter, TransactionReceipt};
 use alloy_sol_types::{SolCall, SolEvent};
 use anyhow::{Context, bail, ensure};
 use engine_core::Fixed;
 use engine_core::access::AccessReject;
 use engine_core::types::AccountId;
+use futures_util::future::BoxFuture;
 use tokio::time::{Instant, sleep};
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::accounts::{Lifecycle, usdc_units};
-use crate::chain::Call;
 use crate::chain::contracts::{ERC20, Vault};
+use crate::chain::{Call, Sent};
 use crate::keys::AccountKey;
+use crate::node::CallError;
 use crate::node::accounts::DepositRecord;
 
 /// Whose wallet a deposit's USDC comes from.
@@ -57,14 +61,14 @@ impl Lifecycle {
                 Source::Funding => self.funding.as_ref().context("the config has no [funding] key")?,
             };
             let from = Address::from(payer.address().0);
-            let held = self.chain.view(usdc, ERC20::balanceOfCall { account: from }).await?;
+            let held = self.chain()?.view(usdc, ERC20::balanceOfCall { account: from }).await?;
             ensure!(held >= units, "{from} holds {held} USDC base units, less than the {units} to deposit");
-            let allowance = self.chain.view(usdc, ERC20::allowanceCall { owner: from, spender: self.vault }).await?;
+            let allowance = self.chain()?.view(usdc, ERC20::allowanceCall { owner: from, spender: self.vault }).await?;
             if allowance < units {
                 let approve = ERC20::approveCall { spender: self.vault, value: units };
                 let call =
                     Call { to: usdc, data: approve.abi_encode().into(), what: format!("approving {amount} USDC") };
-                self.chain.send(payer, &call).await?;
+                self.chain()?.send(payer, &call).await?;
             }
             let wallet = Address::from(account.0);
             let data = match source {
@@ -72,13 +76,64 @@ impl Lifecycle {
                 Source::Funding => Vault::depositForCall { account: wallet, amount: units }.abi_encode(),
             };
             let call = Call { to: self.vault, data: data.into(), what: format!("depositing {amount} USDC") };
-            let receipt = self.chain.send(payer, &call).await?;
-            let tx = receipt.transaction_hash;
-            self.deposit_event(&receipt, wallet, units)?;
+            // Where the vault's deposits stand before this one is signed: what the guard looks through.
+            let chain = self.chain()?;
+            let since = (chain.view(self.vault, Vault::depositCountCall {}).await?, chain.block_number().await?);
+            let guard = |block, signed| -> BoxFuture<'_, anyhow::Result<Option<B256>>> {
+                Box::pin(self.landed_deposit(since, block, (wallet, from, units), signed))
+            };
+            let tx = match chain.send_guarded(payer, &call, &guard).await? {
+                Sent::Mined(receipt) => {
+                    self.deposit_event(&receipt, wallet, units)?;
+                    receipt.transaction_hash
+                }
+                Sent::Landed(tx) => tx,
+            };
             self.credit(account, tx).await
         }
         .instrument(span)
         .await
+    }
+
+    /// Which of the transactions `signed` landed the deposit `deposit` names (account, payer and
+    /// amount), by the vault's state at `block`: among the deposits from the vault's deposit count
+    /// and block `since`, one from the payer of the amount whose event names the account and one of
+    /// those transactions. `None` when the vault holds none from the payer of the amount, or each
+    /// it holds is another's by its event.
+    /// Error cases:
+    /// - a read fails, or a deposit that may be one of them has no event to say whose it is
+    async fn landed_deposit(
+        &self,
+        since: (U256, u64),
+        block: u64,
+        deposit: (Address, Address, U256),
+        signed: Vec<B256>,
+    ) -> anyhow::Result<Option<B256>> {
+        let ((first, from_block), (wallet, payer, units)) = (since, deposit);
+        let chain = self.chain()?;
+        let count = chain.view_at(self.vault, Vault::depositCountCall {}, block).await?;
+        let mut id = first;
+        while id < count {
+            let record = chain.view_at(self.vault, Vault::depositRecordsCall { id }, block).await?;
+            if record.payer == payer && U256::from(record.amount) == units {
+                let filter = Filter::new()
+                    .address(self.vault)
+                    .event_signature(Vault::Deposited::SIGNATURE_HASH)
+                    .topic1(B256::from(id))
+                    .from_block(from_block)
+                    .to_block(block);
+                let logs = chain.logs(&filter).await?;
+                let log = logs.first().with_context(|| format!("deposit {id}'s event was not read"))?;
+                let event =
+                    Vault::Deposited::decode_log(&log.inner).with_context(|| format!("deposit {id}'s event"))?;
+                let tx = log.transaction_hash.with_context(|| format!("deposit {id}'s event has no transaction"))?;
+                if event.account == wallet && signed.contains(&tx) {
+                    return Ok(Some(tx));
+                }
+            }
+            id += U256::from(1);
+        }
+        Ok(None)
     }
 
     /// Checks `receipt` holds the vault's deposit of `units` to `account`.
@@ -100,6 +155,7 @@ impl Lifecycle {
     /// Error cases:
     /// - the node holds it for good (a confirmed sanction), or neither credits nor holds it within
     ///   `settle_timeout`
+    /// - an answer is signed by another key
     async fn credit(&self, account: AccountId, tx: B256) -> anyhow::Result<Deposited> {
         let deadline = Instant::now() + self.settle_timeout;
         let (mut waiting, mut unread) = (None, false);
@@ -111,6 +167,7 @@ impl Lifecycle {
                     }
                     credit_state(&records, tx)
                 }
+                Err(e @ CallError::WrongSigner { .. }) => return Err(e.into()),
                 Err(e) => {
                     if std::mem::replace(&mut unread, true) {
                         debug!("the account's deposits are still not read: {e}");

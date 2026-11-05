@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Dev scenario: three accounts from empty to trading and back, on the chain dev stack
 # (scripts/dev-stack.sh --chain), with the bot's `trader accounts` commands:
-#   1. three keys get mock USDC and ether on Anvil, and a funding key ether for gas;
-#   2. each account declares (`declare --confirm`) and deposits 1,000 USDC from its own wallet
-#      (`deposit`); each wallet, the vault and each account's balance in the node move by exactly that;
+#   1. three keys get mock USDC and ether on Anvil, and a funding key 1,000 USDC and ether for gas;
+#   2. each account declares (`declare --confirm`) and receives 1,000 USDC: the first two from their
+#      own wallets (`deposit`), the third from the funding key's (`deposit --from-funding`, the
+#      vault's `depositFor`); each payer's wallet, the vault and each account's balance in the node
+#      move by exactly that;
 #   3. the operator records a MONKEY emission schedule, and one bot process trades all three in
 #      BTC-USD until each has an entitlement, then stops, closing its positions;
 #   4. once each entitlement is claimable, `claim` claims all three through the funding key: each
@@ -75,9 +77,9 @@ addresses=()
 for key in "${keys[@]}"; do addresses+=("$(cast wallet address --private-key "0x$key")"); done
 funding="$(cast wallet address --private-key "0x$funding_key")"
 
-step "give each account 1,500 USDC and 1 ETH, and the funding key 1 ETH"
+step "give each account 1,500 USDC and 1 ETH, and the funding key 1,000 USDC and 1 ETH"
 for account in "${addresses[@]}"; do dev_stack_wallet "$account" 1500 1; done
-dev_stack_wallet "$funding" 0 1
+dev_stack_wallet "$funding" 1000 1
 
 step "write the bot's config: three accounts trading BTC-USD, and the funding key"
 {
@@ -115,7 +117,7 @@ CONFIG
 } > "$work/bot.toml"
 chmod 600 "$work"/*.hex
 
-step "declare each account and deposit 1,000 USDC from its own wallet"
+step "declare each account; deposit 1,000 USDC into the first two from their wallets, and the third from the funding key's"
 confirm=()
 for account in "${addresses[@]}"; do confirm+=(--confirm "$account"); done
 accounts declare --class professional "${confirm[@]}" < /dev/null
@@ -124,11 +126,16 @@ for account in "${addresses[@]}"; do
 done
 # The vault already holds the house's capital.
 vault_before="$(usdc_of "$dev_stack_vault")"
-accounts deposit --amount 1000 < /dev/null
-for account in "${addresses[@]}"; do
+accounts --account "${addresses[0]}" --account "${addresses[1]}" deposit --amount 1000 < /dev/null
+accounts --account "${addresses[2]}" deposit --amount 1000 --from-funding < /dev/null
+# What each wallet holds from here on: the third's own USDC stays in it.
+wallets=(500000000 500000000 1500000000)
+for i in "${!addresses[@]}"; do
+  account="${addresses[$i]}"
   same "$(node_balance "$account")" 1000 || fail "$account's balance is $(node_balance "$account"), not 1000"
-  [[ "$(usdc_of "$account")" == 500000000 ]] || fail "$account's wallet holds $(usdc_of "$account") USDC base units"
+  [[ "$(usdc_of "$account")" == "${wallets[$i]}" ]] || fail "$account's wallet holds $(usdc_of "$account") USDC base units"
 done
+[[ "$(usdc_of "$funding")" == 0 ]] || fail "the funding key holds $(usdc_of "$funding") USDC base units after its deposit"
 [[ "$(usdc_of "$dev_stack_vault")" == $(( vault_before + 3000000000 )) ]] \
   || fail "the vault holds $(usdc_of "$dev_stack_vault") USDC base units, not 3,000 USDC more"
 accounts status < /dev/null
@@ -205,10 +212,10 @@ accounts withdraw --account "$first" --amount 100 < /dev/null
 [[ "$(usdc_of "$dev_stack_vault")" == $(( vault_before - 100000000 )) ]] || fail "the vault paid out other than 100 USDC"
 expected="$(python3 -c 'import sys; from decimal import Decimal as D; print(D(sys.argv[1]) - 100)' "$balance_before")"
 same "$(node_balance "$first")" "$expected" || fail "$first's balance is $(node_balance "$first"), not $expected"
-for account in "${addresses[@]:1}"; do
-  [[ "$(usdc_of "$account")" == 500000000 ]] || fail "$account's wallet changed"
+for i in 1 2; do
+  [[ "$(usdc_of "${addresses[$i]}")" == "${wallets[$i]}" ]] || fail "${addresses[$i]}'s wallet changed"
 done
 accounts status < /dev/null
 ! grep -qE 'alert="?(node_signer_mismatch|bot_halted)' "$work/bot.log" || fail "the bot halted"
 
-echo "PASS: three accounts declared, deposited, traded, claimed MONKEY through the funding key, and one withdrew to its own wallet"
+echo "PASS: three accounts declared, deposited (one through the funding key), traded, claimed MONKEY through the funding key, and one withdrew to its own wallet"

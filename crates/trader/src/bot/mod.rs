@@ -114,6 +114,16 @@ pub async fn run(
     let cap = cfg.node.limits.connections;
     let mut runner = Runner::new(fleet, node, domain, cap);
     let followed = runner.follow(&mut stream, stop).await;
+    // The claims end before the stop acts, and an end they came to first is not lost.
+    if let Some(task) = claims.take()
+        && claims_ended.is_none()
+    {
+        task.abort();
+        match task.await {
+            Err(e) if e.is_cancelled() => {}
+            ended => claims_ended = Some(ended),
+        }
+    }
     let claims_halted = matches!(&claims_ended, Some(Ok(e)) if claim::is_wrong_signer(e));
     let result = match followed {
         Ok(()) if claims_halted => Err(Halt::WrongSigner),
@@ -132,9 +142,6 @@ pub async fn run(
         }
     };
     runner.flush_state().await;
-    if let Some(task) = claims {
-        task.abort();
-    }
     if let Err(Halt::WrongSigner) = &result {
         error!(alert = "node_signer_mismatch", "{}", Halt::WrongSigner);
     }

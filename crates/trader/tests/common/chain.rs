@@ -46,8 +46,13 @@ pub struct Ledger {
     pub used_nonces: BTreeSet<(Address, u64)>,
     pub nonces: BTreeMap<Address, u64>,
     pub sent: Vec<Sent>,
-    /// Receipts by transaction hash.
+    /// Receipts by transaction hash, and every log in them.
     receipts: BTreeMap<B256, Value>,
+    logs: Vec<Value>,
+    /// The vault's deposits by id: payer and amount.
+    pub deposits: Vec<(Address, U256)>,
+    /// Whether receipts are answered as not held, as by an endpoint whose receipts lag its state.
+    pub hide_receipts: bool,
     /// Revert data for every estimate and call of a selector, as the contract would revert.
     pub reverts: BTreeMap<[u8; 4], Vec<u8>>,
     /// The error message each raw transaction is refused with, in turn, before one is taken.
@@ -62,6 +67,8 @@ pub struct Ledger {
     /// Whether the next raw transaction is answered with its hash but never mined, as when another
     /// transaction from its sender takes its nonce.
     pub replace: bool,
+    /// The gas every estimate gives, when not the default 100,000.
+    pub estimate: Option<u64>,
     /// Whether a raw transaction is taken, and mined, but its answer fails as an outage.
     pub swallow: bool,
     /// How many blocks behind its own transactions the endpoint says it is.
@@ -82,7 +89,7 @@ impl ChainStandIn {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ledger = Mutex::new(Ledger { chain_id: CHAIN_ID, ..Ledger::default() });
         let chain = Arc::new(Self { ledger, addr: listener.local_addr().unwrap() });
-        let app = Router::new().route("/", post(rpc)).with_state(chain.clone());
+        let app = Router::new().route("/", post(rpc)).route("/{*path}", post(rpc)).with_state(chain.clone());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         chain
     }
@@ -164,7 +171,7 @@ impl Ledger {
                     return Err(revert_error(revert));
                 }
                 if method == "eth_estimateGas" {
-                    return Ok(quantity(100_000));
+                    return Ok(quantity(self.estimate.unwrap_or(100_000).into()));
                 }
                 self.view(to, from, &input).map(|data| json!(Bytes::from(data))).map_err(|data| revert_error(&data))
             }
@@ -190,7 +197,26 @@ impl Ledger {
             }
             "eth_getTransactionReceipt" => {
                 let hash: B256 = serde_json::from_value(params[0].clone()).unwrap();
-                Ok(self.receipts.get(&hash).cloned().unwrap_or(Value::Null))
+                let receipt = self.receipts.get(&hash).filter(|_| !self.hide_receipts);
+                Ok(receipt.cloned().unwrap_or(Value::Null))
+            }
+            "eth_getLogs" => {
+                // By address and the topics given; every block the stand-in has is in range.
+                let filter = &params[0];
+                let topics: Vec<Option<B256>> = filter["topics"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|topic| serde_json::from_value(topic.clone()).ok())
+                    .collect();
+                let matches = |log: &&Value| {
+                    log["address"] == filter["address"]
+                        && topics
+                            .iter()
+                            .enumerate()
+                            .all(|(at, topic)| topic.is_none_or(|topic| log["topics"][at] == json!(topic)))
+                };
+                Ok(json!(self.logs.iter().filter(matches).cloned().collect::<Vec<_>>()))
             }
             other => Err(json!({ "code": -32601, "message": format!("{other} is not served here") })),
         }
@@ -205,6 +231,13 @@ impl Ledger {
             (VAULT, s) if s == Vault::emissionsClaimedCall::SELECTOR => {
                 let call = Vault::emissionsClaimedCall::abi_decode(input).unwrap();
                 get(&self.monkey_claimed, call.account).abi_encode()
+            }
+            (VAULT, s) if s == Vault::depositCountCall::SELECTOR => U256::from(self.deposits.len()).abi_encode(),
+            (VAULT, s) if s == Vault::depositRecordsCall::SELECTOR => {
+                let id = Vault::depositRecordsCall::abi_decode(input).unwrap().id;
+                let (payer, amount) = self.deposits.get(id.to::<usize>()).copied().unwrap_or_default();
+                // A uint96 encodes as the uint256 of the same value.
+                (payer, amount).abi_encode_params()
             }
             (VAULT, s) if s == Vault::usedNoncesCall::SELECTOR => {
                 let call = Vault::usedNoncesCall::abi_decode(input).unwrap();
@@ -262,6 +295,7 @@ impl Ledger {
                     "logIndex": format!("0x{index:x}"), "removed": false })
             })
             .collect();
+        self.logs.extend(logs.iter().cloned());
         self.receipts.insert(
             hash,
             json!({ "transactionHash": hash, "transactionIndex": "0x0", "blockHash": B256::repeat_byte(1),
@@ -291,12 +325,14 @@ impl Ledger {
             (VAULT, Vault::depositCall::SELECTOR) => {
                 let amount = Vault::depositCall::abi_decode(input).unwrap().amount;
                 self.pull(from, amount)?;
-                Ok(vec![log(VAULT, Vault::Deposited { id: U256::ZERO, account: from, from, amount }.encode_log_data())])
+                let id = self.record(from, amount);
+                Ok(vec![log(VAULT, Vault::Deposited { id, account: from, from, amount }.encode_log_data())])
             }
             (VAULT, Vault::depositForCall::SELECTOR) => {
                 let call = Vault::depositForCall::abi_decode(input).unwrap();
                 self.pull(from, call.amount)?;
-                let event = Vault::Deposited { id: U256::ZERO, account: call.account, from, amount: call.amount };
+                let id = self.record(from, call.amount);
+                let event = Vault::Deposited { id, account: call.account, from, amount: call.amount };
                 Ok(vec![log(VAULT, event.encode_log_data())])
             }
             (VAULT, Vault::claimEmissionsCall::SELECTOR) => {
@@ -327,6 +363,12 @@ impl Ledger {
             }
             (to, selector) => panic!("the bot called {to} with {selector:?}, which it never should"),
         }
+    }
+
+    /// Records a deposit of `amount` from `payer`; its id.
+    fn record(&mut self, payer: Address, amount: U256) -> U256 {
+        self.deposits.push((payer, amount));
+        U256::from(self.deposits.len() - 1)
     }
 
     /// Moves `amount` of `from`'s USDC into the vault against its allowance.

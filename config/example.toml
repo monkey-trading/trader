@@ -120,8 +120,8 @@ slow = 20
 # fast = 5
 # slow = 20
 
-# The custody chain, for `trader accounts` (declare, deposit, claim, withdraw) and [claims]: Arbitrum
-# in production. Leave the section out to only trade.
+# The custody chain, for `trader accounts` (status, deposit, claim, withdraw) and [claims]: Arbitrum
+# in production. Leave the section out to only trade and declare.
 [chain]
 # JSON-RPC endpoints, tried in order: a read moves to the next when one fails, and every transaction
 # is sent to each. https://, or http:// on this machine. A provider's API key in a URL is never

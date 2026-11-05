@@ -12,6 +12,8 @@
 pub mod contracts;
 mod send;
 
+pub use send::{Guard, Sent};
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -20,7 +22,7 @@ use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy_provider::transport::{RpcError, TransportError, TransportErrorKind};
 use alloy_provider::{Provider, RootProvider};
 use alloy_rpc_client::RpcClient;
-use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
+use alloy_rpc_types_eth::{BlockId, Filter, Log, TransactionInput, TransactionRequest};
 use alloy_sol_types::SolCall;
 use anyhow::{Context, bail, ensure};
 use rustls::RootCertStore;
@@ -178,6 +180,35 @@ impl Chain {
             })
             .await?;
         C::abi_decode_returns(&data).map_err(|e| ReadError::Undecodable(e.to_string()))
+    }
+
+    /// `call`'s return from `to` at block `block`: from an endpoint that holds that block, so a read
+    /// at a block another read named sees what that one saw.
+    /// Error cases:
+    /// - see `ReadError`; an endpoint without the block gives an error answer, and the next is asked
+    pub async fn view_at<C: SolCall>(&self, to: Address, call: C, block: u64) -> Result<C::Return, ReadError> {
+        let request = request(None, to, call.abi_encode().into());
+        let data = self
+            .read(|endpoint| {
+                let request = request.clone();
+                async move { endpoint.call(request).block(BlockId::number(block)).await }
+            })
+            .await?;
+        C::abi_decode_returns(&data).map_err(|e| ReadError::Undecodable(e.to_string()))
+    }
+
+    /// The logs `filter` selects.
+    /// Error cases:
+    /// - see `ReadError`
+    pub async fn logs(&self, filter: &Filter) -> Result<Vec<Log>, ReadError> {
+        self.read(|endpoint| async move { endpoint.get_logs(filter).await }).await
+    }
+
+    /// The latest block number.
+    /// Error cases:
+    /// - see `ReadError`
+    pub async fn block_number(&self) -> Result<u64, ReadError> {
+        self.read(|endpoint| async move { endpoint.get_block_number().await }).await
     }
 
     /// `address`'s ether balance, in wei.

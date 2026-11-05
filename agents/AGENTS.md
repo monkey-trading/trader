@@ -71,7 +71,9 @@ list.
   gas and funds `depositFor`. `chain/` reads the chain over one or more JSON-RPC endpoints (after a
   transaction lands, only from one that has reached its block) and sends each transaction to all of
   them, estimated first, followed to its receipt, signed again only once another transaction has
-  spent its nonce, a revert reported with its reason; its bindings come from `abi/`, the entries of the pinned engine's vault and
+  spent its nonce (a deposit only once the vault holds none of its transactions at a block by which
+  the nonce was taken), a revert reported with its reason; `logging.rs` replaces every endpoint's
+  URL and key in each log line, output and error; its bindings come from `abi/`, the entries of the pinned engine's vault and
   `ERC20` ABIs the bot uses. `tests/` runs it against a local stand-in node
   (`tests/common/`) that signs its answers and frames, enforces a per-address limit and injects
   faults, and a stand-in chain (`tests/common/chain.rs`) that applies the bot's transactions,

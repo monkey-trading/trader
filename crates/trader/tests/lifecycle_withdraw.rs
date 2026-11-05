@@ -253,6 +253,46 @@ async fn a_payment_another_sender_made_first_is_left() {
     assert_eq!(s.chain.sent().len(), 1, "mined, and reverted");
 }
 
+/// An authorization the vault refuses at the chain's time is not sent again: its replacement is.
+#[tokio::test]
+async fn an_authorization_the_vault_refuses_waits_for_its_replacement() {
+    let s = Setup::start(false).await;
+    s.answer(&payouts_path(), 200, payouts(vec![payout(5, "50", Some(NOW_S + 86_400))]));
+    s.chain.with(|l| l.revert_on_chain = Some(Vault::InvalidWithdrawalTime {}.abi_encode()));
+    let replace = async {
+        s.chain.sent_count(1).await;
+        wait_reads(&s, &payouts_path(), 3).await;
+        assert_eq!(s.chain.sent().len(), 1, "the refused authorization is not sent again");
+        s.chain.with(|l| l.reverts.clear());
+        s.answer(&payouts_path(), 200, payouts(vec![payout(5, "50", Some(NOW_S + 90_000))]));
+    };
+    let (paid, ()) = tokio::join!(within(s.lifecycle.withdraw(&s.key, None)), replace);
+    assert_eq!(paid.unwrap().len(), 1);
+    assert_eq!(Vault::withdrawCall::abi_decode(&s.chain.sent()[1].input).unwrap().withdrawal.expiresAt, NOW_S + 90_000);
+}
+
+/// A queued withdrawal is waited for through failed reads; one still queued at the deadline is an
+/// error that says it is queued and how to pay it, so it is not requested again.
+#[tokio::test]
+async fn a_queued_withdrawal_is_waited_for_through_failures_until_the_deadline() {
+    let s = Setup::start(false).await;
+    s.node.with(|i| i.replies.push_back(queued_reply()));
+    s.answer(&queue_path(), 500, json!({ "error": "internal error" }));
+    s.answer(&payouts_path(), 200, payouts(vec![]));
+    let err = within(s.lifecycle.withdraw(&s.key, Some("50".parse().unwrap()))).await.unwrap_err();
+    assert!(format!("{err:#}").contains("queued as seq 12: `withdraw` without --amount pays it"), "{err:#}");
+    assert!(s.node.with(|i| i.lifecycle.reads[&queue_path()]) > 2, "read again after each failure");
+
+    let s = Setup::start(false).await;
+    s.node.with(|i| i.replies.push_back(queued_reply()));
+    s.answer(&queue_path(), 200, queue(&[12]));
+    s.answer(&payouts_path(), 200, payouts(vec![]));
+    let err = within(s.lifecycle.withdraw(&s.key, Some("50".parse().unwrap()))).await.unwrap_err();
+    let err = format!("{err:#}");
+    assert!(err.contains("still queued at position 1") && err.contains("queued as seq 12"), "{err}");
+    assert_eq!(s.posts("/v1/withdrawals").len(), 1);
+}
+
 /// The status reads the account on chain and in the node, and leaves out a payout the vault has
 /// paid that the node still lists.
 #[tokio::test]

@@ -38,7 +38,7 @@ pub fn revert_reason(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{Address, U256};
-    use alloy_sol_types::{SolCall, SolValue};
+    use alloy_sol_types::{SolCall, SolEvent, SolValue};
 
     use super::*;
 
@@ -54,6 +54,9 @@ mod tests {
         );
         assert_eq!(Vault::emissionsClaimedCall::SIGNATURE, "emissionsClaimed(address)");
         assert_eq!(Vault::usedNoncesCall::SIGNATURE, "usedNonces(address,uint64)");
+        assert_eq!(Vault::depositCountCall::SIGNATURE, "depositCount()");
+        assert_eq!(Vault::depositRecordsCall::SIGNATURE, "depositRecords(uint256)");
+        assert_eq!(Vault::Deposited::SIGNATURE, "Deposited(uint256,address,address,uint256)");
         assert_eq!(ERC20::approveCall::SIGNATURE, "approve(address,uint256)");
         assert_eq!(ERC20::allowanceCall::SIGNATURE, "allowance(address,address)");
         // Selectors as `cast sig` computes them, independently of these bindings.

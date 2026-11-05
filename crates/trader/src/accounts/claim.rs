@@ -50,7 +50,7 @@ impl Lifecycle {
             ensure!(proof.account == account, "the node's proof is for {}, not {account}", proof.account);
             self.tokens().await?;
             let wallet = Address::from(account.0);
-            let claimed = self.chain.view(self.vault, Vault::emissionsClaimedCall { account: wallet }).await?;
+            let claimed = self.chain()?.view(self.vault, Vault::emissionsClaimedCall { account: wallet }).await?;
             if !proof.claimable {
                 let unclaimed = U256::from(proof.newest_entitled.0).saturating_sub(claimed);
                 debug!(%unclaimed, seq = proof.seq, "the entitlement waits for the vault to record its checkpoint");
@@ -70,7 +70,7 @@ impl Lifecycle {
             };
             let what = format!("claiming {unclaimed} MONKEY base units");
             let call = Call { to: self.vault, data: call.abi_encode().into(), what };
-            let receipt = match self.chain.send(self.payer(key), &call).await {
+            let receipt = match self.chain()?.send(self.payer(key), &call).await {
                 Ok(receipt) => receipt,
                 // Claimed by another sender since the bot read it unclaimed, perhaps on an endpoint behind.
                 Err(TxError::WouldRevert { revert: Some(data), .. } | TxError::Reverted { revert: Some(data), .. })
