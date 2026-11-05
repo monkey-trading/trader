@@ -86,7 +86,8 @@ payout. Without it, each account needs ether for its own gas. With `[claims]`, `
 each account's MONKEY once the unclaimed amount reaches a threshold.
 
 `./scripts/dev-stack.sh --chain` adds a local Anvil chain, with the vault and a mock USDC deployed
-from the pinned engine commit's contracts, and prints the `[chain]` section too; it needs
+from the pinned engine commit's contracts and the house funded with 5,000,000 mock USDC, and
+prints the `[chain]` section too; it needs
 [Foundry](https://getfoundry.sh). `./scripts/dev-lifecycle.sh` takes three accounts through
 declaration, deposits, trading, MONKEY claims through a funding key, and a withdrawal on it.
 

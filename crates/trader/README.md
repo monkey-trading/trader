@@ -78,28 +78,34 @@ MONKEY, and withdraws, every payout going to the account's own address.
   declares is reported as such
 - `trader accounts claim` claims each account's MONKEY with the node's proof (`Vault.claimEmissions`);
   with `[claims]`, `trader run` claims once the unclaimed amount reaches a threshold
-- `trader accounts withdraw [--amount <USDC>]` requests a signed withdrawal, waits for the FIFO
-  queue to approve it and for each payout's authorization, asks for a new one when it expired
-  unpaid (again after a while if none comes), and pays it with `Vault.withdraw`; without an amount
-  it pays what is already approved
+- `trader accounts withdraw [--amount <USDC>]` requests a signed withdrawal and pays each part the
+  FIFO queue approves with `Vault.withdraw` as its authorization comes, until the queue holds
+  nothing more of the request; it asks for a new authorization when one expired unpaid (again
+  after a while if none comes), and without an amount it pays what is already approved. A payout
+  or claim another sender made first counts as done
 - `trader accounts status` shows each account's declaration, wallet, balance, unclaimed MONKEY and
   withdrawals
 - Every payout goes to the account's own address: the vault pays a claim or withdrawal to the
   account it names, the bot names only the account whose key it holds, it checks each payout's
   authorization names that account, and its token binding has no transfer. The optional funding key
   pays gas for claims and withdrawals and funds deposits with `depositFor`, and receives nothing
-- Chain access over one or more JSON-RPC endpoints, on ring TLS, connected on first use: reads move
-  past an endpoint that fails, and after a transaction of the bot's lands, past one behind its
-  block; every transaction is estimated first and not sent when it would revert, is sent to every
-  endpoint and followed to its receipt even when no endpoint answered, is signed again only once
-  another transaction has spent its nonce, and one that reverts is reported with the contract's
-  reason. No fee over the configured cap is offered, so an
-  endpoint that misquotes the price cannot spend the payer's ether. An endpoint's URL is never
-  printed
+- Chain access over one or more JSON-RPC endpoints, on ring TLS, connected on first use: a read
+  goes only to an endpoint that answered it is on the vault's chain, moves past one that fails or
+  gives an error answer other than a revert, and after a transaction of the bot's lands, past one
+  behind its block. Every transaction is estimated first and not sent when it would revert, is sent
+  to every endpoint and followed to its receipt even when no endpoint answered, and is estimated
+  and signed again only once another transaction from the same key has taken its nonce and every
+  endpoint, poll after poll, holds no receipt for it; one that reverts is reported with the
+  contract's reason. No fee over the configured cap is offered, so an endpoint that misquotes the
+  price cannot spend the payer's ether. An endpoint's URL is never printed
 - Declarations keep to the node's fresh-account budget for one client (`node.limits.fresh_accounts`,
-  from its `api.fresh_accounts.per_client`), and a retry-later answer from the node, as those
-  budgets give, and a stale nonce are followed by the request again; an answer that never came is checked against the node's record
-  before anything is asked again
+  from its `api.fresh_accounts.per_client`). A stale nonce is followed by the request again on the
+  current one, and a retry-later answer from the node, as those budgets give, by the request again
+  within the action's deadline: a withdrawal on the same nonce, which the node takes at most once,
+  so a stale nonce then is reported rather than followed. An answer that never came is checked
+  against the node's record before anything is asked again
+- A command fails when any account's action did, a refused declaration included; the funding key
+  is unlocked only for the actions it pays for
 - The account keys from an encrypted Web3 Secret Storage keystore, or, in a dev build, a hex file;
   held only as a signing key that zeroes its secret on drop, and never printed. A release build
   refuses the keys whose private halves this repository publishes
