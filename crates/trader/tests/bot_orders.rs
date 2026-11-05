@@ -48,7 +48,8 @@ async fn an_unanswered_order_holds_the_next_until_it_expires() {
         i.time_ms = (T0 + 2 * MINUTE + 30_000) as u64;
         i.post_delay = Some(Duration::from_secs(3));
     });
-    for (seq, ts, mid) in [(14, T0 + MINUTE, "101"), (15, T0 + 2 * MINUTE, "102")] {
+    // Minute 2's first command is ten seconds in, so the bar is twenty seconds behind the node's time.
+    for (seq, ts, mid) in [(14, T0 + MINUTE, "101"), (15, T0 + 2 * MINUTE + 10_000, "102")] {
         stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
     }
     assert_eq!(order(&stand_in, 1).await["client_id"], T0 + MINUTE);

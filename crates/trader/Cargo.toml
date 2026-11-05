@@ -38,6 +38,7 @@ webpki-roots = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+allocation-counter = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true, features = ["server"] }
 hyper-util = { workspace = true, features = ["server", "service"] }

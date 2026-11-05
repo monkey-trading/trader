@@ -1,44 +1,36 @@
-//! What the bot reads before it follows the log: the market, the account, and the market's recent
-//! marks, each a verified answer; and the stop signals it listens for.
+//! What the bot reads before it follows the log: the markets, each account's balance and
+//! positions, each a verified answer; the keys it unlocks; and the stop signals it listens for.
+//! An account that cannot start is reported and left out; the others carry on.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use engine_core::Fixed;
-use engine_core::eip712;
-use engine_core::types::Millis;
+use engine_core::eip712::{self, Eip712Domain};
+use engine_core::types::{AccountId, MarketId, Millis};
 use engine_wire::Deployment;
+use futures_util::future::join_all;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{info, warn};
-use trader_core::bars::BarBuilder;
-use trader_core::controls::{Account, Controls};
-use trader_core::hours::GapTracker;
-use trader_core::marks::IndexMarks;
-use trader_core::strategies::{after_unit_break, is_valid_close};
+use tokio::time::sleep;
+use tracing::{error, info};
+use trader_core::controls::{Account as Controlled, Controls};
+use trader_core::margin::Holding;
 
-use crate::bot::day::{Saved, StateFile, holding};
-use crate::bot::fills::other_market;
-use crate::bot::{Bot, Halt, bar_fits, orders, supported};
-use crate::config::Config;
+use crate::bot::day::{Saved, SavedPosition, StateFile};
+use crate::bot::fleet::{AccountIn, EXPIRES_IN_MS, Fleet, MarketIn, StrategyIn};
+use crate::bot::{bar_fits, supported};
+use crate::config::{AccountPlan, Config, KeySource};
 use crate::keys::AccountKey;
-use crate::node::api::MarkBucket;
-use crate::node::{CallError, Node, Tls};
+use crate::node::api::AccountView;
+use crate::node::{CallError, Node, Tls, Verified};
 use crate::stream::Stream;
 
-/// The marks history's resolutions, widest first, with their bucket widths.
-const RESOLUTIONS: [(&str, Millis); 3] = [("1d", 86_400_000), ("1h", 3_600_000), ("1m", 60_000)];
-/// How many signed orders the bot remembers to tell its fills apart: more than can be in flight.
-pub(super) const SIGNED_ORDERS: usize = 64;
-/// How long after a failed warm-up, in sequenced time, the bot tries again.
-const WARM_UP_RETRY_MS: Millis = 5_000;
-/// How long after its index is exact the bot reads the marks history: past the node's own lag in
-/// writing marks to it, so the history holds every move before the index was exact.
-const HISTORY_LAG_MS: Millis = 5_000;
-/// The most moves kept between the index being exact and the warm-up; a mark moves at most once
-/// per command, and `HISTORY_LAG_MS` holds far fewer commands.
-const PENDING_MOVES: usize = 4096;
-/// The provenance of a marks bucket the log itself derived, the only kind the bot warms up from.
-const LOG_DERIVED: &str = "log_derived";
+/// How many times an account is read at startup before it is left out, and the wait between tries.
+const READ_TRIES: u32 = 3;
+const READ_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+/// How many keystores are decrypted at once: key derivation is slow by design.
+const UNLOCKS_AT_ONCE: usize = 4;
 
 /// A future that completes on SIGINT or SIGTERM.
 /// Error cases:
@@ -54,202 +46,258 @@ pub fn stop_signal() -> anyhow::Result<impl Future<Output = ()>> {
     })
 }
 
-/// The bot for `cfg`'s account, with its position and balance, and the log from the seq after the
-/// head before the reads.
+/// What `start` hands to the run.
+pub(super) struct Started {
+    pub fleet: Fleet,
+    pub node: Arc<Node>,
+    pub stream: Stream,
+    pub domain: Eip712Domain,
+    /// The accounts that could not start, and why.
+    pub failed: Vec<(String, String)>,
+}
+
+/// The fleet for `cfg`'s accounts, and the log from the seq after the head before the reads.
 /// Error cases:
-/// - the node cannot be reached, or an answer does not verify, or is refused
-/// - the market is not listed, or is one the bot does not trade
-/// - the account has never been credited
-pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot, Stream)> {
+/// - the node cannot be reached, or an answer does not verify
+/// - no account can start
+pub(super) async fn start(cfg: &Config, env: &(dyn Fn(&str) -> Option<String> + Sync)) -> anyhow::Result<Started> {
     let node_cfg = &cfg.node;
     let tls = Tls::new(node_cfg.url.clone(), node_cfg.tls_key_sha256)?;
     let deployment = Deployment { chain_id: node_cfg.chain_id, vault: node_cfg.vault.0 };
-    let node = Node::new(tls.clone(), node_cfg.signer.0, deployment, node_cfg.request_timeout);
-    let strategy_cfg = &cfg.strategy;
-    let account = key.address();
+    let node =
+        Arc::new(Node::new(tls.clone(), node_cfg.signer.0, deployment, node_cfg.request_timeout, &node_cfg.limits));
+    let mut failed: Vec<(String, String)> = Vec::new();
+
+    let mut unlocked: Vec<(&AccountPlan, AccountKey)> = Vec::new();
+    let mut keys = Vec::with_capacity(cfg.plans.len());
+    for chunk in cfg.plans.chunks(UNLOCKS_AT_ONCE) {
+        let unlocked = join_all(chunk.iter().map(|plan| AccountKey::load(&plan.key, env))).await;
+        keys.extend(chunk.iter().zip(unlocked));
+    }
+    let mut seen = BTreeSet::new();
+    for (plan, key) in keys {
+        match key {
+            Ok(key) if !seen.insert(key.address()) => {
+                failed.push((label(plan), format!("{} is listed twice", key.address())))
+            }
+            Ok(key) => unlocked.push((plan, key)),
+            Err(e) => failed.push((label(plan), format!("{e:#}"))),
+        }
+    }
+    let Some((_, first)) = unlocked.first() else { bail!("no account can start: {}", describe(&failed)) };
 
     // The log head as it stood before the reads below: their views hold at least that much of the
     // log, so the stream, which starts after it, misses nothing they do not show. What it repeats
     // applies again to the same effect: a fill's position is absolute, and a listing's rules are
     // the same rules.
-    let head_seq = node.nonce(account).await?.head_seq;
-    let markets = node.markets().await?;
-    let market = markets
-        .body
-        .into_iter()
-        .find(|m| m.spec.symbol == strategy_cfg.market)
-        .with_context(|| format!("the node lists no market {}", strategy_cfg.market))?;
-    supported(&market.spec)?;
-    let market_id = market.spec.id;
+    let head_seq = node.nonce(first.address()).await?.head_seq;
+    let listed = node.markets().await?.body;
+    let mut usable: BTreeMap<String, Result<MarketIn, String>> = BTreeMap::new();
+    for symbol in unlocked.iter().flat_map(|(plan, _)| plan.strategies.iter().map(|s| &s.market)) {
+        usable.entry(symbol.clone()).or_insert_with(|| match listed.iter().find(|m| &m.spec.symbol == symbol) {
+            None => Err(format!("the node lists no market {symbol}")),
+            Some(m) => supported(&m.spec)
+                .map(|()| MarketIn { spec: m.spec.clone(), mark: m.mark })
+                .map_err(|e| format!("{e:#}")),
+        });
+    }
 
-    let view = match node.account(account).await {
-        Ok(view) => view,
-        Err(CallError::Refused { status: 404, .. }) => {
-            bail!("the node has never credited {account}: fund and declare it first")
+    let mut candidates = Vec::new();
+    for (plan, key) in unlocked {
+        match plan.strategies.iter().find_map(|s| usable[&s.market].as_ref().err()) {
+            Some(reason) => failed.push((label(plan), reason.clone())),
+            None => candidates.push((plan, Arc::new(key))),
         }
-        Err(e) => return Err(e.into()),
-    };
-    let (now, account_seq, view) = (view.time_ms, view.head_seq, view.body);
-    if let Some(other) = other_market(&view, market_id) {
-        bail!(
-            "{account} holds a position in market {other}: close it first, as this bot trades one market per account"
+    }
+    let mut views = Vec::with_capacity(candidates.len());
+    for chunk in candidates.chunks(node_cfg.limits.connections * 2) {
+        views.extend(
+            join_all(
+                chunk.iter().map(|(_, key)| async {
+                    (read_account(&node, key.address()).await, node.nonce(key.address()).await)
+                }),
+            )
+            .await,
         );
     }
-    let held = view.positions.get(&market_id);
-    let position = held.map_or(Fixed::ZERO, |p| p.qty);
-    info!(%account, market = market_id, %position, balance = %view.balance, head_seq, "account read");
-
-    let bar_ms = Millis::try_from(strategy_cfg.bar.as_millis()).context("bar length")?;
-    let now = Millis::try_from(now).context("node time")?;
-    bar_fits(&market.spec, bar_ms, now)?;
-    let strategy = strategy_cfg.params.build()?;
-    let state_file = StateFile::new(&cfg.account.state_dir, account);
-    let saved = state_file.load().await?;
-    let mut controls = Controls::new(cfg.risk.clone(), cfg.sizing.clone(), saved.day)?;
-    controls.check_market(&market.spec).with_context(|| format!("sizing for {}", strategy_cfg.market))?;
-    // A position keeps the opening time saved for it, if it is on the side and at the entry saved. One with none, as when
-    // a crash came between its fill and the save, is held from now: the hold is the conservative guess.
-    let opened = (!position.is_zero()).then(|| match saved.opened.get(&market_id) {
-        Some(at) if saved.side == position.signum() && held.is_some_and(|p| p.entry == saved.entry) => *at,
-        _ => now,
-    });
-    controls.restore_opened(opened.map(|at| (market_id, at)).into_iter().collect());
-    // The day's opening equity is the account's now, unless a restart finds today's already kept; the
-    // markets and the account must have been read at the same point of the log to be valued together.
-    if let (Some(mark), true) = (market.mark, account_seq == head_seq) {
-        let entry = held.map_or(Fixed::ZERO, |p| p.entry);
-        let holding = held.and_then(|p| holding(&market.spec, market_id, p.qty, entry, mark));
-        let holdings = holding.as_slice();
-        controls.observe(now, &Account { balance: view.balance, holdings });
-    }
-    let saved_state = Saved {
-        day: controls.day_state(),
-        opened: controls.opened().clone(),
-        side: position.signum(),
-        entry: held.map_or(Fixed::ZERO, |p| p.entry),
-        split_at: saved.split_at,
-    };
-    state_file.save(saved_state.clone()).await.context("keeping the saved state")?;
-    let bot = Bot {
-        domain: eip712::domain(node_cfg.chain_id, node_cfg.vault),
-        node,
-        key,
-        market: market_id,
-        marks: IndexMarks::scheduled(market.spec.price_rules, market.spec.schedule.clone()),
-        spec: market.spec,
-        max_slippage_bps: strategy_cfg.max_slippage_bps,
-        close_on_stop: cfg.account.close_on_stop,
-        bar_ms,
-        history_bars: i64::try_from(strategy_cfg.params.warm_up_bars()).context("warm-up bars")?,
-        bars: None,
-        warm_up_after: Millis::MIN,
-        strategy,
-        controls,
-        gaps: GapTracker::new(),
-        state_file,
-        saved_state,
-        state_unsaved: false,
-        loss_alert: false,
-        flatten_after: Millis::MIN,
-        cash_alert: false,
-        account_behind: false,
-        read_retry_after: Millis::MIN,
-        split_at: saved.split_at,
-        close_first: false,
-        signed_orders: VecDeque::with_capacity(SIGNED_ORDERS),
-        position,
-        entry: held.map_or(Fixed::ZERO, |p| p.entry),
-        balance: view.balance,
-        mark: market.mark,
-        exact_mark: None,
-        exact_from: None,
-        pending_moves: Vec::new(),
-        order_expires_at: None,
-        // An order an earlier process signed before this start expires by now plus its window.
-        trading_from: now.saturating_add(orders::EXPIRES_IN_MS),
-        log_ts: Millis::MIN,
-    };
-    let stream = Stream::new(tls, node_cfg.signer.0, deployment, node_cfg.stream_timeout, head_seq + 1);
-    Ok((bot, stream))
-}
-
-impl Bot {
-    /// Before the bars start: from the first command at which the bot's index is exact, keeps its
-    /// moves, and `HISTORY_LAG_MS` later warms the strategy up from the node's marks history,
-    /// through `node_time`. Bars before the one the index became exact in come from the history;
-    /// that one starts from the history's bucket in its window, which holds the moves before the
-    /// index was exact, and the kept moves follow, which may close it and place an order. Only
-    /// buckets the log derived count; a bucket seeded from a venue's candles is not the engine's
-    /// index. A failed read is tried again `WARM_UP_RETRY_MS` later.
-    /// Error cases:
-    /// - an answer signed by another key than the signer
-    pub(super) async fn warm_up(&mut self, ts: Millis, moved: Option<Fixed>, node_time: Millis) -> Result<(), Halt> {
-        if !self.marks.is_complete(ts) {
-            return Ok(());
-        }
-        let exact_from = *self.exact_from.get_or_insert(ts);
-        if let Some(mark) = moved {
-            if self.pending_moves.len() == PENDING_MOVES {
-                warn!("too many moves before the warm-up; starting it again");
-                self.pending_moves.clear();
-                self.exact_from = Some(ts);
+    let mut accounts = Vec::new();
+    let mut read_at: u64 = 0;
+    for ((plan, key), (view, nonce)) in candidates.into_iter().zip(views) {
+        let address = key.address();
+        let nonce = match nonce {
+            Ok(answer) => Some(answer.body.next_nonce),
+            Err(CallError::WrongSigner { .. }) => {
+                return Err(CallError::WrongSigner { target: "nonce".into() }.into());
             }
-            self.pending_moves.push((ts, mark));
-        }
-        if ts < exact_from.saturating_add(HISTORY_LAG_MS) || ts < self.warm_up_after {
-            return Ok(());
-        }
-        let bar_ms = self.bar_ms;
-        let live_from = BarBuilder::new(bar_ms, Millis::MIN).window_start(exact_from);
-        // History from before a split the bot halted at is in the units before it.
-        let history_from = (live_from - bar_ms * self.history_bars).max(self.split_at.unwrap_or(Millis::MIN));
-        // The widest buckets that tile a bar, which the node keeps longest; every bar is whole minutes.
-        let (resolution, _) =
-            RESOLUTIONS.into_iter().find(|(_, width)| bar_ms % width == 0).expect("bars are whole minutes");
-        let buckets = match self.node.marks(self.market, resolution, history_from, node_time.max(ts)).await {
-            Ok(buckets) => buckets,
-            Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
+            // Unknown: it is read again before the account's first order.
+            Err(_) => None,
+        };
+        let view = match view {
+            Ok(view) => view,
+            Err(CallError::WrongSigner { .. }) => {
+                return Err(CallError::WrongSigner { target: "account".into() }.into());
+            }
+            Err(CallError::Refused { status: 404, .. }) => {
+                failed.push((label(plan), format!("the node has never credited {address}: fund and declare it first")));
+                continue;
+            }
             Err(e) => {
-                warn!("the marks history was not read; trying again: {e}");
-                self.warm_up_after = ts.saturating_add(WARM_UP_RETRY_MS);
-                return Ok(());
+                failed.push((label(plan), format!("{e}")));
+                continue;
             }
         };
-        let (logged, seeded): (Vec<&MarkBucket>, Vec<&MarkBucket>) =
-            buckets.iter().partition(|bucket| bucket.provenance == LOG_DERIVED);
-        let mut history = BarBuilder::new(bar_ms, Millis::MIN);
-        let mut bars = 0;
-        // Only the history since the last split-sized step counts: before it, prices are in other units.
-        let before: Vec<&&MarkBucket> = logged.iter().filter(|bucket| bucket.ts < live_from).collect();
-        let closes: Vec<Fixed> = before.iter().map(|bucket| bucket.close).collect();
-        let past = before[after_unit_break(&closes)..].iter().map(|bucket| (bucket.ts, Some(bucket.close)));
-        for (at, close) in past.chain([(live_from, None)]) {
-            if let Some(bar) = history.on_command(at, close) {
-                self.gaps.on_bar(&self.spec.schedule, bar.start, bar_ms);
-                if is_valid_close(bar.close) {
-                    self.strategy.on_close(bar.close);
-                }
-                bars += 1;
-            }
+        read_at = read_at.max(view.time_ms);
+        info!(%address, balance = %view.body.balance, head_seq, "account read");
+        match account_in(plan, key, &view, nonce, &usable, head_seq, &cfg.state.dir).await {
+            Ok(account) => accounts.push(account),
+            Err(e) => failed.push((label(plan), format!("{e:#}"))),
         }
-        info!(bars, seeded = seeded.len(), resolution, live_from, "warmed up from the marks history");
-        // With no exact value yet, moves start from the node's last mark in the history.
-        if self.exact_mark.is_none() {
-            self.exact_mark = logged.last().map(|bucket| bucket.close);
-        }
-        let mut live = BarBuilder::new(bar_ms, live_from);
-        for bucket in logged.iter().filter(|bucket| bucket.ts < live_from + bar_ms) {
-            live.on_command(bucket.ts, Some(bucket.close));
-        }
-        for (at, mark) in std::mem::take(&mut self.pending_moves) {
-            if let Some(bar) = live.on_command(at, Some(mark)) {
-                self.on_bar(bar, at, node_time.saturating_sub(at)).await?;
-            }
-        }
-        if let Some(bar) = live.on_command(ts, None) {
-            self.on_bar(bar, ts, node_time.saturating_sub(ts)).await?;
-        }
-        self.bars = Some(live);
-        Ok(())
     }
+    for (account, reason) in &failed {
+        error!(alert = "account_failed", account, "{reason}; it does not trade");
+    }
+    if accounts.is_empty() {
+        bail!("no account can start: {}", describe(&failed));
+    }
+    let used: BTreeSet<MarketId> = accounts.iter().flat_map(|a| a.strategies.iter().map(|s| s.market)).collect();
+    let markets: Vec<MarketIn> =
+        usable.values().filter_map(|m| m.as_ref().ok()).filter(|m| used.contains(&m.spec.id)).cloned().collect();
+    // An order an earlier process signed before this start expires by now plus its window, plus the
+    // lead its estimate of the node's time can have had over the node's: at most an answer's time.
+    let lead = Millis::try_from(node_cfg.request_timeout.as_millis()).context("request timeout")?;
+    let trading_from =
+        Millis::try_from(read_at).context("node time")?.saturating_add(EXPIRES_IN_MS).saturating_add(lead);
+    info!(accounts = accounts.len(), failed = failed.len(), markets = markets.len(), "started");
+    let fleet = Fleet::new(&markets, accounts, trading_from)?;
+    let domain = eip712::domain(node_cfg.chain_id, node_cfg.vault);
+    let stream = Stream::new(tls, node_cfg.signer.0, deployment, node_cfg.stream_timeout, head_seq + 1);
+    Ok(Started { fleet, node, stream, domain, failed })
+}
+
+/// `address`'s account, read again after a failure that may pass (no answer, or a request to try again
+/// later), up to `READ_TRIES` times a second apart.
+/// Error cases:
+/// - see `CallError`, the last one when every try failed
+async fn read_account(node: &Node, address: AccountId) -> Result<Verified<AccountView>, CallError> {
+    let mut tries = 1;
+    loop {
+        match node.account(address).await {
+            Err(CallError::Failed { .. } | CallError::RetryLater { .. }) if tries < READ_TRIES => {
+                tries += 1;
+                sleep(READ_RETRY).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// The account `plan` names, ready to trade: its positions from `view`, its controls resumed from the
+/// state kept for it, and that state written again as the start leaves it.
+/// Error cases:
+/// - the account holds a position in a market it does not trade, or a bar that never fits a market's hours
+/// - the sizing, risk limits or state file are refused (see `Controls`, `StateFile`)
+async fn account_in(
+    plan: &AccountPlan,
+    key: Arc<AccountKey>,
+    view: &Verified<AccountView>,
+    nonce: Option<u64>,
+    usable: &BTreeMap<String, Result<MarketIn, String>>,
+    head_seq: u64,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<AccountIn> {
+    let address = key.address();
+    let now = Millis::try_from(view.time_ms).context("node time")?;
+    let traded: BTreeSet<MarketId> =
+        plan.strategies.iter().filter_map(|s| usable[&s.market].as_ref().ok().map(|m| m.spec.id)).collect();
+    if let Some((other, _)) = view.body.positions.iter().find(|(id, p)| !p.qty.is_zero() && !traded.contains(id)) {
+        bail!("{address} holds a position in market {other}: close it first, as this bot does not trade or limit it");
+    }
+    let state_file = StateFile::new(state_dir, address);
+    let mut saved = state_file.load().await?;
+    saved.migrate(&traded.iter().copied().collect::<Vec<_>>())?;
+    let mut controls = Controls::new(plan.risk.clone(), plan.sizing.clone(), saved.day)?;
+    let mut strategies = Vec::with_capacity(plan.strategies.len());
+    for s in &plan.strategies {
+        let market = usable[&s.market].as_ref().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let bar_ms = Millis::try_from(s.bar.as_millis()).context("bar length")?;
+        bar_fits(&market.spec, bar_ms, now)?;
+        controls.check_market(&market.spec).with_context(|| format!("sizing for {}", s.market))?;
+        let held = view.body.positions.get(&market.spec.id);
+        strategies.push(StrategyIn {
+            market: market.spec.id,
+            bar_ms,
+            params: s.params.clone(),
+            max_slippage_bps: s.max_slippage_bps,
+            position: held.map_or(Fixed::ZERO, |p| p.qty),
+            entry: held.map_or(Fixed::ZERO, |p| p.entry),
+        });
+    }
+    // A position keeps the opening time saved for it, if it is on the side and at the entry saved. One
+    // with none, as when a crash came between its fill and the save, is held from now: the hold is the
+    // conservative guess.
+    let opened: BTreeMap<MarketId, Millis> = strategies
+        .iter()
+        .filter(|s| !s.position.is_zero())
+        .map(|s| {
+            let kept =
+                saved.positions.get(&s.market).is_some_and(|p| p.side == s.position.signum() && p.entry == s.entry);
+            (s.market, saved.opened.get(&s.market).copied().filter(|_| kept).unwrap_or(now))
+        })
+        .collect();
+    controls.restore_opened(opened);
+    // The day's opening equity is the account's now, unless a restart finds today's already kept; the
+    // markets and the account must have been read at the same point of the log to be valued together.
+    if view.head_seq == head_seq {
+        let holdings: Option<Vec<Holding<'_>>> = strategies
+            .iter()
+            .filter(|s| !s.position.is_zero())
+            .map(|s| {
+                let market = usable.values().filter_map(|m| m.as_ref().ok()).find(|m| m.spec.id == s.market)?;
+                Some(Holding {
+                    market: s.market,
+                    qty: s.position,
+                    entry: s.entry,
+                    mark: market.mark?,
+                    spec: &market.spec,
+                })
+            })
+            .collect();
+        if let Some(holdings) = holdings {
+            controls.observe(now, &Controlled { balance: view.body.balance, holdings: &holdings });
+        }
+    }
+    let kept = Saved {
+        day: controls.day_state(),
+        opened: controls.opened().clone(),
+        positions: strategies
+            .iter()
+            .filter(|s| !s.position.is_zero())
+            .map(|s| (s.market, SavedPosition { side: s.position.signum(), entry: s.entry }))
+            .collect(),
+        splits: saved.splits,
+        ..Saved::default()
+    };
+    state_file.save(kept.clone()).await.context("keeping the saved state")?;
+    Ok(AccountIn {
+        key,
+        close_on_stop: plan.close_on_stop,
+        balance: view.body.balance,
+        nonce,
+        controls,
+        state_file,
+        saved: kept,
+        strategies,
+    })
+}
+
+/// What names an account in a report before its address is known: its key file.
+fn label(plan: &AccountPlan) -> String {
+    match &plan.key {
+        KeySource::Keystore { path, .. } | KeySource::HexFile { path } => path.display().to_string(),
+    }
+}
+
+/// The failures, as one line.
+fn describe(failed: &[(String, String)]) -> String {
+    failed.iter().map(|(account, reason)| format!("{account}: {reason}")).collect::<Vec<_>>().join("; ")
 }

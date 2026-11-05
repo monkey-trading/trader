@@ -1,114 +1,171 @@
-//! The stop: once the log has passed every order that could still enter it, a cancel of the
-//! account's resting orders and, when configured, a close of its position, each signed on the
-//! account's next nonce, then a verified read that confirms what is left.
+//! The stop: once the log has passed every order that could still enter it, a cancel of each
+//! account's resting orders and, when configured, a close of its positions in its markets, each
+//! signed on the account's next nonce once the node's limits let it go, then a verified read that
+//! confirms what is left. Accounts stop side by side under the node's pacing; one that fails to
+//! stop does not hold back the others, and a signer that is not the node's ends them all at once.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use engine_core::Fixed;
 use engine_core::auth::RequestAuth;
 use engine_core::command::{CancelAllRequest, CloseAllRequest, CloseEntry};
-use engine_core::eip712::{cancel_all_hash, close_all_hash};
-use engine_core::types::Millis;
+use engine_core::eip712::{Eip712Domain, cancel_all_hash, close_all_hash};
+use engine_core::types::{AccountId, MarketId, Millis};
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
+use tokio::sync::Mutex;
 use tokio::time::{Instant, timeout_at};
-use tracing::{Instrument, debug, error, info, info_span, warn};
-use trader_core::hours::is_open;
+use tracing::{error, info, warn};
 
-use crate::bot::orders::{EXPIRES_IN_MS, log_order_events};
-use crate::bot::{Bot, Halt};
-use crate::node::CallError;
+use crate::bot::Halt;
+use crate::bot::fleet::EXPIRES_IN_MS;
+use crate::bot::orders::log_order_events;
+use crate::bot::run::Runner;
+use crate::keys::AccountKey;
+use crate::node::{Admission, CallError, Node};
 use crate::stream::message::{CommandMessage, Head};
 use crate::stream::{Stream, StreamError};
 
 /// The longest the stop goes on closing a position that one close did not take whole.
 const MAX_CLOSE_WAIT: Duration = Duration::from_secs(60);
+/// The longest a request of the stop waits for the node's limits and a connection.
+const ADMIT_WAIT: Duration = Duration::from_secs(60);
 
 /// The longest the stop waits for the log to pass the last order's expiry.
 const MAX_EXPIRY_WAIT: Duration = Duration::from_millis(EXPIRES_IN_MS as u64 + 5_000);
 
-impl Bot {
-    /// Cancels the account's resting orders and, when configured, closes its position in the
-    /// market, as a verified read of the account shows them once the log has passed every order that
-    /// could still enter it, then reads the account again to confirm it. The close is quoted at the
-    /// node's mark as it stands. Without a read to rely on, it cancels anyway and closes the position
-    /// the log gave.
+/// How long the markets' marks the stop read are used for the closes of other accounts: closes are
+/// quoted at a mark the bot read no more than this long before.
+const QUOTE_AGE: Duration = Duration::from_secs(2);
+/// How many times a close reads the marks again after waiting too long to be admitted.
+const QUOTE_ATTEMPTS: u32 = 3;
+
+/// Each traded market's mark, where there is one.
+type Marks = BTreeMap<MarketId, Option<Fixed>>;
+
+/// The markets' marks as the node gives them, read again when the last read is older than
+/// `QUOTE_AGE`, shared by every account's stop.
+struct Quotes {
+    /// The log's last mark of each traded market, which stands in for one the node does not give.
+    last: Marks,
+    read: Mutex<Option<(Instant, Marks)>>,
+}
+
+/// What one account's stop needs.
+struct Stop {
+    node: Arc<Node>,
+    domain: Eip712Domain,
+    key: Arc<AccountKey>,
+    close_on_stop: bool,
+    /// Each market the account trades, the position the log last gave, and the market's slippage bound.
+    markets: Vec<(MarketId, Fixed, i64)>,
+    quotes: Arc<Quotes>,
+}
+
+/// Why an account's stop did not complete.
+enum Failed {
+    WrongSigner,
+    Incomplete(String),
+}
+
+impl Runner {
+    /// Writes the state of every account whose file is out of date, before the run ends: a halt that
+    /// the bot cannot go on from (a split, say) must not lose what it has decided.
+    pub async fn flush_state(&mut self) {
+        let dirty: Vec<u32> =
+            (0u32..).zip(&self.fleet.accounts).filter(|(_, a)| a.state_dirty).map(|(i, _)| i).collect();
+        let writes = dirty.into_iter().map(|index| {
+            let (file, saved) = (self.fleet.accounts[index as usize].state_file.clone(), self.fleet.saved_for(index));
+            async move { (index, file.save(saved).await) }
+        });
+        for (index, result) in futures_util::future::join_all(writes).await {
+            if let Err(e) = result {
+                warn!(account = %self.fleet.accounts[index as usize].address, "the saved state was not written: {e:#}");
+            }
+        }
+    }
+
+    /// Ends the run on a stop signal: lets the requests out finish, drops the decisions still queued,
+    /// waits for the log to pass every order that could still enter it, then stops each account.
     /// Error cases:
     /// - an answer or frame signed by another key than the signer
-    /// - orders still rest, a position it was to close is still held, or neither can be confirmed
-    pub(super) async fn stop(&mut self, stream: &mut Stream) -> Result<(), Halt> {
-        let account = self.key.address();
+    /// - an account still has resting orders, or a position it was to close, or neither can be
+    ///   confirmed
+    pub async fn stop(&mut self, stream: &mut Stream) -> Result<(), Halt> {
+        for a in std::mem::take(&mut self.fleet.queue) {
+            let asg = &mut self.fleet.assignments[a as usize];
+            (asg.pending, asg.queued) = (None, false);
+        }
+        while let Some(done) = self.in_flight.next().await {
+            self.handle(done)?;
+        }
         let settled = self.wait_for_log_past(stream).await?;
-        let quoted = self.node_mark().await?.or(self.mark);
-        let (resting, held) = match self.read_account().await {
-            Ok(view) => (Some(view.orders.len()), view.positions.get(&self.market).map_or(Fixed::ZERO, |p| p.qty)),
-            Err(Halt::WrongSigner) => return Err(Halt::WrongSigner),
-            Err(e) => {
-                warn!(alert = "stop_unread", "the account cannot be read, so the stop acts on what it last knew: {e}");
-                (None, self.position)
-            }
-        };
-        if resting != Some(0) {
-            info!(?resting, "cancelling the account's resting orders");
-            if let Some((nonce, now)) = self.next_nonce().await? {
-                let expires_at = now.saturating_add(EXPIRES_IN_MS);
-                let hash = cancel_all_hash(&self.domain, account, nonce, expires_at);
-                let auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
-                match self.node.cancel_all(&CancelAllRequest { account, auth }).await {
-                    Ok(answer) => log_order_events(&answer.body),
-                    Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-                    Err(e) => warn!("the cancel failed: {e}"),
+        let last = self.fleet.markets.iter().map(|m| (m.id, m.mark)).collect();
+        let quotes = Arc::new(Quotes { last, read: Mutex::new(None) });
+        let mut stops: FuturesUnordered<_> = self
+            .fleet
+            .accounts
+            .iter()
+            .filter(|account| account.failed.is_none())
+            .map(|account| {
+                let markets = account
+                    .assignments
+                    .clone()
+                    .map(|a| &self.fleet.assignments[a as usize])
+                    .map(|asg| (asg.market, asg.position, asg.max_slippage_bps))
+                    .collect();
+                Stop {
+                    node: Arc::clone(&self.node),
+                    domain: self.domain.clone(),
+                    key: Arc::clone(&account.key),
+                    close_on_stop: account.close_on_stop,
+                    markets,
+                    quotes: Arc::clone(&quotes),
                 }
+                .run()
+            })
+            .collect();
+        let mut incomplete = Vec::new();
+        while let Some(result) = stops.next().await {
+            match result {
+                Ok(()) => {}
+                // The rest are dropped before they send anything more.
+                Err(Failed::WrongSigner) => return Err(Halt::WrongSigner),
+                Err(Failed::Incomplete(reason)) => incomplete.push(reason),
             }
         }
-        let closing = self.close_on_stop && !held.is_zero() && quoted.is_some();
-        let deadline = Instant::now() + MAX_CLOSE_WAIT;
-        let mut before = held;
-        let left = loop {
-            if closing {
-                let quoted = self.node_mark().await?.or(quoted).or(self.mark);
-                if let Some(quoted) = quoted {
-                    self.close_position(before, quoted).await?;
-                }
-            }
-            let left = match self.read_account().await {
-                Ok(left) => left,
-                Err(Halt::WrongSigner) => return Err(Halt::WrongSigner),
-                Err(e) => return Err(incomplete(format!("the account cannot be read to confirm it: {e}"))),
-            };
-            let remaining = left.positions.get(&self.market).map_or(Fixed::ZERO, |p| p.qty);
-            // One close takes at most `Fixed::MAX_INPUT` units, so a confirmed close that leaves
-            // part of the position is followed by another on a fresh nonce; one that changed
-            // nothing is not repeated.
-            if closing && !remaining.is_zero() && remaining.abs() < before.abs() && Instant::now() < deadline {
-                before = remaining;
-                continue;
-            }
-            break left;
-        };
-        let position = left.positions.get(&self.market).map_or(Fixed::ZERO, |p| p.qty);
-        if !left.orders.is_empty() || (self.close_on_stop && !position.is_zero()) {
-            let orders = left.orders.len();
-            return Err(incomplete(format!("{orders} resting orders and a position of {position} are left")));
+        if !incomplete.is_empty() {
+            let (count, reasons) = (incomplete.len(), incomplete.join("; "));
+            return Err(Halt::StopIncomplete(format!(
+                "{count} accounts were not left as the stop sets out: {reasons}"
+            )));
         }
         if !settled {
-            return Err(incomplete("the log was not seen past the last order's expiry".into()));
+            let reason = "the log was not seen past the last order's expiry";
+            error!(alert = "stop_incomplete", "{reason}");
+            return Err(Halt::StopIncomplete(reason.into()));
         }
-        info!(resting_orders = 0, %position, "stopped");
+        info!(accounts = self.fleet.accounts.len(), "stopped");
         Ok(())
     }
 
     /// Reads the log until a command sequenced after the latest expiry an order signed before the
     /// stop can carry, this process's or an earlier one's, for at most `MAX_EXPIRY_WAIT`. The log
     /// holds only what is durable, so once it is past that expiry every such order is in it, and in
-    /// the account a read then gives, or never will be. Returns whether the log got there.
+    /// the accounts a read then gives, or never will be. Returns whether the log got there.
     /// Error cases:
     /// - a frame signed by another key than the signer
     async fn wait_for_log_past(&mut self, stream: &mut Stream) -> Result<bool, Halt> {
-        let barrier = self.order_expires_at.map_or(self.trading_from, |expires_at| expires_at.max(self.trading_from));
-        if self.log_ts > barrier {
+        let barrier =
+            self.fleet.assignments.iter().filter_map(|a| a.expires_at).fold(self.fleet.trading_from, Millis::max);
+        if self.fleet.log_ts > barrier {
             return Ok(true);
         }
         info!(barrier, "waiting until the log passes every order that could still enter it");
-        let deadline = Instant::now() + MAX_EXPIRY_WAIT;
+        // An order's expiry is counted on a clock that can lead the node's by an answer's time.
+        let deadline = Instant::now() + MAX_EXPIRY_WAIT + self.node.timeout();
         loop {
             let frame = match timeout_at(deadline, stream.next()).await {
                 Err(_) => return Ok(false),
@@ -125,88 +182,228 @@ impl Bot {
                 .and_then(|_| serde_json::from_str::<CommandMessage<'_>>(&frame.msg).ok())
                 .map(|message| message.ts);
             if let Some(ts) = ts {
-                self.log_ts = ts;
+                self.fleet.log_ts = ts;
                 if ts > barrier {
                     return Ok(true);
                 }
             }
         }
     }
+}
 
-    /// Signs and sends one close of the position `held`, on the account's next nonce, quoted at
-    /// `quoted`. A failed close is logged: the account read that follows shows what it did.
+impl Quotes {
+    /// The marks of the traded markets as the node gives them, and when they were read: again when the
+    /// last read is older than `QUOTE_AGE`; the log's last mark stands in for one the node does not give.
     /// Error cases:
     /// - an answer signed by another key than the signer
-    pub(super) async fn close_position(&mut self, held: Fixed, quoted: Fixed) -> Result<(), Halt> {
-        let account = self.key.address();
-        info!(position = %held, %quoted, "closing the position");
-        let Some((nonce, now)) = self.next_nonce().await? else { return Ok(()) };
-        let expires_at = now.saturating_add(EXPIRES_IN_MS);
-        let mut request = CloseAllRequest {
-            account,
-            closes: vec![CloseEntry { market: self.market, quoted }],
-            max_slippage_bps: Some(self.max_slippage_bps),
-            auth: None,
-        };
-        let hash = close_all_hash(&self.domain, &request, nonce, expires_at);
-        let signature = self.key.sign(&hash);
-        request.auth = Some(RequestAuth { nonce, expires_at, signature });
-        self.order_expires_at = Some(expires_at);
-        self.remember_signature(signature);
-        // The expiry names the try, so the lines of a close and its answer join.
-        let span = info_span!("close", id = expires_at);
-        async {
-            match self.node.close_all(&request).await {
-                Ok(answer) => log_order_events(&answer.body),
-                Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-                Err(e) => warn!("the close failed: {e}"),
-            }
-            Ok(())
+    async fn get(&self, node: &Node) -> Result<(Marks, Instant), Failed> {
+        let mut held = self.read.lock().await;
+        if let Some((at, marks)) = held.as_ref().filter(|(at, _)| at.elapsed() < QUOTE_AGE) {
+            return Ok((marks.clone(), *at));
         }
-        .instrument(span)
-        .await
-    }
-
-    /// Closes the position at the last mark, as the daily loss limit does at `ts`, unless the market
-    /// is shut, or an order signed earlier may still enter the log and move the position.
-    /// Error cases:
-    /// - an answer signed by another key than the signer
-    pub(super) async fn flatten(&mut self, ts: Millis) -> Result<(), Halt> {
-        if self.position.is_zero() {
-            return Ok(());
-        }
-        if !is_open(&self.spec.schedule, ts) {
-            debug!("the market is shut: the position is closed when it opens");
-            return Ok(());
-        }
-        if let Some(reason) = self.order_in_flight(ts) {
-            debug!("{reason}: the position is closed once it cannot");
-            return Ok(());
-        }
-        let Some(quoted) = self.mark else {
-            warn!("no mark to quote the close at");
-            return Ok(());
-        };
-        self.close_position(self.position, quoted).await
-    }
-
-    /// The market's mark as the node gives it now, if it gives one.
-    /// Error cases:
-    /// - an answer signed by another key than the signer
-    async fn node_mark(&self) -> Result<Option<Fixed>, Halt> {
-        match self.node.markets().await {
-            Ok(markets) => Ok(markets.body.iter().find(|m| m.spec.id == self.market).and_then(|m| m.mark)),
-            Err(CallError::WrongSigner { .. }) => Err(Halt::WrongSigner),
+        let marks = match node.markets().await {
+            Ok(listed) => self
+                .last
+                .iter()
+                .map(|(id, mark)| (*id, listed.body.iter().find(|m| m.spec.id == *id).and_then(|m| m.mark).or(*mark)))
+                .collect(),
+            Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
             Err(e) => {
-                warn!("the market's mark was not read: {e}");
+                warn!("the markets' marks were not read: {e}");
+                self.last.clone()
+            }
+        };
+        let read_at = Instant::now();
+        *held = Some((read_at, marks.clone()));
+        Ok((marks, read_at))
+    }
+}
+
+impl Stop {
+    /// Stops the account: cancels its resting orders, closes its positions when configured, and
+    /// confirms with a read.
+    async fn run(self) -> Result<(), Failed> {
+        let account = self.key.address();
+        let result = self.stop(account).await;
+        if let Err(Failed::Incomplete(reason)) = &result {
+            error!(alert = "stop_incomplete", %account, "{reason}");
+        }
+        result
+    }
+
+    async fn stop(&self, account: AccountId) -> Result<(), Failed> {
+        let (resting, held) = match self.read(account).await {
+            Ok(view) => (
+                Some(view.orders.len()),
+                self.markets
+                    .iter()
+                    .map(|(m, _, slippage)| (*m, view.positions.get(m).map_or(Fixed::ZERO, |p| p.qty), *slippage))
+                    .collect(),
+            ),
+            Err(Failed::WrongSigner) => return Err(Failed::WrongSigner),
+            Err(Failed::Incomplete(e)) => {
+                warn!(alert = "stop_unread", %account, "the account cannot be read, so the stop acts on what it last knew: {e}");
+                (None, self.markets.clone())
+            }
+        };
+        if resting != Some(0) {
+            info!(%account, ?resting, "cancelling the account's resting orders");
+            self.cancel(account).await?;
+        }
+        // One close takes at most `Fixed::MAX_INPUT` units of a position, so a confirmed close that
+        // leaves part of one is followed by another on a fresh nonce; one that changed nothing is not
+        // repeated.
+        let deadline = Instant::now() + MAX_CLOSE_WAIT;
+        let mut before = held;
+        let left = loop {
+            let closing = self.close_on_stop && before.iter().any(|(_, qty, _)| !qty.is_zero());
+            if closing {
+                self.close(account, &before).await?;
+            }
+            let left = match self.read(account).await {
+                Ok(left) => left,
+                Err(Failed::WrongSigner) => return Err(Failed::WrongSigner),
+                Err(Failed::Incomplete(e)) => {
+                    return Err(Failed::Incomplete(format!("the account cannot be read to confirm it: {e}")));
+                }
+            };
+            let remaining: Vec<(MarketId, Fixed, i64)> = before
+                .iter()
+                .map(|(m, _, slippage)| (*m, left.positions.get(m).map_or(Fixed::ZERO, |p| p.qty), *slippage))
+                .collect();
+            let progressed =
+                before.iter().zip(&remaining).any(|((_, was, _), (_, now, _))| !now.is_zero() && now.abs() < was.abs());
+            if closing && progressed && Instant::now() < deadline {
+                before = remaining;
+                continue;
+            }
+            break left;
+        };
+        let open: Vec<_> = self
+            .markets
+            .iter()
+            .filter_map(|(m, ..)| left.positions.get(m).map(|p| (*m, p.qty)))
+            .filter(|(_, qty)| !qty.is_zero())
+            .collect();
+        if !left.orders.is_empty() || (self.close_on_stop && !open.is_empty()) {
+            let orders = left.orders.len();
+            let positions: Vec<_> =
+                open.iter().map(|(market, qty)| format!("a position of {qty} in market {market}")).collect();
+            return Err(Failed::Incomplete(format!(
+                "{orders} resting orders and {} are left",
+                positions.join(" and ")
+            )));
+        }
+        info!(%account, resting_orders = 0, "stopped");
+        Ok(())
+    }
+
+    /// Waits for the node's limits and a connection, for no longer than `ADMIT_WAIT`: a node that has
+    /// become unreachable ends the account's stop as incomplete and does not hold the others' up.
+    /// Error cases:
+    /// - the limits and a connection were not there in time
+    async fn admit(&self, account: AccountId) -> Result<Admission, Failed> {
+        tokio::time::timeout(ADMIT_WAIT, self.node.admit(Some(account)))
+            .await
+            .map_err(|_| Failed::Incomplete(format!("no connection to the node within {ADMIT_WAIT:?}")))
+    }
+
+    /// Signs and sends a cancel of every resting order, on the account's next nonce, once the node's
+    /// limits let it go. A failed cancel is logged: the account read that follows shows what it did.
+    async fn cancel(&self, account: AccountId) -> Result<(), Failed> {
+        let Some(nonce) = self.nonce(account).await? else { return Ok(()) };
+        let admission = self.admit(account).await?;
+        let Some(expires_at) = self.expiry() else { return Ok(()) };
+        let hash = cancel_all_hash(&self.domain, account, nonce, expires_at);
+        let auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
+        match self.node.cancel_all(&CancelAllRequest { account, auth }, admission).await {
+            Ok(answer) => log_order_events(account, &answer.body),
+            Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
+            Err(e) => warn!(%account, "the cancel failed: {e}"),
+        }
+        Ok(())
+    }
+
+    /// Signs and sends the closes of the positions in `held`: one request for the markets that share
+    /// a slippage bound, each market quoted at the node's mark as it was read no more than
+    /// `QUOTE_AGE` before the request was admitted, which is when it is signed, and bounded as its
+    /// strategy sets. A failed close is logged: the account read that follows shows what it did.
+    async fn close(&self, account: AccountId, held: &[(MarketId, Fixed, i64)]) -> Result<(), Failed> {
+        let mut by_slippage: BTreeMap<i64, Vec<(MarketId, Fixed)>> = BTreeMap::new();
+        for (market, qty, slippage) in held.iter().filter(|(_, qty, _)| !qty.is_zero()) {
+            by_slippage.entry(*slippage).or_default().push((*market, *qty));
+        }
+        for (slippage, markets) in by_slippage {
+            let Some(nonce) = self.nonce(account).await? else { continue };
+            // The marks are read, and then the limits let the request go; if that took long, again.
+            let (marks, admission) = {
+                let mut attempt = 0;
+                loop {
+                    let (marks, read_at) = self.quotes.get(&self.node).await?;
+                    let admission = self.admit(account).await?;
+                    attempt += 1;
+                    if read_at.elapsed() < QUOTE_AGE {
+                        break (marks, admission);
+                    }
+                    if attempt == QUOTE_ATTEMPTS {
+                        return Err(Failed::Incomplete(format!(
+                            "the marks were older than {QUOTE_AGE:?} when the close could be sent, {QUOTE_ATTEMPTS} times"
+                        )));
+                    }
+                }
+            };
+            let closes: Vec<CloseEntry> = markets
+                .iter()
+                .filter_map(|(market, qty)| {
+                    let quoted = marks.get(market).copied().flatten()?;
+                    info!(%account, market, position = %qty, %quoted, "closing the position");
+                    Some(CloseEntry { market: *market, quoted })
+                })
+                .collect();
+            if closes.is_empty() {
+                continue;
+            }
+            let Some(expires_at) = self.expiry() else { continue };
+            let mut request = CloseAllRequest { account, closes, max_slippage_bps: Some(slippage), auth: None };
+            let hash = close_all_hash(&self.domain, &request, nonce, expires_at);
+            request.auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
+            match self.node.close_all(&request, admission).await {
+                Ok(answer) => log_order_events(account, &answer.body),
+                Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
+                Err(e) => warn!(%account, "the close failed: {e}"),
+            }
+        }
+        Ok(())
+    }
+
+    /// The expiry for a request signed now: the node's time as the bot last verified it, counted on,
+    /// plus the window. `None`, with a warning, before any answer.
+    fn expiry(&self) -> Option<Millis> {
+        let now = self.node.latest_time_ms().and_then(|ms| Millis::try_from(ms).ok());
+        if now.is_none() {
+            warn!("the node's time is not known: nothing is signed");
+        }
+        now.map(|now| now.saturating_add(EXPIRES_IN_MS))
+    }
+
+    /// The account, verified.
+    async fn read(&self, account: AccountId) -> Result<crate::node::api::AccountView, Failed> {
+        match self.node.account(account).await {
+            Ok(answer) => Ok(answer.body),
+            Err(CallError::WrongSigner { .. }) => Err(Failed::WrongSigner),
+            Err(e) => Err(Failed::Incomplete(e.to_string())),
+        }
+    }
+
+    /// The account's next nonce, or `None`, with a warning, when the node gives no answer to rely on.
+    async fn nonce(&self, account: AccountId) -> Result<Option<u64>, Failed> {
+        match self.node.nonce(account).await {
+            Ok(answer) => Ok(Some(answer.body.next_nonce)),
+            Err(CallError::WrongSigner { .. }) => Err(Failed::WrongSigner),
+            Err(e) => {
+                warn!(%account, "no nonce to sign with: {e}");
                 Ok(None)
             }
         }
     }
-}
-
-/// A stop that left the account other than it was to leave it, with an alert.
-fn incomplete(reason: String) -> Halt {
-    error!(alert = "stop_incomplete", "{reason}");
-    Halt::StopIncomplete(reason)
 }

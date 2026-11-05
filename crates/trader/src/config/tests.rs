@@ -15,17 +15,19 @@ fn the_example_loads() {
     assert_eq!(cfg.node.chain_id, 31337);
     assert_eq!(cfg.node.tls_key_sha256, Some(TlsPin([0; 32])));
     assert_eq!(cfg.node.request_timeout, Duration::from_secs(10));
-    assert_eq!(cfg.strategy.market, "BTC-USD");
-    assert_eq!(cfg.strategy.params, StrategyParams::SmaCrossover { fast: 5, slow: 20 });
-    assert_eq!(
-        cfg.sizing,
-        Sizing::FixedNotional { notional: "1000".parse().unwrap(), max_leverage: "5".parse().unwrap() }
-    );
+    assert_eq!(cfg.node.limits, LimitsSection::default());
+    assert_eq!(cfg.plans.len(), 1);
+    let strategy = &cfg.plans[0].strategies[0];
+    assert_eq!(strategy.market, "BTC-USD");
+    assert_eq!(strategy.params, StrategyParams::SmaCrossover { fast: 5, slow: 20 });
+    let sizing = Sizing::FixedNotional { notional: "1000".parse().unwrap(), max_leverage: "5".parse().unwrap() };
+    assert_eq!((&cfg.sizing, &cfg.plans[0].sizing), (&sizing, &sizing));
     assert_eq!(cfg.risk.max_open_positions, 1);
     assert_eq!(cfg.risk.daily_loss, LossLimit::Usd("100".parse().unwrap()));
+    assert_eq!(cfg.plans[0].risk, cfg.risk);
     assert_eq!(cfg.risk.min_hold, Duration::from_secs(3600));
-    assert_eq!(cfg.account.state_dir, Path::new(EXAMPLE).parent().unwrap().join("state"));
-    let KeySource::Keystore { path, password: PasswordSource::Env(name) } = &cfg.account.key else {
+    assert_eq!(cfg.state.dir, Path::new(EXAMPLE).parent().unwrap().join("state"));
+    let KeySource::Keystore { path, password: PasswordSource::Env(name) } = &cfg.plans[0].key else {
         panic!("the example names a keystore and a password variable");
     };
     assert_eq!(path, &Path::new(EXAMPLE).parent().unwrap().join("keys/account.json"));
@@ -37,8 +39,11 @@ fn the_example_loads() {
 fn unknown_keys_are_refused() {
     let edits = [
         ("\n[node]\n", "\n[node]\nbogus = 1\n"),
-        ("\n[account]\n", "\n[account]\nbogus = 1\n"),
-        ("\n[strategy]\n", "\n[strategy]\nbogus = 1\n"),
+        ("\n[[account]]\n", "\n[[account]]\nbogus = 1\n"),
+        ("\n[[account.strategy]]\n", "\n[[account.strategy]]\nbogus = 1\n"),
+        ("\n[node.limits]\n", "\n[node.limits]\nbogus = 1\n"),
+        ("\n[state]\n", "\n[state]\nbogus = 1\n"),
+        ("per_ip = { per_second = 50,", "per_ip = { bogus = 1, per_second = 50,"),
         ("\n[sizing]\n", "\n[sizing]\nbogus = 1\n"),
         ("\n[risk]\n", "\n[risk]\nbogus = 1\n"),
         ("\n[logging]\n", "\n[logging]\nbogus = 1\n"),
@@ -90,7 +95,7 @@ fn a_hex_key_is_dev_only() {
         "key = { type = \"hex_file\", path = \"dev.hex\" }",
     );
     let cfg: Config = toml::from_str(&text).unwrap();
-    assert!(matches!(cfg.account.key, KeySource::HexFile { .. }));
+    assert!(matches!(cfg.account[0].key, KeySource::HexFile { .. }));
     cfg.validate(true).unwrap();
     let err = cfg.validate(false).unwrap_err();
     assert!(err.to_string().contains("only in a dev build"), "{err}");
@@ -123,6 +128,10 @@ fn strategy_values_are_checked() {
         ("level = \"info\"", "level = \"[\""),
         ("request_timeout = \"10s\"", "request_timeout = \"0s\""),
         ("stream_timeout = \"30s\"", "stream_timeout = \"0s\""),
+        ("per_ip = { per_second = 50,", "per_ip = { per_second = 0,"),
+        ("burst = 20 }", "burst = 0 }"),
+        ("connections = 4", "connections = 0"),
+        ("connections = 4", "connections = 17"),
     ];
     for (from, to) in refused {
         assert!(parse(&example().replacen(from, to, 1)).is_err(), "{to} was accepted");
@@ -179,8 +188,90 @@ fn relative_paths_resolve_against_the_config() {
     )
     .unwrap();
     cfg.resolve_paths(Path::new("/etc/trader"));
-    let KeySource::Keystore { path, password: PasswordSource::File(file) } = &cfg.account.key else { unreachable!() };
+    let KeySource::Keystore { path, password: PasswordSource::File(file) } = &cfg.account[0].key else {
+        unreachable!()
+    };
     assert_eq!((path.as_path(), file.as_path()), (Path::new("/etc/trader/keys/account.json"), Path::new("/run/pass")));
+}
+
+/// An account trades each market once, at most `MAX_STRATEGIES` markets, and the config names an
+/// account.
+#[test]
+fn accounts_and_their_strategies_are_checked() {
+    let strategy = "\n[[account.strategy]]\nmarket = \"BTC-USD\"\nbar = \"1m\"\nkind = \"sma_crossover\"\nfast = 5\nslow = 20\nmax_slippage_bps = 25\n";
+    let twice = format!("{}{strategy}", example());
+    let err = parse(&twice).unwrap_err();
+    assert!(format!("{err:#}").contains("twice"), "{err:#}");
+    let other = strategy.replace("BTC-USD", "ETH-USD");
+    parse(&format!("{}{other}", example())).unwrap();
+    let many: String = (0..16).map(|i| strategy.replace("BTC-USD", &format!("M{i}-USD"))).collect();
+    assert!(parse(&format!("{}{many}", example())).is_err(), "17 markets");
+    let head: Vec<_> =
+        example().lines().take_while(|l| !l.starts_with("[[account.strategy]]")).map(str::to_owned).collect();
+    let err = parse(&format!("{}\nstrategy = []\n", head.join("\n"))).unwrap_err();
+    assert!(err.to_string().contains("from 1 to 16"), "{err}");
+    let nothing: String =
+        example().lines().take_while(|l| !l.starts_with("[[account]]")).collect::<Vec<_>>().join("\n");
+    let err = parse(&nothing).unwrap_err();
+    assert!(err.to_string().contains("no [[account]]"), "{err}");
+}
+
+/// A directory of keystores makes one account for each `.json` file, by file name, with the
+/// directory's password and strategies; the accounts listed one by one come first.
+#[test]
+fn a_directory_of_keystores_is_many_accounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let keys = dir.path().join("keys");
+    std::fs::create_dir(&keys).unwrap();
+    for name in ["b.json", "a.json", "notes.txt"] {
+        std::fs::write(keys.join(name), "{}").unwrap();
+    }
+    std::fs::create_dir(keys.join("nested.json")).unwrap();
+    let text = format!(
+        "{}\n[[account_dir]]\npath = \"keys\"\npassword = {{ file = \"pass\" }}\nclose_on_stop = true\n\
+         [[account_dir.strategy]]\nmarket = \"ETH-USD\"\nbar = \"5m\"\nkind = \"sma_crossover\"\nfast = 3\nslow = 9\nmax_slippage_bps = 10\n",
+        example()
+    );
+    let path = dir.path().join("bot.toml");
+    std::fs::write(&path, text).unwrap();
+    let cfg = Config::load(&path).unwrap();
+    let files: Vec<_> = cfg
+        .plans
+        .iter()
+        .map(|plan| match &plan.key {
+            KeySource::Keystore { path, password } => {
+                (path.file_name().unwrap().to_str().unwrap().to_owned(), matches!(password, PasswordSource::File(_)))
+            }
+            KeySource::HexFile { .. } => unreachable!(),
+        })
+        .collect();
+    assert_eq!(files, [("account.json".into(), false), ("a.json".into(), true), ("b.json".into(), true)]);
+    assert!(cfg.plans[1..].iter().all(|plan| plan.close_on_stop && plan.strategies[0].market == "ETH-USD"));
+    let PasswordSource::File(file) = (match &cfg.plans[1].key {
+        KeySource::Keystore { password, .. } => password,
+        KeySource::HexFile { .. } => unreachable!(),
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(file, &dir.path().join("pass"), "the password file is read from the config's directory");
+}
+
+/// A directory with no keystore, or that cannot be read, fails the load.
+#[test]
+fn an_empty_or_missing_directory_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("empty")).unwrap();
+    for (name, expected) in [("empty", "no .json keystore"), ("missing", "reading")] {
+        let text = format!(
+            "{}\n[[account_dir]]\npath = \"{name}\"\npassword = {{ env = \"P\" }}\n[[account_dir.strategy]]\nmarket = \"ETH-USD\"\n\
+             bar = \"5m\"\nkind = \"sma_crossover\"\nfast = 3\nslow = 9\nmax_slippage_bps = 10\n",
+            example()
+        );
+        let path = dir.path().join("bot.toml");
+        std::fs::write(&path, text).unwrap();
+        let err = format!("{:#}", Config::load(&path).unwrap_err());
+        assert!(err.contains(expected), "{name}: {err}");
+    }
 }
 
 /// The node URL and the pin must be well formed.

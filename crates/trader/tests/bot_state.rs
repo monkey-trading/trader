@@ -30,7 +30,7 @@ async fn a_split_halts() {
     let err = tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap_err();
     assert!(err.to_string().contains("does not follow a split"), "{err:#}");
     // A restart will not warm up from prices before the split.
-    assert_eq!(day_file(dir.path())["split_at"], T0 + MINUTE);
+    assert_eq!(day_file(dir.path())["splits"]["1"], T0 + MINUTE);
 }
 
 /// A dividend for the account moves its cash without a fill, so the bot reads the account again; one for
@@ -187,7 +187,7 @@ async fn the_hold_survives_a_restart() {
     price_at(&stand_in, T0 + 2 * MINUTE + 1_000, "102.5");
     posts_after_settling(&stand_in).await;
     assert_eq!(day_file(dir.path())["opened"], json!({ "1": T0 + 2 * MINUTE + 100 }));
-    assert_eq!(day_file(dir.path())["entry"], "0");
+    assert_eq!(day_file(dir.path())["positions"]["1"]["entry"], "0");
     // A later read agrees, and the entry is kept too.
     stand_in.with(|i| {
         let position = json!({ "1": { "qty": "0.980392156", "entry": "102" } });
@@ -195,7 +195,7 @@ async fn the_hold_survives_a_restart() {
     });
     price_at(&stand_in, T0 + 2 * MINUTE + 7_000, "102.5");
     posts_after_settling(&stand_in).await;
-    assert_eq!(day_file(dir.path())["entry"], "102");
+    assert_eq!(day_file(dir.path())["positions"]["1"]["entry"], "102");
     // A crash: the bot ends with the position open.
     drop(stop);
     bot.abort();
@@ -291,7 +291,8 @@ async fn a_saved_opening_time_belongs_to_one_position() {
         let stand_in = StandIn::start().await;
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("state")).unwrap();
-        let saved = json!({ "day": null, "opened": { "1": long_ago }, "side": side, "entry": entry });
+        let saved =
+            json!({ "day": null, "opened": { "1": long_ago }, "positions": { "1": { "side": side, "entry": entry } } });
         std::fs::write(dir.path().join("state").join(format!("{}.json", account())), saved.to_string()).unwrap();
         stand_in.with(|i| {
             i.markets = json!([btc_usd(Some("99"))]);
@@ -375,4 +376,30 @@ async fn no_order_when_a_decision_changes_state_that_cannot_be_saved() {
     assert_eq!(day_file(dir.path())["day"]["day"], midnight / 86_400_000);
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(40), bot).await.unwrap().unwrap().unwrap();
+}
+
+/// A state file written for one market, before accounts traded several, keeps its split for the market the
+/// account trades, and is rewritten in the current shape.
+#[tokio::test]
+async fn a_file_from_the_one_market_bot_keeps_its_split() {
+    let stand_in = StandIn::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    std::fs::create_dir_all(dir.path().join("state")).unwrap();
+    let old = json!({ "day": null, "opened": {}, "side": 0, "entry": "0", "split_at": T0 - 5_000 });
+    std::fs::write(dir.path().join("state").join(format!("{}.json", account())), old.to_string()).unwrap();
+    let (stop, bot) = start(&stand_in, dir.path(), &[]);
+    warm(&stand_in).await;
+    let saved = day_file(dir.path());
+    assert_eq!(saved["splits"]["1"], T0 - 5_000);
+    assert!(saved.get("split_at").is_none(), "{saved}");
+    // The log passes the window orders signed before the start could enter it in, so the stop is quick.
+    let seq = next_seq(&stand_in);
+    stand_in.append((seq, 0), command(seq, T0 + 40_000, json!({ "type": "tick" }), json!([])));
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
 }

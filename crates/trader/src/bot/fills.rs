@@ -1,130 +1,259 @@
-//! The account's fills in the log: its position in the market, its balance read again after each,
-//! and a check that every fill after this start comes from an order this process signed.
+//! The accounts' fills in the log: each moves its account's position in the market, and every fill
+//! after this start must come from an order this process signed.
 
 use anyhow::anyhow;
 use engine_core::Fixed;
 use engine_core::command::Command;
+use engine_core::eip712::Signature;
 use engine_core::event::Event;
-use engine_core::types::{MarketId, Millis};
-use tracing::{debug, error, info, warn};
+use engine_core::types::AccountId;
+use serde_json::value::RawValue;
+use tracing::{error, info};
 
-use crate::bot::{Bot, Halt, READ_EVERY_MS, READ_RETRY_MS};
-use crate::node::CallError;
-use crate::node::api::AccountView;
-use crate::stream::message::CommandMessage;
+use crate::bot::Halt;
+use crate::bot::fleet::Fleet;
+use crate::stream::message::{CommandMessage, EventHead, FillRef, OrderRef};
 
-impl Bot {
-    /// Follows the account's fills: the position in the market, and when it opened. Returns whether
-    /// `event` is one, or moves the account's cash without a fill, as a dividend does.
-    pub(super) fn on_event(&mut self, seq: u64, ts: Millis, event: &Event) -> bool {
-        if let Event::CorporateDividend { account, .. } | Event::CorporateCashInLieu { account, .. } = event
-            && *account == self.key.address()
-        {
-            return true;
+/// The events that move an account's cash without a fill, each naming the account.
+const CASH_EVENTS: [&str; 8] = [
+    "corporate_dividend",
+    "corporate_cash_in_lieu",
+    "deposited",
+    "withdrawal_approved",
+    "close_out",
+    "bad_debt",
+    "financing",
+    "distribution_allocated",
+];
+
+/// The kinds of event the pinned engine writes (`engine_core::event::Event`'s variants, in snake case),
+/// which are skipped without being read. A kind not listed is read as the pinned engine's `Event`,
+/// which refuses one the pinned engine does not write: the bot halts on a log of another version.
+/// A bump of the engine's `rev` that adds a kind needs it listed here to keep the fast path.
+const KNOWN_EVENTS: [&str; 55] = [
+    "corporate_action_scheduled",
+    "corporate_entitlements_captured",
+    "corporate_dividend",
+    "corporate_split",
+    "corporate_action_applied",
+    "corporate_cash_in_lieu",
+    "corporate_action_failed",
+    "eligibility_attested",
+    "eligibility_rejected",
+    "deposit_pending",
+    "deposit_held",
+    "deposited",
+    "deposit_rejected",
+    "custody_deposit_changed",
+    "custody_deposit_rejected",
+    "withdrawal_approved",
+    "withdrawal_queued",
+    "withdrawal_queue_updated",
+    "withdrawal_rejected",
+    "house_capital_moved",
+    "order_accepted",
+    "order_rejected",
+    "order_cancelled",
+    "fill",
+    "close_out",
+    "bad_debt",
+    "financing",
+    "benchmark_rate_missing",
+    "benchmark_rate_undated",
+    "benchmark_rate_observed",
+    "market_opened",
+    "market_closed",
+    "market_rolled",
+    "stress_changed",
+    "prices_rejected",
+    "admin_applied",
+    "admin_rejected",
+    "emission_allocated",
+    "emission_period_closed",
+    "emission_periods_cancelled",
+    "staked",
+    "unstaked",
+    "staking_rejected",
+    "distribution_allocated",
+    "operator_share_allocated",
+    "distribution_epoch_closed",
+    "distribution_epochs_skipped",
+    "rotation_switched",
+    "operator_elected",
+    "operator_installed",
+    "election_rejected",
+    "session_key_registered",
+    "session_key_revoked",
+    "session_key_rejected",
+    "catch_up_deferred",
+];
+
+impl Fleet {
+    /// Follows one event: a fill of one of the fleet's accounts moves its position in the market,
+    /// marks its balance for a read, and, unless it is a close-out, must come from an order this
+    /// process signed.
+    /// Error cases:
+    /// - an event or fill that is not the shape the pinned engine writes
+    pub(super) fn apply_event(&mut self, message: &CommandMessage<'_>, event: &RawValue) -> Result<(), Halt> {
+        let unreadable = |e: serde_json::Error| Halt::Unfollowable(anyhow!(e).context("an event"));
+        let head: EventHead<'_> = serde_json::from_str(event.get()).map_err(unreadable)?;
+        if let "corporate_split" | "corporate_action_failed" = head.kind {
+            return self.corporate_action(message, event);
         }
-        let Event::Fill(fill) = event else { return false };
-        if fill.account != self.key.address() {
-            return false;
+        if let (true, Some(address)) = (CASH_EVENTS.contains(&head.kind), head.account) {
+            // Cash moves without a fill: the balance held is not the account's, and nothing is valued from
+            // it, or ordered on it, until a read agrees.
+            if let Some(account) = self.account_of(address) {
+                let (log_ts, entry) = (self.log_ts, &mut self.accounts[account as usize]);
+                entry.epoch += 1;
+                entry.behind = true;
+                entry.read_after = log_ts;
+                self.want_read(account);
+            }
+            return Ok(());
         }
-        if fill.market == self.market {
-            let before = std::mem::replace(&mut self.position, fill.position);
-            self.controls.on_fill(ts, fill.market, before, fill.position);
+        if head.kind != "fill" {
+            // An event of a kind the pinned engine does not write is a log the bot cannot follow: the
+            // engine's own reading of it refuses it. Known kinds are skipped without being read.
+            if !KNOWN_EVENTS.contains(&head.kind) {
+                serde_json::from_str::<Event>(event.get()).map_err(unreadable)?;
+            }
+            return Ok(());
         }
+        let Some(address) = head.account else {
+            return Err(Halt::Unfollowable(anyhow!("a fill event with no account")));
+        };
+        let Some(account) = self.account_of(address) else { return Ok(()) };
+        let fill: FillRef<'_> = serde_json::from_str(event.get()).map_err(unreadable)?;
+        let position: Fixed =
+            fill.position.parse().map_err(|e| Halt::Unfollowable(anyhow!("a fill's position: {e}")))?;
+        if let Some(a) = self.assignment_of(account, fill.market) {
+            let before = std::mem::replace(&mut self.assignments[a as usize].position, position);
+            self.accounts[account as usize].controls.on_fill(message.ts, fill.market, before, position);
+            // The entry price the engine keeps is read again with the balance, which a fill moves.
+            self.touch_state(account);
+        }
+        // The fill changes the position, so the last read of the account (its balance and entry price)
+        // is not of the position the log gives: nothing is valued or ordered from it until a read agrees.
+        let log_ts = self.log_ts;
+        let entry = &mut self.accounts[account as usize];
+        entry.epoch += 1;
+        entry.behind = true;
+        entry.read_after = log_ts;
+        self.want_read(account);
         info!(
-            seq,
+            seq = message.seq,
+            account = %fill.account,
             order_id = fill.order_id,
             market = fill.market,
-            side = ?fill.side,
+            side = %fill.side,
             qty = %fill.qty,
             price = %fill.price,
             realised_pnl = %fill.realised_pnl,
             profit_fee = %fill.profit_fee,
             liquidation = fill.liquidation,
-            position = %self.position,
+            position = %fill.position,
             "fill"
         );
-        true
-    }
-
-    /// Checks that the account's fills in `message` come from an order this process signed, or a
-    /// close-out, once orders signed before this start can no longer enter the log. A fill from
-    /// another order means another process, or a person, trades the account, and the position the
-    /// bot decides on is not its own: it stops.
-    /// Error cases:
-    /// - a fill of the account from an order whose signature this process did not make
-    pub(super) fn check_own_fills(&self, message: &CommandMessage<'_>, events: &[Event]) -> Result<(), Halt> {
-        if message.ts <= self.trading_from {
-            return Ok(());
-        }
-        let account = self.key.address();
-        let traded = events
-            .iter()
-            .any(|event| matches!(event, Event::Fill(fill) if fill.account == account && !fill.liquidation));
-        if !traded {
-            return Ok(());
-        }
-        let signed_here = match message.command() {
-            Ok(Command::PlaceOrder(request) | Command::AccessOrder { request, .. }) if request.account == account => {
-                request.auth.as_ref().is_some_and(|auth| self.signed_orders.contains(&auth.signature))
-            }
-            Ok(Command::AccessCloseAll { request, .. }) if request.account == account => {
-                request.auth.as_ref().is_some_and(|auth| self.signed_orders.contains(&auth.signature))
-            }
-            _ => false,
-        };
-        if signed_here {
-            return Ok(());
-        }
-        let reason = format!("a fill at seq {} is from an order this process did not sign", message.seq);
-        error!(alert = "account_shared", seq = message.seq, "{reason}: another process or person trades the account");
-        Err(Halt::Unfollowable(anyhow!("{reason}")))
-    }
-
-    /// Reads the account again, verified, after the account's fills: fills, financing, fees and
-    /// transfers all move the balance, and the node's answer is the one figure that holds all of them;
-    /// it also gives the position's entry price. A read whose position is not the log's is behind it
-    /// (or ahead), and gives neither figure; nothing is valued or ordered from the account until a
-    /// later read agrees.
-    /// Error cases:
-    /// - an answer signed by another key than the signer
-    /// - the account holds a position in a market other than the one the bot trades
-    pub(super) async fn refresh_balance(&mut self) -> Result<(), Halt> {
-        match self.node.account(self.key.address()).await {
-            Ok(answer) => {
-                if let Some(market) = other_market(&answer.body, self.market) {
-                    return Err(Halt::Unfollowable(anyhow!(
-                        "the account holds a position in market {market}, which this bot does not trade or limit"
-                    )));
+        if !fill.liquidation {
+            if self.signed_here(account, message) {
+                // The order has entered the log and filled: it can no longer move the position later.
+                if let Some(a) = self.assignment_of(account, fill.market) {
+                    self.assignments[a as usize].expires_at = None;
                 }
-                let held = answer.body.positions.get(&self.market);
-                let read = held.map_or(Fixed::ZERO, |position| position.qty);
-                // A read is of the log when it holds the position the log gives. One that is not is read
-                // again soon, and nothing is valued from it. A read that is ahead of the log in other
-                // ways (a later price command, say) differs only in being newer.
-                if read != self.position {
-                    self.account_behind = true;
-                    self.read_retry_after = self.log_ts.saturating_add(READ_RETRY_MS);
-                    debug!(read = %read, position = %self.position, head_seq = answer.head_seq, "the account read is not at the log");
-                    return Ok(());
-                }
-                self.account_behind = false;
-                self.read_retry_after = self.log_ts.saturating_add(READ_EVERY_MS);
-                self.balance = answer.body.balance;
-                self.entry = held.map_or(Fixed::ZERO, |position| position.entry);
-                info!(balance = %self.balance, head_seq = answer.head_seq, "balance");
-            }
-            Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-            Err(e) => {
-                self.account_behind = true;
-                self.read_retry_after = self.log_ts.saturating_add(READ_RETRY_MS);
-                warn!("the balance was not read: {e}");
+            } else if message.ts > self.trading_from && self.accounts[account as usize].failed.is_none() {
+                let reason = format!("a fill at seq {} is from an order this process did not sign", message.seq);
+                error!(
+                    alert = "account_shared",
+                    seq = message.seq,
+                    account = fill.account,
+                    "{reason}: another process or person trades the account"
+                );
+                self.fail(account, reason);
             }
         }
         Ok(())
     }
+
+    /// A corporate action on a market the fleet trades. A split changes the units of every price the
+    /// strategies have seen, and a failed action stops dealing in the market: the bot keeps the split,
+    /// for the accounts' files, and stops.
+    /// Error cases:
+    /// - the action is a split or a failure on a market an account trades, or an event unreadable
+    fn corporate_action(&mut self, message: &CommandMessage<'_>, event: &RawValue) -> Result<(), Halt> {
+        let event: Event = serde_json::from_str(event.get())
+            .map_err(|e| Halt::Unfollowable(anyhow!(e).context("a corporate action")))?;
+        match event {
+            Event::CorporateActionFailed { market, reason, .. } if self.market_slot.contains_key(&market) => {
+                let reason =
+                    format!("a corporate action failed for the market {market}, which stops dealing in it: {reason}");
+                Err(Halt::Unfollowable(anyhow!(reason)))
+            }
+            Event::CorporateSplit { market, .. } => {
+                let Some(&slot) = self.market_slot.get(&market) else { return Ok(()) };
+                self.markets[slot as usize].split_at = Some(message.ts);
+                for k in 0..self.markets[slot as usize].assignments.len() {
+                    let account = self.assignments[self.markets[slot as usize].assignments[k] as usize].account;
+                    self.touch_state(account);
+                }
+                let reason = format!("market {market} split, which changes its units: the bot does not follow a split");
+                Err(Halt::Unfollowable(anyhow!(reason)))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether the command of `message` is an order of `account` whose signature this process made.
+    fn signed_here(&self, account: u32, message: &CommandMessage<'_>) -> bool {
+        let entry = &self.accounts[account as usize];
+        let signed = |address: &str, signature: Option<&str>| {
+            address.parse::<AccountId>().ok() == Some(entry.address)
+                && signature.and_then(|s| s.parse::<Signature>().ok()).is_some_and(|s| entry.signed.contains(&s))
+        };
+        if message.head().is_ok_and(|head| head.kind == "place_order") {
+            let order = serde_json::from_str::<OrderRef<'_>>(message.cmd.get());
+            return order.is_ok_and(|order| signed(order.account, order.auth.map(|auth| auth.signature)));
+        }
+        match message.command() {
+            Ok(Command::PlaceOrder(request) | Command::AccessOrder { request, .. }) => {
+                request.account == entry.address
+                    && request.auth.is_some_and(|auth| entry.signed.contains(&auth.signature))
+            }
+            // The close of a stopped account is a close-all request, also signed here.
+            Ok(Command::AccessCloseAll { request, .. }) => {
+                request.account == entry.address
+                    && request.auth.is_some_and(|auth| entry.signed.contains(&auth.signature))
+            }
+            _ => false,
+        }
+    }
 }
 
-/// A market other than `market` in which `view` holds a position.
-pub(super) fn other_market(view: &AccountView, market: MarketId) -> Option<MarketId> {
-    view.positions.iter().find(|(id, position)| **id != market && !position.qty.is_zero()).map(|(id, _)| *id)
+#[cfg(test)]
+mod tests {
+    use engine_core::event::Event;
+
+    use super::{CASH_EVENTS, KNOWN_EVENTS};
+
+    /// Every kind that moves cash is one the bot knows the pinned engine writes.
+    #[test]
+    fn every_cash_event_kind_is_a_known_one() {
+        for kind in CASH_EVENTS {
+            assert!(KNOWN_EVENTS.contains(&kind), "{kind}");
+        }
+    }
+
+    /// Every kind the bot skips unread is a variant the pinned engine writes: the engine's reading of
+    /// `{"type": kind}` fails for a missing field of the variant, never as an unknown variant (the
+    /// unit variants read whole).
+    #[test]
+    fn every_known_event_kind_is_the_pinned_engines() {
+        for kind in KNOWN_EVENTS {
+            if let Err(e) = serde_json::from_str::<Event>(&format!(r#"{{"type":"{kind}"}}"#)) {
+                assert!(!e.to_string().contains("unknown variant"), "{kind}: {e}");
+            }
+        }
+        let unknown = serde_json::from_str::<Event>(r#"{"type":"no_such_event"}"#).unwrap_err();
+        assert!(unknown.to_string().contains("unknown variant"), "{unknown}");
+    }
 }

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use engine_core::Fixed;
 use engine_core::market::PriceRules;
-use engine_core::price::{MAX_QUOTE_LEAD_MS, SourceQuote, compute_index};
+use engine_core::price::{MAX_QUOTE_LEAD_MS, SourceQuote};
 use engine_core::session::Schedule;
 use engine_core::types::Millis;
 
@@ -26,6 +26,8 @@ pub struct IndexMarks {
     /// The last mark worked out, and the latest time it holds through while no quote is stored:
     /// until a fresh quote ages out, or the book becomes complete.
     known: Option<(Option<Fixed>, Millis)>,
+    /// The fresh mids of the index being worked out, kept to reuse its memory.
+    scratch: Vec<Fixed>,
 }
 
 impl IndexMarks {
@@ -36,7 +38,7 @@ impl IndexMarks {
 
     /// An empty book for a market priced under `rules` that trades in `schedule`'s hours.
     pub fn scheduled(rules: PriceRules, schedule: Schedule) -> Self {
-        Self { rules, schedule, last_now: None, quotes: BTreeMap::new(), first: None, known: None }
+        Self { rules, schedule, last_now: None, quotes: BTreeMap::new(), first: None, known: None, scratch: Vec::new() }
     }
 
     /// Whether the market stays open from a quote's venue stamp to the sequenced time `now`, as the
@@ -99,26 +101,39 @@ impl IndexMarks {
 
     /// Stores the quotes of a `Prices` command for this market sequenced at `now`, refusing those
     /// the engine refuses: malformed ones, those for a futures contract, those stamped more than
-    /// `MAX_QUOTE_LEAD_MS` ahead, and those from outside one open session. A quote stamped ahead counts from `now`, and replaces its venue's
-    /// only when it is no older.
+    /// `MAX_QUOTE_LEAD_MS` ahead, and those from outside one open session. A quote stamped ahead
+    /// counts from `now`, and replaces its venue's only when it is no older.
     pub fn store(&mut self, now: Millis, quotes: &[SourceQuote]) {
+        self.begin(now);
+        for quote in quotes {
+            self.store_quote(now, &quote.source, quote.mid, quote.ts, quote.contract.is_some());
+        }
+    }
+
+    /// Starts a `Prices` command sequenced at `now`, whose quotes follow one by one in
+    /// `store_quote`.
+    pub fn begin(&mut self, now: Millis) {
         self.first.get_or_insert(now);
         self.known = None;
-        for quote in quotes {
-            let refused = !quote.is_well_formed() || quote.contract.is_some();
-            if refused || quote.ts.saturating_sub(now) > MAX_QUOTE_LEAD_MS || !self.in_session(quote.ts, now) {
-                continue;
+    }
+
+    /// Stores one quote of the command `begin` started, as `store` does. A venue the book has not
+    /// seen yet is the only case that allocates.
+    pub fn store_quote(&mut self, now: Millis, source: &str, mid: Fixed, ts: Millis, has_contract: bool) {
+        let well_formed = mid.is_valid_input() && ts >= 0;
+        if !well_formed || has_contract || ts.saturating_sub(now) > MAX_QUOTE_LEAD_MS || !self.in_session(ts, now) {
+            return;
+        }
+        let ts = ts.min(now);
+        match self.quotes.get_mut(source) {
+            Some(held) if ts < held.ts && held.ts <= now => {}
+            Some(held) => {
+                held.mid = mid;
+                held.ts = ts;
             }
-            let ts = quote.ts.min(now);
-            match self.quotes.get_mut(&quote.source) {
-                Some(held) if ts < held.ts && held.ts <= now => {}
-                Some(held) => {
-                    held.mid = quote.mid;
-                    held.ts = ts;
-                }
-                None => {
-                    self.quotes.insert(quote.source.clone(), SourceQuote { ts, ..quote.clone() });
-                }
+            None => {
+                self.quotes
+                    .insert(source.to_owned(), SourceQuote { source: source.to_owned(), mid, ts, contract: None });
             }
         }
     }
@@ -127,6 +142,27 @@ impl IndexMarks {
     /// log has passed since the first command it saw.
     pub fn is_complete(&self, now: Millis) -> bool {
         self.first.is_some_and(|first| now.saturating_sub(first) > self.rules.max_age_ms)
+    }
+
+    /// The index at `now` as `compute_index` works it out (the median of the fresh quotes, none if
+    /// there are too few or they diverge), without allocating once the book has held its quotes.
+    fn index_mid(&mut self, now: Millis) -> Option<Fixed> {
+        let rules = &self.rules;
+        self.scratch.clear();
+        self.scratch.extend(
+            self.quotes
+                .values()
+                .filter(|q| q.is_well_formed() && q.ts <= now && now.saturating_sub(q.ts) <= rules.max_age_ms)
+                .map(|q| q.mid),
+        );
+        let mids = &mut self.scratch;
+        if mids.len() < rules.min_sources || mids.is_empty() {
+            return None;
+        }
+        mids.sort();
+        let n = mids.len();
+        let mid = if n % 2 == 1 { mids[n / 2] } else { (mids[n / 2 - 1] + mids[n / 2]).div_int(2) };
+        ((mids[n - 1] - mids[0]).bps_of(mid) <= rules.max_divergence_bps).then_some(mid)
     }
 
     /// The index mark at `now`, any command's sequenced time: `None` until the book has seen
@@ -139,10 +175,7 @@ impl IndexMarks {
             let first = *self.first.get_or_insert(now);
             let complete = now.saturating_sub(first) > self.rules.max_age_ms;
             let open = self.schedule.is_open(now);
-            return (complete && open)
-                .then(|| compute_index(&self.quotes, &self.rules, now).ok())
-                .flatten()
-                .map(|i| i.mid);
+            return (complete && open).then(|| self.index_mid(now)).flatten();
         }
         if let Some((mark, through)) = self.known
             && now <= through
@@ -154,7 +187,7 @@ impl IndexMarks {
         let known = if !self.is_complete(now) {
             (None, first.saturating_add(max_age))
         } else {
-            let mark = compute_index(&self.quotes, &self.rules, now).ok().map(|index| index.mid);
+            let mark = self.index_mid(now);
             // Stored quotes are stamped at or before `now`, so only an ageing one changes the index.
             let ages_out = self.quotes.values().map(|q| q.ts.saturating_add(max_age)).filter(|at| *at >= now).min();
             (mark, ages_out.unwrap_or(Millis::MAX))
@@ -377,5 +410,50 @@ mod tests {
         marks.advance(HALT);
         marks.set_schedule(HALT + MINUTE, exchange());
         assert!(marks.quotes.is_empty(), "stale under the age limit");
+    }
+
+    /// The index worked out without allocating is the engine's, over many sets of quotes: fresh and
+    /// stale, one source to five, tight and divergent.
+    #[test]
+    fn the_index_is_the_engines() {
+        use engine_core::price::compute_index;
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for _ in 0..2_000 {
+            let mut marks = IndexMarks::new(RULES);
+            let now = 10_000;
+            let count = next(6);
+            for source in 0..count {
+                let mid = format!("{}.{:02}", 100 + next(2), next(100));
+                let ts = now - i64::try_from(next(1_500)).unwrap();
+                marks.quotes.insert(
+                    format!("v{source}"),
+                    SourceQuote { source: format!("v{source}"), mid: mid.parse().unwrap(), ts, contract: None },
+                );
+            }
+            let engine = compute_index(&marks.quotes, &RULES, now).ok().map(|index| index.mid);
+            assert_eq!(marks.index_mid(now), engine, "{:?}", marks.quotes);
+        }
+    }
+
+    /// The check a stored quote must pass is the engine's `SourceQuote::is_well_formed`, which
+    /// `store_quote` states on fields to avoid building a quote: they agree on a spread of mids and times.
+    #[test]
+    fn a_stored_quote_is_well_formed_as_the_engine_says() {
+        let mids = ["0", "-1", "0.000000001", "1", "100", "999999999", "1000000000", "1000000000.000000001"];
+        for mid in mids {
+            for ts in [-1, 0, 1, 5_000] {
+                let mid: Fixed = mid.parse().unwrap();
+                let engine = SourceQuote { source: "a".into(), mid, ts, contract: None }.is_well_formed();
+                let mut marks = IndexMarks::new(RULES);
+                marks.store_quote(5_000, "a", mid, ts, false);
+                assert_eq!(!marks.quotes.is_empty(), engine, "mid {mid}, ts {ts}");
+            }
+        }
     }
 }

@@ -234,7 +234,8 @@ async fn an_order_holds_the_next_until_it_expires() {
     // The node's time is half a minute past minute 2, so the order minute 1's close sends expires
     // at minute 3, and the bar minute 3's command closes is held.
     stand_in.with(|i| i.time_ms = (T0 + 2 * MINUTE + 30_000) as u64);
-    for (seq, ts, mid) in [(14, T0 + MINUTE, "101"), (15, T0 + 2 * MINUTE, "102")] {
+    // Minute 2's first command is ten seconds in, so the bar is twenty seconds behind the node's time.
+    for (seq, ts, mid) in [(14, T0 + MINUTE, "101"), (15, T0 + 2 * MINUTE + 10_000, "102")] {
         stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
     }
     assert_eq!(order(&stand_in, 1).await["client_id"], T0 + MINUTE);

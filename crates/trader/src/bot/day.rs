@@ -1,59 +1,103 @@
-//! What the bot keeps in a file so a restart does not hand an account the loss limit stopped a new
-//! day, or a position it held a shorter hold, and the bot's reading of equity against that limit.
+//! What the bot keeps in a file for each account so a restart does not hand an account the loss limit
+//! stopped a new day, or a position it held a shorter hold: the day's loss, when each position
+//! opened and on which side and at what entry price, and the markets that split.
 
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use engine_core::Fixed;
-use engine_core::market::MarketSpec;
 use engine_core::types::{AccountId, MarketId, Millis};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
-use trader_core::controls::Account;
-use trader_core::margin::Holding;
-use trader_core::risk::{DayState, DayStatus};
+use trader_core::risk::DayState;
 
-use crate::bot::{Bot, Halt, REPLAY_LAG_MS};
+/// A position the opening times belong to: its side, and its entry price (another entry is another
+/// position, whatever its side).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedPosition {
+    /// 1 long, -1 short, 0 none.
+    pub side: i64,
+    pub entry: Fixed,
+}
 
-/// How long, in sequenced time, after a try at closing the position the daily loss limit tries again.
-const FLATTEN_RETRY_MS: Millis = 5_000;
-
-/// What the bot keeps across a restart: the day's loss, when its position opened and on which side and
-/// at what entry price, and when a split halted it.
+/// What the bot keeps across a restart.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Saved {
-    pub(super) day: Option<DayState>,
-    pub(super) opened: BTreeMap<MarketId, Millis>,
-    /// The side of the position `opened` belongs to: 1 long, -1 short, 0 none.
+pub struct Saved {
+    pub day: Option<DayState>,
+    pub opened: BTreeMap<MarketId, Millis>,
+    /// The position each of `opened` belongs to.
     #[serde(default)]
-    pub(super) side: i64,
-    /// The entry price of that position: another entry is another position, whatever its side.
+    pub positions: BTreeMap<MarketId, SavedPosition>,
+    /// When each market split, if the bot halted at one: prices before it are in other units.
     #[serde(default)]
-    pub(super) entry: Fixed,
-    /// When the market split, if the bot halted at one: prices before it are in other units.
-    #[serde(default)]
-    pub(super) split_at: Option<Millis>,
+    pub splits: BTreeMap<MarketId, Millis>,
+    /// The fields of a file written for one market, before accounts traded several: read, never written.
+    #[serde(default, skip_serializing)]
+    pub side: i64,
+    #[serde(default, skip_serializing)]
+    pub entry: Fixed,
+    #[serde(default, skip_serializing)]
+    pub split_at: Option<Millis>,
+}
+
+impl Saved {
+    /// Moves a file written for one market to the per-market maps, for an account that trades `markets`.
+    /// Error cases:
+    /// - the file names no market (it holds no position) and the account trades several: which market
+    ///   its split belongs to is not known, so the file is left for someone to remove
+    pub fn migrate(&mut self, markets: &[MarketId]) -> anyhow::Result<()> {
+        let (side, entry, split_at) =
+            (std::mem::take(&mut self.side), std::mem::take(&mut self.entry), self.split_at.take());
+        if side == 0 && split_at.is_none() {
+            return Ok(());
+        }
+        // The file names its market by the opening time of its position, when it holds one.
+        let mut named = self.opened.keys();
+        let market = match (named.next(), named.next()) {
+            (Some(&only), None) if markets.contains(&only) => only,
+            // A position of a market the account no longer trades is not its own.
+            (Some(_), None) => return Ok(()),
+            _ => match markets {
+                [only] => *only,
+                _ => anyhow::bail!(
+                    "the saved state was written for one market, and this account trades {}: move the file aside to start it afresh",
+                    markets.len()
+                ),
+            },
+        };
+        if side != 0 {
+            self.positions.entry(market).or_insert(SavedPosition { side, entry });
+        }
+        if let Some(at) = split_at {
+            self.splits.entry(market).or_insert(at);
+        }
+        Ok(())
+    }
 }
 
 /// The file holding one account's saved state.
 #[derive(Clone, Debug)]
-pub(super) struct StateFile {
+pub struct StateFile {
     path: PathBuf,
+    /// Writes are numbered as they are asked for, and a write that an older one overtakes is skipped, so
+    /// the file holds the newest snapshot asked for whatever order the writes run in.
+    writes: Arc<(AtomicU64, Mutex<u64>)>,
 }
 
 impl StateFile {
     /// The file for `account` in `dir`.
-    pub(super) fn new(dir: &Path, account: AccountId) -> Self {
-        Self { path: dir.join(format!("{account}.json")) }
+    pub fn new(dir: &Path, account: AccountId) -> Self {
+        Self { path: dir.join(format!("{account}.json")), writes: Arc::default() }
     }
 
     /// The saved state, or the empty one when no file exists.
     /// Error cases:
     /// - the file cannot be read, or is not a saved state: the bot cannot tell whether the limit stopped
-    ///   the account today, so it does not trade until someone repairs or removes the file
-    pub(super) async fn load(&self) -> anyhow::Result<Saved> {
+    ///   the account today, so it does not trade the account until someone repairs or removes the file
+    pub async fn load(&self) -> anyhow::Result<Saved> {
         let path = self.path.clone();
         let read = tokio::task::spawn_blocking(move || std::fs::read_to_string(path)).await?;
         match read {
@@ -66,9 +110,14 @@ impl StateFile {
     /// Writes `saved` whole: to a new file, flushed, and renamed over the old one.
     /// Error cases:
     /// - the directory or file cannot be written
-    pub(super) async fn save(&self, saved: Saved) -> anyhow::Result<()> {
+    pub async fn save(&self, saved: Saved) -> anyhow::Result<()> {
         let path = self.path.clone();
+        let (writes, number) = (Arc::clone(&self.writes), self.writes.0.fetch_add(1, Ordering::SeqCst) + 1);
         tokio::task::spawn_blocking(move || {
+            let mut newest = writes.1.lock().unwrap_or_else(|e| e.into_inner());
+            if *newest > number {
+                return anyhow::Ok(());
+            }
             let dir = path.parent().context("the state file has a directory")?;
             std::fs::create_dir_all(dir)?;
             let temporary = path.with_extension("json.tmp");
@@ -78,6 +127,7 @@ impl StateFile {
             std::fs::rename(&temporary, &path)?;
             // The rename is in the directory, which is synced too, or a crash can bring the old file back.
             std::fs::File::open(dir)?.sync_all()?;
+            *newest = number;
             anyhow::Ok(())
         })
         .await?
@@ -85,93 +135,37 @@ impl StateFile {
     }
 }
 
-impl Bot {
-    /// Reads the account's equity at the sequenced time `ts`, as the mark moves or a fill lands, and
-    /// keeps the day's state and the positions' opening times in their file. A reading is taken only
-    /// while the account's balance and entry are those of the position the log gives.
-    pub(super) async fn check_day(&mut self, ts: Millis) -> Result<(), Halt> {
-        self.save_state().await;
-        let Some(mark) = self.mark.filter(|_| !self.account_behind) else { return Ok(()) };
-        let holding = holding(&self.spec, self.market, self.position, self.entry, mark);
-        let holdings = holding.as_slice();
-        let account = Account { balance: self.balance, holdings };
-        let Some(status) = self.controls.observe(ts, &account) else { return Ok(()) };
-        match status {
-            DayStatus::Stopped { newly } => {
-                if newly || !self.loss_alert {
-                    let state = self.controls.day_state();
-                    warn!(
-                        alert = "daily_loss_limit",
-                        ?state,
-                        "the daily loss limit is reached: flattening and stopping until the next UTC day"
-                    );
-                }
-                self.loss_alert = true;
-            }
-            DayStatus::Trading if self.loss_alert => {
-                self.loss_alert = false;
-                info!(alert_resolved = "daily_loss_limit", "a new UTC day: trading again");
-            }
-            DayStatus::Trading => {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy(opened: &[MarketId]) -> Saved {
+        Saved {
+            opened: opened.iter().map(|&m| (m, 5)).collect(),
+            side: 1,
+            entry: "100".parse().unwrap(),
+            split_at: Some(9),
+            ..Saved::default()
         }
-        self.save_state().await;
-        Ok(())
     }
 
-    /// While the daily loss limit has stopped the account and it still holds a position, closes it,
-    /// again on any command at least `FLATTEN_RETRY_MS` of sequenced time after the last try and once
-    /// the last close's expiry has passed: a close the engine declined does not wait for a move of the mark
-    /// or the next bar.
-    /// Error cases:
-    /// - an answer signed by another key than the signer
-    pub(super) async fn retry_flatten(&mut self, ts: Millis, lag: Millis) -> Result<(), Halt> {
-        let due = self.controls.is_stopped() && !self.position.is_zero() && ts >= self.flatten_after;
-        if due && lag <= REPLAY_LAG_MS && !self.account_behind {
-            self.flatten_after = ts.saturating_add(FLATTEN_RETRY_MS);
-            self.flatten(ts).await?;
-        }
-        Ok(())
+    #[test]
+    fn a_one_market_file_moves_to_the_market_it_names() {
+        // Named, and still traded beside another market.
+        let mut saved = legacy(&[1]);
+        saved.migrate(&[1, 2]).unwrap();
+        assert_eq!(
+            (saved.splits.keys().collect::<Vec<_>>(), saved.positions.keys().collect::<Vec<_>>()),
+            (vec![&1], vec![&1])
+        );
+        // Named, and no longer traded: nothing of it is the account's.
+        let mut saved = legacy(&[1]);
+        saved.migrate(&[2]).unwrap();
+        assert!(saved.splits.is_empty() && saved.positions.is_empty());
+        // Unnamed, for the one market the account trades; refused for several.
+        let mut saved = legacy(&[]);
+        saved.migrate(&[3]).unwrap();
+        assert_eq!(saved.splits.get(&3), Some(&9));
+        assert!(legacy(&[]).migrate(&[1, 2]).is_err());
     }
-
-    /// Writes the saved state to its file when it changed. A failed write is an alert, and the state
-    /// is written again at the next change.
-    pub(super) async fn save_state(&mut self) {
-        let (day, side) = (self.controls.day_state(), self.position.signum());
-        let saved = &self.saved_state;
-        if day == saved.day
-            && (side, self.entry) == (saved.side, saved.entry)
-            && self.split_at == saved.split_at
-            && self.controls.opened() == &saved.opened
-        {
-            return;
-        }
-        let state =
-            Saved { day, opened: self.controls.opened().clone(), side, entry: self.entry, split_at: self.split_at };
-        match self.state_file.save(state.clone()).await {
-            Ok(()) => {
-                self.saved_state = state;
-                if self.state_unsaved {
-                    self.state_unsaved = false;
-                    info!(alert_resolved = "day_state_unsaved", "the saved state is written");
-                }
-            }
-            Err(e) => {
-                if !self.state_unsaved {
-                    self.state_unsaved = true;
-                    warn!(alert = "day_state_unsaved", "{e:#}: a restart would not know the day's loss or the holds");
-                }
-            }
-        }
-    }
-}
-
-/// The account's position of `qty` in `market` at `mark`, if it holds one.
-pub(super) fn holding(
-    spec: &MarketSpec,
-    market: MarketId,
-    qty: Fixed,
-    entry: Fixed,
-    mark: Fixed,
-) -> Option<Holding<'_>> {
-    (!qty.is_zero()).then_some(Holding { market, qty, entry, mark, spec })
 }

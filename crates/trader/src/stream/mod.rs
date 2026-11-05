@@ -6,6 +6,7 @@
 
 pub mod message;
 
+use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -13,7 +14,7 @@ use engine_wire::{Connection, Deployment, Error as WireError, FrameError, FrameV
 use futures_util::StreamExt;
 use rand::RngCore;
 use tokio::net::TcpStream;
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_rustls::client::TlsStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -64,9 +65,19 @@ pub struct Stream {
     last: Option<Offset>,
     open: Option<Open>,
     backoff: Duration,
+    /// The earliest the next connection is tried, and the latest the open one may stay silent: both are
+    /// kept here, not in a call, so a caller that drops `next` to attend to something else does not
+    /// restart them.
+    retry_at: Option<Instant>,
+    silent_until: Instant,
+    /// A connection under way.
+    connecting: Option<Connecting>,
     /// Whether the stream is down and has said so, until a frame verifies again.
     down: bool,
 }
+
+/// A connection being made.
+type Connecting = Pin<Box<dyn Future<Output = anyhow::Result<Open>> + Send>>;
 
 /// One open connection and the verifier of its frames.
 struct Open {
@@ -78,7 +89,20 @@ impl Stream {
     /// The log from seq `from` on, from the node `tls` connects to, whose frames `signer` signs for
     /// `deployment`; a connection silent for `idle` is dropped.
     pub fn new(tls: Tls, signer: [u8; 20], deployment: Deployment, idle: Duration, from: u64) -> Self {
-        Self { tls, signer, deployment, idle, from, last: None, open: None, backoff: MIN_BACKOFF, down: false }
+        Self {
+            tls,
+            signer,
+            deployment,
+            idle,
+            from,
+            last: None,
+            open: None,
+            backoff: MIN_BACKOFF,
+            retry_at: None,
+            silent_until: Instant::now(),
+            connecting: None,
+            down: false,
+        }
     }
 
     /// The next message after the last one returned, verified and in order, connecting and
@@ -89,24 +113,42 @@ impl Stream {
     pub async fn next(&mut self) -> Result<Frame, StreamError> {
         loop {
             let Some(open) = self.open.as_mut() else {
-                match self.connect().await {
-                    Ok(open) => self.open = Some(open),
-                    Err(e) => self.drop_connection(&format!("connecting: {e:#}")).await,
+                if let Some(at) = self.retry_at {
+                    sleep_until(at).await;
+                }
+                if self.connecting.is_none() {
+                    self.connecting = Some(self.connect());
+                }
+                let connected = match self.connecting.as_mut() {
+                    Some(connecting) => connecting.await,
+                    None => continue,
+                };
+                self.connecting = None;
+                match connected {
+                    Ok(open) => {
+                        self.open = Some(open);
+                        self.silent_until = Instant::now() + self.idle;
+                    }
+                    Err(e) => self.drop_connection(&format!("connecting: {e:#}")),
                 }
                 continue;
             };
-            let text = match timeout(self.idle, open.ws.next()).await {
+            let text = match timeout_at(self.silent_until, open.ws.next()).await {
                 Ok(Some(Ok(Message::Text(text)))) => text,
                 Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
-                    self.drop_connection("the connection closed").await;
+                    self.drop_connection("the connection closed");
                     continue;
                 }
-                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Ok(_))) => {
+                    self.silent_until = Instant::now() + self.idle;
+                    continue;
+                }
                 Err(_) => {
-                    self.drop_connection(&format!("no frame for {:?}", self.idle)).await;
+                    self.drop_connection(&format!("no frame for {:?}", self.idle));
                     continue;
                 }
             };
+            self.silent_until = Instant::now() + self.idle;
             let frame = match open.verifier.verify_text(text.as_str()) {
                 Ok(frame) => frame,
                 Err(FrameError::Refused(WireError::WrongSigner)) => return Err(StreamError::WrongSigner),
@@ -115,7 +157,7 @@ impl Stream {
                     return Err(StreamError::Unreadable(e.into()));
                 }
                 Err(e) => {
-                    self.drop_connection(&format!("a frame does not verify: {e}")).await;
+                    self.drop_connection(&format!("a frame does not verify: {e}"));
                     continue;
                 }
             };
@@ -127,7 +169,7 @@ impl Stream {
             let Some(offset) = offset else { continue };
             if !self.follows(offset) {
                 let after = self.last.map_or(format!("the start at {}", self.from), |o| o.to_string());
-                self.drop_connection(&format!("message {offset} does not follow {after}")).await;
+                self.drop_connection(&format!("message {offset} does not follow {after}"));
                 continue;
             }
             self.last = Some(offset);
@@ -144,32 +186,36 @@ impl Stream {
     }
 
     /// Opens a connection from the start, or right after the last message returned, under a fresh
-    /// challenge that every frame on it must be signed under.
-    /// Error cases:
+    /// challenge that every frame on it must be signed under. The future is kept in `connecting`, so a
+    /// caller that drops `next` does not abandon a handshake that is under way.
+    /// Error cases (of the future):
     /// - the connection, its TLS handshake, or its WebSocket upgrade fails or takes longer than `idle`
-    async fn connect(&self) -> anyhow::Result<Open> {
-        let mut challenge = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut challenge);
+    fn connect(&self) -> Connecting {
+        let (tls, signer, deployment, idle) = (self.tls.clone(), self.signer, self.deployment, self.idle);
         let start = match self.last {
             Some(last) => format!("after={last}"),
             None => format!("from={}", self.from),
         };
-        let path = format!("/v1/stream?{start}&signed=1&challenge={}", hex::encode(challenge));
-        let request = format!("wss://{}{path}", self.tls.url().authority()).into_client_request()?;
-        let open = async {
-            let tls = self.tls.connect().await?;
-            let (ws, _) = client_async(request, tls).await?;
-            anyhow::Ok(ws)
-        };
-        let ws = timeout(self.idle, open).await.context("no connection in time")??;
-        info!(start, "stream connected");
-        let verifier = FrameVerifier::new(self.signer, self.deployment, Connection::new(challenge, &path));
-        Ok(Open { ws, verifier })
+        Box::pin(async move {
+            let mut challenge = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut challenge);
+            let path = format!("/v1/stream?{start}&signed=1&challenge={}", hex::encode(challenge));
+            let request = format!("wss://{}{path}", tls.url().authority()).into_client_request()?;
+            let open = async {
+                let tls = tls.connect().await?;
+                let (ws, _) = client_async(request, tls).await?;
+                anyhow::Ok(ws)
+            };
+            let ws = timeout(idle, open).await.context("no connection in time")??;
+            info!(start, "stream connected");
+            let verifier = FrameVerifier::new(signer, deployment, Connection::new(challenge, &path));
+            Ok(Open { ws, verifier })
+        })
     }
 
-    /// Closes the connection after `reason`, says so once per outage, and waits before the next
+    /// Closes the connection after `reason`, says so once per outage, and sets the time before the next
     /// attempt, longer after each failure up to `MAX_BACKOFF`.
-    async fn drop_connection(&mut self, reason: &str) {
+    fn drop_connection(&mut self, reason: &str) {
         self.open = None;
         if !self.down {
             warn!(alert = "stream_down", resume_after = ?self.last, "the stream is down: {reason}; reconnecting");
@@ -177,7 +223,7 @@ impl Stream {
         } else {
             info!(resume_after = ?self.last, backoff = ?self.backoff, "the stream is still down: {reason}");
         }
-        sleep(self.backoff).await;
+        self.retry_at = Some(Instant::now() + self.backoff);
         self.backoff = (self.backoff * 2).min(MAX_BACKOFF);
     }
 
