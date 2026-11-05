@@ -122,12 +122,15 @@ accounts declare --class professional "${confirm[@]}" < /dev/null
 for account in "${addresses[@]}"; do
   [[ "$(node_get "/v1/accounts/$account/eligibility" | jq -r .class)" == professional ]] || fail "$account did not declare"
 done
+# The vault already holds the house's capital.
+vault_before="$(usdc_of "$dev_stack_vault")"
 accounts deposit --amount 1000 < /dev/null
 for account in "${addresses[@]}"; do
   same "$(node_balance "$account")" 1000 || fail "$account's balance is $(node_balance "$account"), not 1000"
   [[ "$(usdc_of "$account")" == 500000000 ]] || fail "$account's wallet holds $(usdc_of "$account") USDC base units"
 done
-[[ "$(usdc_of "$dev_stack_vault")" == 3000000000 ]] || fail "the vault holds $(usdc_of "$dev_stack_vault") USDC base units"
+[[ "$(usdc_of "$dev_stack_vault")" == $(( vault_before + 3000000000 )) ]] \
+  || fail "the vault holds $(usdc_of "$dev_stack_vault") USDC base units, not 3,000 USDC more"
 accounts status < /dev/null
 
 step "record a MONKEY emission schedule that starts in ten seconds"
