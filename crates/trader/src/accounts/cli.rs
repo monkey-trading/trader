@@ -18,11 +18,9 @@ use crate::accounts::claim::Claimed;
 use crate::accounts::declare::{Confirmed, Declared};
 use crate::accounts::deposit::{Deposited, Source};
 use crate::accounts::{AccountStatus, Lifecycle, USDC_DECIMALS};
+use crate::bot::{UNLOCKS_AT_ONCE, label};
 use crate::config::{Config, MONKEY_DECIMALS};
 use crate::keys::AccountKey;
-
-/// How many keystores are decrypted at once: key derivation is slow by design.
-const UNLOCK_AT_ONCE: usize = 8;
 
 /// What `trader accounts` does for each account.
 #[derive(Debug, Subcommand)]
@@ -75,11 +73,13 @@ impl From<Class> for EligibilityClass {
 
 /// Runs `action` for the accounts of `cfg` that `only` names, or all of them, unlocking keys with
 /// `env`, and writes each account's outcome to `out`; a declaration asks the user to confirm when
-/// `terminal`, as when standard input is one.
+/// `terminal`, as when standard input is one. A key that does not unlock, or an account listed
+/// twice, is reported under its key's path, as the bot reports it, and the others carry on.
 /// Error cases:
-/// - `only` or a confirmation names an account the config does not
-/// - a key does not load, or the lifecycle cannot connect (see `Lifecycle::connect`)
-/// - the action fails for any account
+/// - no key unlocks, `only` names an account none does, or a confirmation names one the config
+///   does not
+/// - the lifecycle cannot connect (see `Lifecycle::connect`)
+/// - the action fails for any account, or, without `only`, a key does not unlock or is listed twice
 pub async fn run(
     cfg: Config,
     only: Vec<AccountId>,
@@ -89,18 +89,35 @@ pub async fn run(
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
     let mut keys: Vec<AccountKey> = Vec::with_capacity(cfg.plans.len());
-    for chunk in cfg.plans.chunks(UNLOCK_AT_ONCE) {
-        for key in join_all(chunk.iter().map(|plan| AccountKey::load(&plan.key, &env))).await {
-            let key = key?;
-            if !keys.iter().any(|known| known.address() == key.address()) {
-                keys.push(key);
+    let mut unusable = Vec::new();
+    for chunk in cfg.plans.chunks(UNLOCKS_AT_ONCE) {
+        let loaded = join_all(chunk.iter().map(|plan| AccountKey::load(&plan.key, &env))).await;
+        for (plan, key) in chunk.iter().zip(loaded) {
+            match key {
+                Ok(key) if keys.iter().any(|known| known.address() == key.address()) => {
+                    unusable.push(format!("{}: {} is listed twice", label(plan), key.address()));
+                }
+                Ok(key) => keys.push(key),
+                Err(e) => unusable.push(format!("{}: {e:#}", label(plan))),
             }
         }
     }
     if let Some(unknown) = only.iter().find(|account| !keys.iter().any(|key| key.address() == **account)) {
-        bail!("the config has no account {unknown}");
+        let why = if unusable.is_empty() { String::new() } else { format!(" ({})", unusable.join("; ")) };
+        bail!("the config has no account {unknown} whose key unlocks{why}");
     }
-    keys.retain(|key| only.is_empty() || only.contains(&key.address()));
+    if !only.is_empty() {
+        keys.retain(|key| only.contains(&key.address()));
+        unusable.clear();
+    }
+    if keys.is_empty() {
+        bail!("no account's key unlocks: {}", unusable.join("; "));
+    }
+    for line in &unusable {
+        writeln!(out, "{line}")?;
+    }
+    let mut failed = unusable.len();
+    let accounts = keys.len() + unusable.len();
     let lifecycle = Lifecycle::connect(&cfg, &env).await?;
     let confirmed = match &action {
         Action::Declare { class, confirm } => {
@@ -108,7 +125,6 @@ pub async fn run(
         }
         _ => Vec::new(),
     };
-    let mut failed = 0;
     for key in &keys {
         let account = key.address();
         let outcome = match &action {
@@ -159,7 +175,7 @@ pub async fn run(
         }
     }
     if failed > 0 {
-        bail!("{failed} of {} accounts failed", keys.len());
+        bail!("{failed} of {accounts} accounts failed");
     }
     Ok(())
 }

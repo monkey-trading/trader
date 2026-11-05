@@ -23,7 +23,7 @@ use crate::node::{CallError, Node, Tls};
 use crate::stream::Stream;
 
 /// How many keystores are decrypted at once: key derivation is slow by design.
-const UNLOCKS_AT_ONCE: usize = 8;
+pub(crate) const UNLOCKS_AT_ONCE: usize = 8;
 
 /// A future that completes on SIGINT or SIGTERM.
 /// Error cases:
@@ -179,7 +179,7 @@ fn account_in(
 }
 
 /// What names an account in a report before its address is known: its key file.
-fn label(plan: &AccountPlan) -> String {
+pub(crate) fn label(plan: &AccountPlan) -> String {
     match &plan.key {
         KeySource::Keystore { path, .. } | KeySource::HexFile { path } => path.display().to_string(),
     }
