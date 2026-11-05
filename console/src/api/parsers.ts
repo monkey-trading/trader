@@ -1,6 +1,7 @@
 /** Parsers that turn the bot's JSON bodies and feed messages into typed values. */
+import { isDecimal } from "@/lib/decimal";
 import {
-  baseUnits, choice, count, decimal, flag, integer, items, list, nullableBaseUnits, nullableDecimal, nullableInteger,
+  baseUnits, choice, count, decimal, flag, items, list, MAX_TEXT, nullableBaseUnits, nullableDecimal, nullableInteger,
   nullableText, object, ShapeError, text, type Fields,
 } from "@/lib/shape";
 
@@ -75,25 +76,42 @@ function figuresOf(fields: Fields): Figures {
   };
 }
 
-/** Reads a `[low, high]` pair of whole numbers. */
-function boundsOf(value: unknown): readonly [number, number] {
-  const pair = list(value, "bounds");
-  const [low, high] = pair;
-  if (pair.length !== 2 || typeof low !== "number" || typeof high !== "number" || !Number.isSafeInteger(low) || !Number.isSafeInteger(high)) {
-    throw new ShapeError("bounds is not a pair of integers");
+/** Reads a parameter's value or bound: a whole number, or a decimal string as the config writes one. */
+function paramValue(value: unknown, name: string): { readonly kind: "integer" | "decimal"; readonly text: string } {
+  if (typeof value === "number" && Number.isSafeInteger(value)) {
+    return { kind: "integer", text: String(value) };
   }
-  return [low, high];
+  if (typeof value === "string" && value.length <= MAX_TEXT && isDecimal(value)) {
+    return { kind: "decimal", text: value };
+  }
+  throw new ShapeError(`${name} is not a whole number or a decimal string`);
 }
 
-/** Pairs each period the strategy runs with the bounds the console may set it within. */
+/** Reads a `[low, high]` pair of parameter values. */
+function boundsOf(value: unknown, name: string): readonly [string, string] {
+  const pair = list(value, `${name} bounds`);
+  const [low, high] = pair;
+  if (pair.length !== 2) {
+    throw new ShapeError(`${name} bounds is not a pair`);
+  }
+  return [paramValue(low, name).text, paramValue(high, name).text];
+}
+
+/**
+ * Pairs each parameter the strategy runs with the bounds the console may set it within. A `kind` entry in the
+ * parameters names the strategy, as the config's does, and is not a parameter; a parameter missing from the bounds
+ * is not the console's to change.
+ */
 function paramsOf(fields: Fields): readonly Param[] {
   const params = object(fields["params"], "params");
   const bounds = fields["bounds"] === null ? null : object(fields["bounds"], "bounds");
-  return Object.keys(params).map((name) => ({
-    name,
-    value: integer(params, name),
-    bounds: bounds === null ? null : boundsOf(bounds[name]),
-  }));
+  return Object.keys(params)
+    .filter((name) => name !== "kind")
+    .map((name) => {
+      const { kind, text: value } = paramValue(params[name], name);
+      const limits = bounds?.[name];
+      return { name, kind, value, bounds: limits === undefined ? null : boundsOf(limits, name) };
+    });
 }
 
 function strategyOf(fields: Fields): Strategy {

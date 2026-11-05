@@ -20,8 +20,8 @@ describe("readOverview", () => {
           {
             id: 0, kind: "sma_crossover", market: "BTC-USD", bar: "1m", running: true, warmedUp: true, target: "long",
             params: [
-              { name: "fast", value: 5, bounds: [2, 50] },
-              { name: "slow", value: 20, bounds: [5, 200] },
+              { name: "fast", kind: "integer", value: "5", bounds: ["2", "50"] },
+              { name: "slow", kind: "integer", value: "20", bounds: ["5", "200"] },
             ],
           },
         ],
@@ -53,9 +53,38 @@ describe("readOverview", () => {
       }),
     );
     expect(parsed.status === "ok" && parsed.value.strategies[0]?.params).toEqual([
-      { name: "fast", value: 5, bounds: null },
-      { name: "slow", value: 20, bounds: null },
+      { name: "fast", kind: "integer", value: "5", bounds: null },
+      { name: "slow", kind: "integer", value: "20", bounds: null },
     ]);
+  });
+
+  it("reads the config's other parameter kinds: decimals as strings, and a kind entry that names the strategy", () => {
+    const parsed = parseWith(
+      readAccount,
+      viewBody({
+        strategies: [
+          {
+            id: 0, kind: "bollinger_reversion", market: "BTC-USD", bar: "5m", running: true, warmed_up: true, target: null,
+            params: { kind: "bollinger_reversion", period: 20, width: "1.5" },
+            bounds: { period: [5, 100], width: ["0.5", "4"] },
+          },
+        ],
+      }),
+    );
+    expect(parsed.status === "ok" && parsed.value.strategies[0]?.params).toEqual([
+      { name: "period", kind: "integer", value: "20", bounds: ["5", "100"] },
+      { name: "width", kind: "decimal", value: "1.5", bounds: ["0.5", "4"] },
+    ]);
+  });
+
+  it("leaves a parameter the bounds do not name read-only, and refuses a float or an exponent for one", () => {
+    const strategy = (params: Record<string, unknown>) =>
+      parseWith(readAccount, viewBody({ strategies: [{ id: 0, kind: "macd", market: "BTC-USD", bar: "1m", running: true, warmed_up: true, target: null, params, bounds: { fast: [2, 50] } }] }));
+    expect(strategy({ fast: 12, signal: 9 }).status === "ok" && strategy({ fast: 12, signal: 9 })).toMatchObject({
+      value: { strategies: [{ params: [{ name: "fast", bounds: ["2", "50"] }, { name: "signal", bounds: null }] }] },
+    });
+    expect(strategy({ fast: 1.5 }).status).toBe("invalid");
+    expect(strategy({ fast: "1e3" }).status).toBe("invalid");
   });
 
   it("refuses a missing field and names it", () => {

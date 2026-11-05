@@ -51,12 +51,14 @@ export interface Figures {
   readonly timeMs: number;
 }
 
-/** One adjustable parameter of a strategy. */
+/** One adjustable parameter of a strategy: a whole number of bars, or a decimal such as a band width. */
 export interface Param {
   readonly name: string;
-  readonly value: number;
+  readonly kind: "integer" | "decimal";
+  /** The value as a decimal string. */
+  readonly value: string;
   /** The lowest and highest value the bot's config lets the console set; null when it lets none. */
-  readonly bounds: readonly [number, number] | null;
+  readonly bounds: readonly [string, string] | null;
 }
 
 /** A strategy and its state. */

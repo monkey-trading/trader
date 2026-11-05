@@ -44,6 +44,7 @@ export function StrategyCard({ address, strategy }: { readonly address: string; 
         key={strategy.params.map((param) => param.value).join("|")}
         address={address}
         strategyId={strategy.id}
+        kind={strategy.kind}
         params={strategy.params}
       />
     </section>

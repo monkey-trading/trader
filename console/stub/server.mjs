@@ -118,16 +118,17 @@ async function control(request, response, parts) {
       item.strategy.running = action === "start";
     } else {
       const bounds = item.strategy.bounds;
-      for (const name of Object.keys(item.strategy.params)) {
-        const value = body?.[name];
-        if (bounds === null || !Number.isSafeInteger(value) || value < bounds[name][0] || value > bounds[name][1]) {
+      const names = Object.keys(item.strategy.params).filter((name) => name !== "kind");
+      for (const name of names) {
+        const value = Number(body?.[name]);
+        if (bounds === null || Number.isNaN(value) || value < Number(bounds[name][0]) || value > Number(bounds[name][1])) {
           return send(response, 422, { error: `${name} is outside its bounds` });
         }
       }
       if (body.fast >= body.slow) {
         return send(response, 422, { error: "fast must be below slow" });
       }
-      item.strategy.params = { fast: body.fast, slow: body.slow };
+      item.strategy.params = { kind: item.strategy.kind, ...Object.fromEntries(names.map((name) => [name, body[name]])) };
     }
   } else {
     return send(response, 404, { error: "not found" });

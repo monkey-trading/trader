@@ -2,7 +2,7 @@
 import { useId, useState, type SubmitEvent } from "react";
 
 import type { Param } from "@/api/types";
-import { checkParams } from "@/lib/params";
+import { checkParams, wireValue } from "@/lib/params";
 
 import { BUTTON_CLASS } from "./ActionButton";
 import { useServices } from "./app-context";
@@ -11,14 +11,16 @@ import { useAction } from "./use-action";
 interface ParamsFormProps {
   readonly address: string;
   readonly strategyId: number;
+  /** The strategy's kind, which the bot's parameter body names as the config does. */
+  readonly kind: string;
   readonly params: readonly Param[];
 }
 
 /** Edits the periods. The parent keys this by the saved values, so a save resets the drafts. */
-export function ParamsForm({ address, strategyId, params }: ParamsFormProps) {
+export function ParamsForm({ address, strategyId, kind, params }: ParamsFormProps) {
   const { api } = useServices();
   const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>(
-    () => Object.fromEntries(params.map((param) => [param.name, String(param.value)])),
+    () => Object.fromEntries(params.map((param) => [param.name, param.value])),
   );
   const [problems, setProblems] = useState<Readonly<Record<string, string>>>({});
   const action = useAction(address);
@@ -28,7 +30,7 @@ export function ParamsForm({ address, strategyId, params }: ParamsFormProps) {
   if (editable.length === 0) {
     return (
       <p className="mt-2 text-sm text-muted">
-        {params.map((param) => `${param.name} ${String(param.value)}`).join(", ")}. The bot's config does not let the
+        {params.map((param) => `${param.name} ${param.value}`).join(", ")}. The bot's config does not let the
         console change these.
       </p>
     );
@@ -36,15 +38,15 @@ export function ParamsForm({ address, strategyId, params }: ParamsFormProps) {
 
   const onSubmit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const checked = checkParams(editable.map((param) => ({ name: param.name, draft: drafts[param.name] ?? "", bounds: param.bounds })));
+    const checked = checkParams(editable.map((param) => ({ name: param.name, kind: param.kind, draft: drafts[param.name] ?? "", bounds: param.bounds })));
     if (checked.status === "invalid") {
       setProblems(checked.problems);
       return;
     }
     setProblems({});
-    // The bot takes every period together; one that is not editable keeps the value it has.
-    const all = Object.fromEntries(params.map((param) => [param.name, param.value]));
-    action.run(() => api.setParams(address, strategyId, { ...all, ...checked.values }));
+    // The bot takes every parameter together, named by the strategy's kind; one that is not editable keeps its value.
+    const all = Object.fromEntries(params.map((param) => [param.name, wireValue(param.kind, param.value)]));
+    action.run(() => api.setParams(address, strategyId, { kind, ...all, ...checked.values }));
   };
 
   return (
@@ -60,8 +62,8 @@ export function ParamsForm({ address, strategyId, params }: ParamsFormProps) {
             <input
               id={id}
               type="text"
-              inputMode="numeric"
-              maxLength={9}
+              inputMode="decimal"
+              maxLength={32}
               value={drafts[param.name] ?? ""}
               aria-invalid={problem !== undefined}
               aria-describedby={`${id}-help`}
@@ -71,7 +73,7 @@ export function ParamsForm({ address, strategyId, params }: ParamsFormProps) {
               className="min-h-9 rounded border border-line bg-surface px-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             />
             <p id={`${id}-help`} className={`text-sm ${problem === undefined ? "text-muted" : "text-loss"}`}>
-              {problem ?? `From ${String(param.bounds[0])} to ${String(param.bounds[1])} bars.`}
+              {problem ?? `From ${param.bounds[0]} to ${param.bounds[1]}.`}
             </p>
           </div>
         );

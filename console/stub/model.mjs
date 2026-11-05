@@ -63,6 +63,13 @@ export function createModel(now) {
     ]),
     account(3, "800", [], []),
   ];
+  // The second account runs a strategy with a decimal parameter, written as the config writes it.
+  accounts[1].strategy = {
+    ...accounts[1].strategy,
+    kind: "bollinger_reversion",
+    params: { kind: "bollinger_reversion", period: 20, width: "2" },
+    bounds: { period: [5, 100], width: ["0.5", "4"] },
+  };
   // The third account's periods are not the console's to change, and its strategy refuses to start.
   accounts[2].strategy.running = false;
   accounts[2].strategy.bounds = null;

@@ -62,25 +62,26 @@ describe("curve", () => {
 });
 
 describe("checkParams", () => {
-  const fast = { name: "fast", draft: "5", bounds: [2, 50] } as const;
-  const slow = { name: "slow", draft: " 20 ", bounds: [5, 200] } as const;
+  const fast = { name: "fast", kind: "integer", draft: "5", bounds: ["2", "50"] } as const;
+  const slow = { name: "slow", kind: "integer", draft: " 20 ", bounds: ["5", "200"] } as const;
+  const width = { name: "width", kind: "decimal", draft: "1.5", bounds: ["0.5", "4"] } as const;
 
-  it("sends whole numbers, trimmed", () => {
-    expect(checkParams([fast, slow])).toEqual({ status: "ok", values: { fast: 5, slow: 20 } });
+  it("sends whole numbers as numbers and decimals as strings, trimmed", () => {
+    expect(checkParams([fast, slow, width])).toEqual({ status: "ok", values: { fast: 5, slow: 20, width: "1.5" } });
   });
 
   it("accepts the bounds themselves and refuses one step beyond", () => {
-    expect(checkParams([{ ...fast, draft: "2" }, { ...slow, draft: "200" }]).status).toBe("ok");
-    expect(checkParams([{ ...fast, draft: "1" }, { ...slow, draft: "201" }])).toEqual({
+    expect(checkParams([{ ...fast, draft: "2" }, { ...width, draft: "4" }]).status).toBe("ok");
+    expect(checkParams([{ ...fast, draft: "1" }, { ...width, draft: "4.001" }])).toEqual({
       status: "invalid",
-      problems: { fast: "Enter a value from 2 to 50.", slow: "Enter a value from 5 to 200." },
+      problems: { fast: "Enter a value from 2 to 50.", width: "Enter a value from 0.5 to 4." },
     });
   });
 
   it("names each problem at its field and sends nothing", () => {
-    expect(checkParams([{ ...fast, draft: "5.5" }, { ...slow, draft: "-3" }, { name: "x", draft: "", bounds: [1, 2] }])).toEqual({
+    expect(checkParams([{ ...fast, draft: "5.5" }, { ...slow, draft: "-3" }, { ...width, draft: "1e3" }])).toEqual({
       status: "invalid",
-      problems: { fast: "Enter a whole number.", slow: "Enter a whole number.", x: "Enter a whole number." },
+      problems: { fast: "Enter a whole number.", slow: "Enter a whole number.", width: "Enter a decimal number." },
     });
   });
 });

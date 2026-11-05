@@ -19,7 +19,7 @@ export interface Api {
   setAccountRunning(address: string, running: boolean): Promise<Outcome<null>>;
   flatten(address: string): Promise<Outcome<null>>;
   setStrategyRunning(address: string, strategyId: number, running: boolean): Promise<Outcome<null>>;
-  setParams(address: string, strategyId: number, params: Readonly<Record<string, number>>): Promise<Outcome<null>>;
+  setParams(address: string, strategyId: number, params: Readonly<Record<string, string | number>>): Promise<Outcome<null>>;
 }
 
 /** The routes of the bot's console API, the one place their paths are written. */

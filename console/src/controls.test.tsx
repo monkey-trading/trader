@@ -141,7 +141,7 @@ describe("parameter form", () => {
     expect(field).toHaveAttribute("aria-invalid", "true");
   });
 
-  it("sends every period, the edited one changed, as numbers", async () => {
+  it("sends every parameter with the strategy's kind, the edited one changed", async () => {
     const api = stubApi();
     const user = userEvent.setup();
     mount(api, PAGE);
@@ -150,7 +150,7 @@ describe("parameter form", () => {
     await user.clear(field);
     await user.type(field, "8{Enter}");
 
-    expect(api.setParams).toHaveBeenCalledExactlyOnceWith(ADDRESS, 0, { fast: 8, slow: 20 });
+    expect(api.setParams).toHaveBeenCalledExactlyOnceWith(ADDRESS, 0, { kind: "sma_crossover", fast: 8, slow: 20 });
   });
 
   it("shows the bot's refusal of the periods under the form", async () => {
@@ -162,6 +162,28 @@ describe("parameter form", () => {
     await user.click(await screen.findByRole("button", { name: "Save parameters" }));
 
     expect(await screen.findByText("Failed: fast must be below slow")).toBeInTheDocument();
+  });
+
+  it("takes a decimal parameter as text and sends it as a string beside the whole-number ones", async () => {
+    const bollinger = {
+      id: 0, kind: "bollinger_reversion", market: "BTC-USD", bar: "5m", running: true, warmed_up: true, target: null,
+      params: { kind: "bollinger_reversion", period: 20, width: "1.5" },
+      bounds: { period: [5, 100], width: ["0.5", "4"] },
+    };
+    const api = stubApi(overviewBody([viewBody({ strategies: [bollinger] })]));
+    const user = userEvent.setup();
+    mount(api, PAGE);
+
+    const width = await screen.findByLabelText("width");
+    expect(screen.getByRole("region", { name: "Bollinger band reversion on BTC-USD" })).toBeInTheDocument();
+    await user.clear(width);
+    await user.type(width, "4.5{Enter}");
+    expect(api.setParams).not.toHaveBeenCalled();
+    expect(screen.getByText("Enter a value from 0.5 to 4.")).toBeInTheDocument();
+
+    await user.clear(width);
+    await user.type(width, "2.25{Enter}");
+    expect(api.setParams).toHaveBeenCalledExactlyOnceWith(ADDRESS, 0, { kind: "bollinger_reversion", period: 20, width: "2.25" });
   });
 
   it("shows the periods read-only when the config sets no bounds", async () => {
