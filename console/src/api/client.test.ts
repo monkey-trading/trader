@@ -64,6 +64,38 @@ describe("createApi", () => {
     });
   });
 
+  it("says in words when a request was too slow or too large, whatever the body", async () => {
+    const slow = () => Promise.resolve(new Response("", { status: 408 }));
+    const large = () => Promise.resolve(new Response("payload too large", { status: 413 }));
+    expect(await createApi(slow).setParams("0xabc", 0, { fast: 5 })).toEqual({
+      status: "refused", message: "The request took too long to send, so the bot dropped it.", retryAfterSeconds: null,
+    });
+    expect(await createApi(large).login("x")).toEqual({
+      status: "refused", message: "The request was too large for the bot to take.", retryAfterSeconds: null,
+    });
+  });
+
+  it("carries a refusal of a start during a flatten and of a bad parameter update as the bot words it", async () => {
+    const refuse = (error: string) => () => Promise.resolve(new Response(JSON.stringify({ error }), { status: 422 }));
+    expect(await createApi(refuse("the account is flattening")).setAccountRunning("0xabc", true)).toEqual({
+      status: "refused", message: "the account is flattening", retryAfterSeconds: null,
+    });
+    expect((await createApi(refuse("kind does not match the strategy")).setParams("0xabc", 0, { kind: "macd" })).status).toBe("refused");
+  });
+
+  it("reads a flatten the bot ran but could not save the stop of as done, with the bot's warning", async () => {
+    const message = "the account is flattened; the stop holds, but was not saved, so a restart may start it again";
+    const { fetchFn } = fakeFetch(500, { error: message });
+    expect(await createApi(fetchFn).flatten("0xabc")).toEqual({ status: "ok", value: { warning: message } });
+  });
+
+  it("keeps any other 500 of a flatten, and of any other control, a failure", async () => {
+    const { fetchFn } = fakeFetch(500, { error: "internal error" });
+    expect(await createApi(fetchFn).flatten("0xabc")).toEqual({ status: "unavailable", message: "internal error" });
+    const same = fakeFetch(500, { error: "the account is flattened; the stop holds, but was not saved" });
+    expect((await createApi(same.fetchFn).setAccountRunning("0xabc", false)).status).toBe("unavailable");
+  });
+
   it("treats a server error and a dead connection as unavailable", async () => {
     const { fetchFn } = fakeFetch(504, { error: "the account has not answered yet; it may still act on the request" });
     expect((await createApi(fetchFn).flatten("0xabc")).status).toBe("unavailable");

@@ -31,7 +31,7 @@ function FlattenControl({ address }: { readonly address: string }) {
         >
           {action.pending ? "Flattening…" : "Flatten account"}
         </button>
-        <ActionError error={action.error} />
+        <ActionError error={action.error} warning={action.warning} />
       </div>
     );
   }

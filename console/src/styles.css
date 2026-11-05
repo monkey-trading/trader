@@ -12,6 +12,7 @@
   --color-accent: #1d4ed8;
   --color-gain: #166534;
   --color-loss: #b91c1c;
+  --color-warn: #92400e;
 }
 
 /* The dark theme follows the system setting and redefines the same tokens. */
@@ -25,6 +26,7 @@
     --color-accent: #93c5fd;
     --color-gain: #4ade80;
     --color-loss: #f87171;
+    --color-warn: #fbbf24;
   }
 }
 

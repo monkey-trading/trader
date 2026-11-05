@@ -69,6 +69,17 @@ describe("App", () => {
     expect(screen.getByText("Totals cover 1 of 2 accounts: the rest have no figures yet.")).toBeInTheDocument();
   });
 
+  it("shows an account the bot halted, with the reason, on the overview and on its page", async () => {
+    const halted = viewBody({ state: "halted", halt: "an answer was signed by another key than the node's signer" });
+    const user = userEvent.setup();
+    mount(stubApi(overviewBody([halted])));
+
+    expect(await screen.findByText("halted (an answer was signed by another key than the node's signer)")).toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "0x1111…1111" }));
+    expect(await screen.findByText(/The account stopped on its own/)).toBeInTheDocument();
+    expect(screen.getByText(/halted \(an answer was signed by another key/)).toBeInTheDocument();
+  });
+
   it("opens an account page from the overview and shows its tables, strategies and fills", async () => {
     const user = userEvent.setup();
     mount(stubApi());

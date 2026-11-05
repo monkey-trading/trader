@@ -128,6 +128,8 @@ async function control(request, response, parts) {
       if (body.fast >= body.slow) {
         return send(response, 422, { error: "fast must be below slow" });
       }
+      // The bot builds a new strategy for new parameters, which warms up again from the marks history.
+      item.strategy.warmed_up = false;
       item.strategy.params = { kind: item.strategy.kind, ...Object.fromEntries(names.map((name) => [name, body[name]])) };
     }
   } else {

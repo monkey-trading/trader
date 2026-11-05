@@ -173,6 +173,7 @@ export function tick(model) {
   }
   const messages = [];
   for (const item of model.accounts) {
+    item.strategy.warmed_up = true;
     item.curve = [...item.curve, { time_ms: model.now(), equity: text(equity(model, item)) }].slice(-1440);
     messages.push({ type: "account", account: view(model, item) });
   }

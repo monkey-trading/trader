@@ -125,6 +125,60 @@ describe("account controls", () => {
   });
 });
 
+describe("what the bot says of a control", () => {
+  it("shows a flatten whose stop was not saved as done with a warning, not as a failure, and reads the account", async () => {
+    const api = stubApi();
+    const message = "the account is flattened; the stop holds, but was not saved, so a restart may start it again";
+    api.flatten.mockResolvedValue({ status: "ok", value: { warning: message } });
+    const user = userEvent.setup();
+    mount(api, PAGE);
+
+    await user.click(await screen.findByRole("button", { name: "Flatten account" }));
+    const accountReads = api.account.mock.calls.length;
+    await user.click(await screen.findByRole("button", { name: "Confirm flatten" }));
+
+    const warning = await screen.findByText(`Done, with a warning: ${message}`);
+    expect(warning).toHaveClass("text-warn");
+    expect(screen.queryByText(/^Failed:/)).not.toBeInTheDocument();
+    await waitFor(() => { expect(api.account.mock.calls.length).toBeGreaterThan(accountReads); });
+  });
+
+  it("shows a start the bot refuses during a flatten at the strategy's start control", async () => {
+    const api = stubApi(overviewBody([viewBody({ strategies: [{ ...readStrategyBody(), running: false }] })]));
+    api.setStrategyRunning.mockResolvedValue({
+      status: "refused", message: "the account is flattening; start it once it has", retryAfterSeconds: null,
+    });
+    const user = userEvent.setup();
+    mount(api, PAGE);
+
+    await user.click(await screen.findByRole("button", { name: "Start strategy" }));
+
+    const card = screen.getByRole("region", { name: "SMA crossover on BTC-USD" });
+    expect(await within(card).findByText("Failed: the account is flattening; start it once it has")).toBeInTheDocument();
+  });
+
+  it("shows a request the bot dropped as too slow or too large at the control that sent it", async () => {
+    const api = stubApi();
+    api.setParams.mockResolvedValue({ status: "refused", message: "The request was too large for the bot to take.", retryAfterSeconds: null });
+    const user = userEvent.setup();
+    mount(api, PAGE);
+
+    await user.click(await screen.findByRole("button", { name: "Save parameters" }));
+
+    expect(await screen.findByText("Failed: The request was too large for the bot to take.")).toBeInTheDocument();
+  });
+
+  it("shows a strategy as warming up while the bot has not warmed it, and drops the note once it has", async () => {
+    const cold = { ...readStrategyBody(), warmed_up: false, target: null };
+    const { feeds } = mount(stubApi(overviewBody([viewBody({ strategies: [cold] })])), PAGE);
+
+    expect(await screen.findByText(/, warming up/)).toBeInTheDocument();
+
+    feeds[0]?.onMessage(JSON.stringify({ type: "account", account: viewBody() }));
+    await waitFor(() => { expect(screen.queryByText(/warming up/)).not.toBeInTheDocument(); });
+  });
+});
+
 describe("parameter form", () => {
   it("refuses a value outside the bounds at its field and sends nothing", async () => {
     const api = stubApi();
