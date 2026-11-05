@@ -75,7 +75,8 @@ impl Runner {
         if node_ms.saturating_sub(fleet.log_ts) > REPLAY_LAG_MS {
             return Some(true);
         }
-        if account.busy || account.state_dirty || account.state_saving || account.state_unsaved {
+        // Closes are asked for on an account at the log; one queued before it was not waits for a read.
+        if account.busy || account.behind || account.state_dirty || account.state_saving || account.state_unsaved {
             return Some(true);
         }
         let Nonce::Synced(nonce) = account.nonce else {
@@ -96,8 +97,8 @@ impl Runner {
                 return Some(true);
             }
         };
-        // One request closes the markets that share a slippage bound, the tightest first: no market
-        // closes under another's looser bound. The others follow on the next try.
+        // One request closes the markets that share a slippage bound, the groups in turn: no market closes
+        // under another's looser bound. The others follow on the next try.
         let quoted_held: Vec<Held> = held
             .iter()
             .filter_map(|&a| {

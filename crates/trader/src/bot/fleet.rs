@@ -114,7 +114,8 @@ pub struct Account {
     /// came after it was started: its answer is then not used.
     pub reading: bool,
     pub read_stale: bool,
-    /// Moves on at each fill and cash event of the account: an order decided before one is not sent after it.
+    /// Moves on at each fill, cash event and relisting of the account's market: an order decided before one is
+    /// not sent after it.
     pub epoch: u64,
     /// Whether the account is waiting in `Fleet::flattens`.
     pub flatten_queued: bool,
@@ -178,6 +179,8 @@ pub struct Pending {
     pub ts: Millis,
     /// The account's `epoch` when the order was decided.
     pub epoch: u64,
+    /// The target it was decided from, to decide again if the account changes before it is sent.
+    pub wanted: Wanted,
 }
 
 /// Where a series stands in its warm-up from the node's marks history.

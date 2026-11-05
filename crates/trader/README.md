@@ -109,6 +109,8 @@ answer that fails the check is an error, never data, and one signed by another k
 - `src/bot/fills.rs`: the accounts' fills and the check that they are the bot's own
 - `src/bot/run.rs`: `Runner`: the fleet's decisions turned into requests, in one task
 - `src/bot/orders.rs`: the signed market orders, nonces, and what an answer does to an account
+- `src/bot/flatten.rs`: the daily loss limit's close of an account, one slippage group at a time
+- `src/bot/reads.rs`: the reads of accounts, taken in the order they were started, and the writes of their state
 - `src/bot/startup.rs`: unlocking the keys, the startup reads, and the stop signals
 - `src/bot/stop.rs`: the stop: the wait for the log, then each account's signed cancel and close,
   and the check

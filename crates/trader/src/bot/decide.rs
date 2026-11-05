@@ -237,7 +237,7 @@ impl Fleet {
                 }
                 let epoch = self.accounts[idx as usize].epoch;
                 let asg = &mut self.assignments[a as usize];
-                asg.pending = Some(Pending { intent, bar_start: w.bar_start, ts: w.ts, epoch });
+                asg.pending = Some(Pending { intent, bar_start: w.bar_start, ts: w.ts, epoch, wanted: w });
                 self.decisions += 1;
                 if !asg.queued {
                     asg.queued = true;
@@ -271,8 +271,12 @@ impl Fleet {
     }
 
     /// Drops the order assignment `a` has queued, and asks for a read if a target of its account waits.
-    pub(super) fn drop_pending(&mut self, a: u32) {
+    /// With `again`, its own target waits too, to be decided on the account as it now is.
+    pub(super) fn drop_pending(&mut self, a: u32, again: bool) {
         let asg = &mut self.assignments[a as usize];
+        if let (true, Some(pending), None) = (again, asg.pending, asg.wanted) {
+            asg.wanted = Some(pending.wanted);
+        }
         (asg.pending, asg.queued) = (None, false);
         let account = asg.account;
         self.read_if_waiting(account);

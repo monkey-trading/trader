@@ -46,8 +46,8 @@ pub struct Saved {
 impl Saved {
     /// Moves a file written for one market to the per-market maps, for an account that trades `markets`.
     /// Error cases:
-    /// - the file holds a position or a split of one market and the account trades several: which
-    ///   market they belong to is not known, so the file is left for someone to remove
+    /// - the file names no market (it holds no position) and the account trades several: which market
+    ///   its split belongs to is not known, so the file is left for someone to remove
     pub fn migrate(&mut self, markets: &[MarketId]) -> anyhow::Result<()> {
         let (side, entry, split_at) =
             (std::mem::take(&mut self.side), std::mem::take(&mut self.entry), self.split_at.take());
@@ -68,12 +68,11 @@ impl Saved {
                 ),
             },
         };
-        let market = &market;
         if side != 0 {
-            self.positions.entry(*market).or_insert(SavedPosition { side, entry });
+            self.positions.entry(market).or_insert(SavedPosition { side, entry });
         }
         if let Some(at) = split_at {
-            self.splits.entry(*market).or_insert(at);
+            self.splits.entry(market).or_insert(at);
         }
         Ok(())
     }

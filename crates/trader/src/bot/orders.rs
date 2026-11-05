@@ -87,14 +87,16 @@ impl Runner {
         }
         if node_ms.saturating_sub(pending.ts) > REPLAY_LAG_MS {
             self.stale_dropped += 1;
-            fleet.drop_pending(a);
+            fleet.drop_pending(a, false);
             return false;
         }
-        // The decision was taken from a read of the log, for an account that was trading; a fill or the
-        // daily limit since changes what it should be, and the next bar decides again.
-        if account.behind || account.epoch != pending.epoch || account.controls.is_stopped() || account.flatten_queued {
+        // The decision was taken from a read of the log, for an account that was trading. A stop or a close
+        // since ends it; a fill or a change of cash or listing changes what it should be, and the target
+        // is decided again once the account is read.
+        let stopped = account.controls.is_stopped() || account.flatten_queued;
+        if stopped || account.behind || account.epoch != pending.epoch {
             info!(account = %account.address, market = asg.market, "the account changed since the order was decided: no order");
-            fleet.drop_pending(a);
+            fleet.drop_pending(a, !stopped);
             return false;
         }
         // The decision was taken against the state saved with it, and waits until that is kept.
@@ -104,7 +106,7 @@ impl Runner {
         let intent = pending.intent;
         let Some(quoted) = fleet.markets[asg.market_slot as usize].mark else {
             warn!(account = %account.address, market = asg.market, "no mark to quote the order at");
-            fleet.drop_pending(a);
+            fleet.drop_pending(a, false);
             return false;
         };
         let nonce = match account.nonce {

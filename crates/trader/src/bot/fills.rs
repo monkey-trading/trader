@@ -14,10 +14,6 @@ use crate::bot::Halt;
 use crate::bot::fleet::Fleet;
 use crate::stream::message::{CommandMessage, EventHead, FillRef, OrderRef};
 
-/// The kinds of event the pinned engine writes (`engine_core::event::Event`'s variants, in snake case),
-/// which are skipped without being read. A kind not listed is read as the pinned engine's `Event`,
-/// which refuses one the pinned engine does not write: the bot halts on a log of another version.
-/// A bump of the engine's `rev` that adds a kind needs it listed here to keep the fast path.
 /// The events that move an account's cash without a fill, each naming the account.
 const CASH_EVENTS: [&str; 8] = [
     "corporate_dividend",
@@ -30,7 +26,10 @@ const CASH_EVENTS: [&str; 8] = [
     "distribution_allocated",
 ];
 
-/// The kinds of event the pinned engine writes, skipped unread.
+/// The kinds of event the pinned engine writes (`engine_core::event::Event`'s variants, in snake case),
+/// which are skipped without being read. A kind not listed is read as the pinned engine's `Event`,
+/// which refuses one the pinned engine does not write: the bot halts on a log of another version.
+/// A bump of the engine's `rev` that adds a kind needs it listed here to keep the fast path.
 const KNOWN_EVENTS: [&str; 55] = [
     "corporate_action_scheduled",
     "corporate_entitlements_captured",
@@ -234,11 +233,19 @@ impl Fleet {
 mod tests {
     use engine_core::event::Event;
 
-    use super::KNOWN_EVENTS;
+    use super::{CASH_EVENTS, KNOWN_EVENTS};
 
     /// Every kind the bot skips unread is a variant the pinned engine writes: the engine's reading of
     /// `{"type": kind}` fails for a missing field of the variant, never as an unknown variant (the
     /// unit variants read whole).
+    #[test]
+    fn every_cash_event_kind_is_a_known_one() {
+        for kind in CASH_EVENTS {
+            assert!(KNOWN_EVENTS.contains(&kind), "{kind}");
+        }
+    }
+
+    /// Every kind the bot skips unread is a variant the pinned engine writes (see below).
     #[test]
     fn every_known_event_kind_is_the_pinned_engines() {
         for kind in KNOWN_EVENTS {

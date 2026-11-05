@@ -337,4 +337,5 @@ fn a_relisting_stops_only_the_accounts_it_concerns() {
     assert!(fleet.accounts[0].failed.is_some(), "the cap above the market's own stops its account");
     assert!(fleet.accounts[1].failed.is_none(), "the other account goes on");
     assert_eq!(fleet.markets[0].spec.margin_tiers[0].bps, 1000, "the market takes its new listing");
+    assert!(fleet.accounts.iter().all(|a| a.epoch == 1), "an order decided under the old listing is not sent");
 }

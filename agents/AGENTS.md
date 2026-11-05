@@ -54,7 +54,7 @@ list.
   from a read of the account that is of the log, queued in bar order; five
   seconds of log after a market's index is exact each series warms up from the node's log-derived
   marks history (`warm.rs`); a fill from an order an account did not sign stops that account
-  (`fills.rs`); `day.rs` keeps each account's day loss, its positions' opening times and a split's halt in a file under `[state] dir`, and the daily loss limit closes the account's positions; a split or a failed corporate action in a traded market halts the bot. The `Runner` (`run.rs`, `orders.rs`) turns decisions into signed market orders, one
+  (`fills.rs`); `day.rs` keeps each account's day loss, its positions' opening times and a split's halt in a file under `[state] dir`, and the daily loss limit closes the account's positions; a split or a failed corporate action in a traded market halts the bot. The `Runner` (`run.rs`, `orders.rs`, `flatten.rs`, `reads.rs`) turns decisions into signed market orders, one
   request out per account at a time, each account on its own nonce read again after a refusal, none
   for a bar behind the node's time or before the log has passed every order of that account and
   market that could still enter it; on SIGINT or SIGTERM, once the log has passed those orders, it
