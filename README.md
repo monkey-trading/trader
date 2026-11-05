@@ -5,7 +5,7 @@ the house-counterparty CFD engine. It runs simple technical strategies, such as 
 crossover, across one or many funded keys, each its own account, and serves a web console on the
 host's address.
 
-> **Early development.** The bot trades one account in one market with a simple moving-average
+> **Early development.** The bot trades one or many accounts, each in its own markets, with a simple moving-average
 > crossover, against a local development node. It has not been released, the console is an empty
 > page, and nothing here has held real funds.
 
@@ -58,8 +58,8 @@ The bot reads the market, the account and the recent marks, then follows the pub
 completed bar goes to the strategy, and a target the position is not at sends a signed market
 order. On SIGINT or SIGTERM it cancels the account's resting orders and, with
 `close_on_stop = true`, closes its position; a stop that leaves either behind, or cannot confirm it
-did not, exits non-zero. `./scripts/dev-trade-one.sh` runs the whole path for
-fifteen minutes and checks the account's fills against the bot's log.
+did not, exits non-zero. `./scripts/dev-trade-one.sh` and `./scripts/dev-trade-many.sh` run the whole path for
+fifteen minutes and check each account's fills against the bot's log.
 
 The account key is read from an encrypted keystore, the file wallets export; a development build
 also takes a plain hex key file.

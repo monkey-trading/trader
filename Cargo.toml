@@ -47,7 +47,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 webpki-roots = "1"
 zeroize = "1"
 
-# Tests only: the local stand-in node's server and self-signed certificate, and scratch files.
+# Tests only: a per-thread counting allocator for the hot path, the local stand-in node's server and self-signed certificate, and scratch files.
+allocation-counter = "0.8"
 axum = { version = "0.8", features = ["ws"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 tempfile = "3"

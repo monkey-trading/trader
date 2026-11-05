@@ -1,6 +1,7 @@
-# An example config for `trader run --config <file>`: one account trading one market with a strategy,
-# sized and held to risk limits. Every section refuses keys it does not know. Relative paths are read from this file's
-# directory. `scripts/dev-stack.sh` prints the [node] values of a local dev node.
+# An example config for `trader run --config <file>`: accounts, each trading its markets with a
+# strategy, sized and held to risk limits. Every section refuses keys it does not know. Relative paths
+# are read from this file's directory. `scripts/dev-stack.sh` prints the [node] values of a local dev
+# node.
 
 [node]
 # The node's API, https://host:port.
@@ -18,21 +19,66 @@ tls_key_sha256 = "00000000000000000000000000000000000000000000000000000000000000
 request_timeout = "10s"
 stream_timeout = "30s"
 
-[account]
+# The node's limits on this bot, which it paces its requests under so that a burst of orders queues
+# in bar order instead of failing with 429. Set them to the node's api.per_ip and api.per_account;
+# these are the engine's development config. `connections` is how many HTTP connections to the node
+# the bot keeps open, besides the one stream; the node caps connections per address
+# (api.max_connections_per_ip).
+[node.limits]
+per_ip = { per_second = 50, burst = 100 }
+per_account = { per_second = 10, burst = 20 }
+connections = 4
+
+# Where the bot keeps what it must not lose across a restart: the day's loss, so a restart does not
+# hand a stopped account a new day, and when each position opened. One file per account.
+[state]
+dir = "state"
+
+# How large a new position is, for every account that does not set its own `sizing`: by = "fixed_notional"
+# with notional in USD, or by = "equity_fraction" with bps of the account's equity. A position on the
+# strategy's side keeps its size.
+[sizing]
+by = "fixed_notional"
+notional = "1000"
+# The most leverage the account takes on, as notional over equity. It must be below the market's
+# own, which its first margin tier sets.
+max_leverage = "5"
+
+# The limits of every account that does not set its own `risk`. They hold for each account as a whole.
+# The bot refuses an account that holds a position in a market it does not trade.
+[risk]
+max_open_positions = 1
+# The most the positions' notional may add up to, in USD.
+max_total_notional = "5000"
+# At this loss in a UTC day the account is flattened and stopped until the next day: { usd = "..." },
+# or { equity_bps = ... } of the day's opening equity. The loss is the fall in equity, so a withdrawal
+# counts as a loss and a deposit hides one.
+daily_loss = { usd = "100" }
+# No order adds to a position unless equity stays this many bps of the margin requirement above it.
+# The engine closes positions when equity falls below half the requirement.
+margin_buffer_bps = 10000
+# A position is held this long before a strategy closes it. The default, an hour, stands in until the
+# engine's holding-time profit fee is set (monkey-trading/engine#614).
+min_hold = "1h"
+
+# One account. Name as many [[account]] tables as there are keys; every account follows the same log
+# over the one stream connection. Each account lists the markets it trades, and a strategy in each.
+# An [account.sizing] or [account.risk] table sets this account's own in place of the sections above.
+[[account]]
 # An encrypted Web3 Secret Storage keystore, as wallets export it, with its password from a file
 # (password = { file = "..." }) or an environment variable (password = { env = "..." }).
 # A dev build also takes { type = "hex_file", path = "..." }: a file holding the key in hex.
 key = { type = "keystore", path = "keys/account.json", password = { env = "TRADER_KEY_PASSWORD" } }
-# Whether stopping the bot closes the strategy's position. It always cancels resting orders. A stop
-# first waits for the log to pass any order that could still enter it, up to 35 s, then makes a few
-# calls of up to request_timeout each, and more while a position too large for one close stays
-# open, for up to a minute; give a supervisor's stop a longer grace period.
+# Whether stopping the bot closes the account's positions in its markets. It always cancels resting
+# orders. A stop first waits for the log to pass any order that could still enter it, up to 35 s,
+# then makes a few calls per account, paced under the limits above, and more while a position too
+# large for one close stays open, for up to a minute; give a supervisor's stop a longer grace period
+# the more accounts there are.
 close_on_stop = false
-# Where the bot keeps the day's loss across restarts, so a restart does not hand a stopped account a
-# new day. One file per account.
-state_dir = "state"
 
-[strategy]
+# The strategy in one market; add a [[account.strategy]] table per market (at most one each). Accounts
+# that name the same strategy with the same parameters in a market and bar length share one run of it.
+[[account.strategy]]
 # The market, by symbol: a USD market priced from spot quotes. A market with trading hours is
 # traded only while it is open.
 market = "BTC-USD"
@@ -56,31 +102,21 @@ kind = "sma_crossover"
 fast = 5
 slow = 20
 
-[sizing]
-# How large a new position is: by = "fixed_notional" with notional in USD, or by = "equity_fraction"
-# with bps of the account's equity. A position on the strategy's side keeps its size.
-by = "fixed_notional"
-notional = "1000"
-# The most leverage the account takes on, as notional over equity. It must be below the market's
-# own, which its first margin tier sets.
-max_leverage = "5"
-
-[risk]
-# The limits hold for the account. The bot trades one market, and refuses an account that holds a
-# position in another.
-max_open_positions = 1
-# The most the positions' notional may add up to, in USD.
-max_total_notional = "5000"
-# At this loss in a UTC day the account is flattened and stopped until the next day: { usd = "..." },
-# or { equity_bps = ... } of the day's opening equity. The loss is the fall in equity, so a withdrawal
-# counts as a loss and a deposit hides one.
-daily_loss = { usd = "100" }
-# No order adds to a position unless equity stays this many bps of the margin requirement above it.
-# The engine closes positions when equity falls below half the requirement.
-margin_buffer_bps = 10000
-# A position is held this long before a strategy closes it. The default, an hour, stands in until the
-# engine's holding-time profit fee is set (monkey-trading/engine#614).
-min_hold = "1h"
+# Every `.json` keystore in a directory is an account, all with this password source and these
+# strategies (and `sizing` and `risk` if set). The accounts trade independently: each has its own
+# nonce, position, orders and saved state.
+# [[account_dir]]
+# path = "keys/fleet"
+# password = { file = "keys/fleet.password" }
+# close_on_stop = true
+#
+# [[account_dir.strategy]]
+# market = "ETH-USD"
+# bar = "5m"
+# max_slippage_bps = 25
+# kind = "ema_crossover"
+# fast = 5
+# slow = 20
 
 [logging]
 level = "info"

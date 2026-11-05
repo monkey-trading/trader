@@ -177,3 +177,24 @@ fn write(dir: &tempfile::TempDir, name: &str, text: &str) -> PathBuf {
     std::fs::write(&path, text).unwrap();
     path
 }
+
+/// Counters and repeated bytes are refused outside a dev build, as a class: this repository's tests
+/// and dev scenarios derive their keys that way, and a real key is neither.
+#[test]
+fn guessable_secrets_are_dev_only() {
+    let counter = |n: u64| {
+        let mut secret = [0u8; 32];
+        secret[24..].copy_from_slice(&n.to_be_bytes());
+        secret
+    };
+    for secret in [counter(1), counter(0x1001), counter(u64::MAX), [0x21; 32], [0x00; 32]] {
+        assert!(refuse_guessable(&secret, false).is_err(), "{secret:?}");
+        refuse_guessable(&secret, true).unwrap();
+    }
+    let mut real = [0x5a; 32];
+    real[31] = 0x5b;
+    refuse_guessable(&real, false).unwrap();
+    let mut high = counter(7);
+    high[0] = 1;
+    refuse_guessable(&high, false).unwrap();
+}

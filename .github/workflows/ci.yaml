@@ -238,15 +238,19 @@ jobs:
       - name: Test the dev stack's paths
         run: ./scripts/dev-stack-test.sh
 
-  # The bot's dev scenario (scripts/dev-trade-one.sh): a dev node from the engine commit Cargo.lock
-  # pins, and the bot trading one account on it for fifteen minutes. The node, its tools and its dev
-  # config are built once per engine commit and cached by it; a push to main that only refreshes
-  # caches builds them and the bot, and runs nothing.
-  dev-trade-one:
+  # The bot's dev scenarios (scripts/dev-trade-one.sh and scripts/dev-trade-many.sh): a dev node from
+  # the engine commit Cargo.lock pins, and the bot trading one account on it, then twenty, for
+  # fifteen minutes each. The node, its tools and its dev config are built once per engine commit and
+  # cached by it; a push to main that only refreshes caches builds them and the bot, and runs nothing.
+  dev-scenarios:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.cache == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+      matrix:
+        scenario: [dev-trade-one, dev-trade-many]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -275,11 +279,11 @@ jobs:
       - name: Run the dev scenario
         if: needs.changes.outputs.cache != 'true'
         env:
-          SCENARIO_ARTIFACTS: ${{ runner.temp }}/dev-trade-one
-        run: ./scripts/dev-trade-one.sh
+          SCENARIO_ARTIFACTS: ${{ runner.temp }}/${{ matrix.scenario }}
+        run: ./scripts/${{ matrix.scenario }}.sh
       - name: Keep the scenario's logs
         if: failure() && needs.changes.outputs.cache != 'true'
-        run: tail -n 200 "$RUNNER_TEMP"/dev-trade-one/*.log
+        run: tail -n 200 "$RUNNER_TEMP"/${{ matrix.scenario }}/*.log
 
   # The strategies' dev scenario (scripts/dev-strategies.sh): a dev node from the engine commit
   # Cargo.lock pins, and six strategies on seven accounts trading on it for fifteen minutes, one with a tiny daily loss limit. The node, its tools and its dev
@@ -504,9 +508,9 @@ jobs:
           gh run cancel ${{ github.run_id }} \
             || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
 
-  cancel-dev-trade-one:
-    needs: dev-trade-one
-    if: failure() && needs.dev-trade-one.result == 'failure'
+  cancel-dev-scenarios:
+    needs: dev-scenarios
+    if: failure() && needs.dev-scenarios.result == 'failure'
       && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-24.04
     timeout-minutes: 2
@@ -544,7 +548,7 @@ jobs:
   # scripts/check-ci-passed.sh.
   ci-passed:
     if: always()
-    needs: [changes, fmt, file-loc, clippy, test, cargo-deny, dev-trade-one, dev-strategies, console, agent-links, review-delta, merge-approval, ci-scripts]
+    needs: [changes, fmt, file-loc, clippy, test, cargo-deny, dev-scenarios, dev-strategies, console, agent-links, review-delta, merge-approval, ci-scripts]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

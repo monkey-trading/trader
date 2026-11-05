@@ -61,7 +61,8 @@ async fn relistings_change_the_rules_or_halt() {
     assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/orders"]);
 }
 
-/// A log message the pinned engine cannot read halts the bot, which leaves its resting order.
+/// A log message the bot cannot read (an event with no type) halts the bot, which leaves its resting
+/// order.
 #[tokio::test]
 async fn an_unreadable_message_halts_without_touching_the_account() {
     let stand_in = StandIn::start().await;
@@ -71,7 +72,7 @@ async fn an_unreadable_message_halts_without_touching_the_account() {
         i.head_seq = 10;
     });
     let dir = tempfile::tempdir().unwrap();
-    stand_in.append((11, 0), command(11, T0, json!({ "type": "tick" }), json!([{ "type": "no_such_event" }])));
+    stand_in.append((11, 0), command(11, T0, json!({ "type": "tick" }), json!([{ "no_type": 1 }])));
     stand_in.append((12, 0), command(12, T0 + MINUTE, json!({ "type": "tick" }), json!([])));
     let err = run(config(&stand_in, dir.path(), "1m"), std::future::pending()).await.unwrap_err();
     assert!(format!("{err:#}").contains("the log message at 11:0"), "{err:#}");
@@ -184,7 +185,7 @@ async fn a_declined_close_is_an_incomplete_stop() {
     stand_in.tick(T0 + MINUTE);
     let dir = tempfile::tempdir().unwrap();
     let err = run(config(&stand_in, dir.path(), "1m"), async {}).await.unwrap_err();
-    assert!(err.to_string().contains("a position of 1 are left"), "{err:#}");
+    assert!(err.to_string().contains("a position of 1 in market 1 are left"), "{err:#}");
     let posts = stand_in.with(|i| i.posts.clone());
     assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/positions/close-all"]);
 }
@@ -256,11 +257,12 @@ async fn a_stop_waits_for_orders_signed_before_the_start() {
     });
     let dir = tempfile::tempdir().unwrap();
     let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {}));
-    // Started at T0: an earlier process's order can enter the log until T0 + 30 s.
+    // Started at T0: an earlier process's order can enter the log until T0 + 30 s, and an estimate of
+    // the node's time that led its own by up to the config's 2 s request timeout is allowed for.
     let early = stand_in.tick(T0 + 20_000);
     stand_in.applied(early).await;
     assert!(stand_in.with(|i| i.posts.is_empty()), "nothing is sent while such an order can enter the log");
-    stand_in.tick(T0 + 31_000);
+    stand_in.tick(T0 + 33_000);
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
     let posts = stand_in.with(|i| i.posts.clone());
     assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/orders/cancel-all"]);

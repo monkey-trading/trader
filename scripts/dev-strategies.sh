@@ -161,12 +161,14 @@ for i in "${!names[@]}"; do
     dev_stack_node_config
     cat <<CONFIG
 
-[account]
+[state]
+dir = "state-$name"
+
+[[account]]
 key = { type = "hex_file", path = "$name.hex" }
 close_on_stop = true
-state_dir = "state-$name"
 
-[strategy]
+[[account.strategy]]
 market = "BTC-USD"
 bar = "1m"
 max_slippage_bps = 25

@@ -53,29 +53,32 @@ impl AccountKey {
     /// - the bytes are not a valid secp256k1 secret key
     /// - outside a dev build, the key is one this repository publishes
     pub async fn load(source: &KeySource, env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
-        let key = match source {
+        let secret: Zeroizing<Vec<u8>> = match source {
             KeySource::Keystore { path, password } => {
                 let password = read_password(password, env)?;
                 let path = path.clone();
-                let bytes = spawn_blocking(move || {
+                spawn_blocking(move || {
                     eth_keystore::decrypt_key(&path, password.as_bytes())
                         .map(Zeroizing::new)
                         .with_context(|| format!("decrypting the keystore {}", path.display()))
                 })
                 .await
-                .context("the keystore task")??;
-                Self::from_secret(&bytes)?
+                .context("the keystore task")??
             }
-            KeySource::HexFile { path } => Self::from_secret(&*read_hex_key(path)?)?,
+            KeySource::HexFile { path } => Zeroizing::new(read_hex_key(path)?.to_vec()),
         };
+        refuse_guessable(&secret, cfg!(debug_assertions))?;
+        let key = Self::from_secret(&secret)?;
         refuse_published(key.address, cfg!(debug_assertions))?;
         Ok(key)
     }
 
-    /// The key whose secret is `bytes`.
+    /// The key whose secret is `bytes`. Unlike `load`, it does not refuse the keys this repository
+    /// publishes: tests and benchmarks build many keys from counters.
     /// Error cases:
     /// - `bytes` is not 32 bytes of a valid secp256k1 secret key
-    fn from_secret(bytes: &[u8]) -> anyhow::Result<Self> {
+    #[doc(hidden)]
+    pub fn from_secret(bytes: &[u8]) -> anyhow::Result<Self> {
         let key = SigningKey::from_slice(bytes).map_err(|_| anyhow!("not a valid secp256k1 secret key"))?;
         let address = eip712::address(key.verifying_key());
         Ok(Self { key, address })
@@ -97,6 +100,20 @@ impl fmt::Debug for AccountKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "AccountKey({})", self.address)
     }
+}
+
+/// Refuses `secret` outside a dev build (`dev_build`) when anyone could guess it: a counter (the
+/// secret fits in eight bytes), as this repository's tests and dev scenarios derive their keys, or one
+/// byte repeated. Their addresses are not listed in `PUBLISHED_ACCOUNTS` one by one; the class is.
+/// Error cases:
+/// - `secret` is such a key and `dev_build` is false
+fn refuse_guessable(secret: &[u8], dev_build: bool) -> anyhow::Result<()> {
+    let counter = secret.len() > 8 && secret[..secret.len() - 8].iter().all(|b| *b == 0);
+    let repeated = secret.windows(2).all(|pair| pair[0] == pair[1]);
+    if !dev_build && (counter || repeated) {
+        bail!("the key is a counter or a repeated byte, which anyone can guess; only a dev build uses it");
+    }
+    Ok(())
 }
 
 /// Refuses `account` outside a dev build (`dev_build`) when this repository publishes its key.

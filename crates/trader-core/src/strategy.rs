@@ -66,22 +66,28 @@ impl SmaCrossover {
     pub fn on_close(&mut self, close: Fixed) -> Option<Target> {
         self.fast.push(close);
         self.slow.push(close);
-        let (fast, slow) = (self.fast.sum()?, self.slow.sum()?);
-        // Compares fast / fast_period with slow / slow_period exactly, as cross products: each
-        // period is at most `MAX_PERIOD`, so neither product leaves `i128`.
-        let fast_scaled = fast.raw() * self.slow.period() as i128;
-        let slow_scaled = slow.raw() * self.fast.period() as i128;
-        Some(match fast_scaled.cmp(&slow_scaled) {
-            Ordering::Greater => Target::Long,
-            Ordering::Less => Target::Short,
-            Ordering::Equal => Target::Flat,
-        })
+        crossover_target(&self.fast, &self.slow)
     }
 
     /// The fast and slow averages, truncated toward zero, once each is full.
     pub fn averages(&self) -> (Option<Fixed>, Option<Fixed>) {
         (self.fast.value(), self.slow.value())
     }
+}
+
+/// The target of a crossover of the `fast` and `slow` averages: long while the fast is above the
+/// slow, short while below, flat while equal; `None` until both windows are full. Compares
+/// fast / fast_period with slow / slow_period exactly, as cross products: each period is at most
+/// `MAX_PERIOD`, so neither product leaves `i128`.
+pub fn crossover_target(fast: &Sma, slow: &Sma) -> Option<Target> {
+    let (fast_sum, slow_sum) = (fast.sum()?, slow.sum()?);
+    let fast_scaled = fast_sum.raw() * slow.period() as i128;
+    let slow_scaled = slow_sum.raw() * fast.period() as i128;
+    Some(match fast_scaled.cmp(&slow_scaled) {
+        Ordering::Greater => Target::Long,
+        Ordering::Less => Target::Short,
+        Ordering::Equal => Target::Flat,
+    })
 }
 
 /// The order that takes `position` toward `target`, where a long or short target is `size` units:

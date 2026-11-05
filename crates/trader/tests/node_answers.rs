@@ -8,7 +8,7 @@ use std::time::Duration;
 use common::{Answers, StandIn};
 use engine_wire::Deployment;
 use serde_json::json;
-use trader::config::{NodeUrl, TlsPin};
+use trader::config::{LimitsSection, NodeUrl, TlsPin};
 use trader::node::{CallError, Node, Tls};
 
 /// A signed answer parses, with the node's time and log head it was signed at.
@@ -56,7 +56,7 @@ async fn a_post_answer_binds_its_body() {
     let stand_in = StandIn::start().await;
     stand_in.with(|i| i.replies.push_back(json!([{ "type": "admin_applied" }])));
     let answer: trader::node::Verified<serde_json::Value> =
-        node(&stand_in).post("/v1/orders", &json!({ "client_id": 1 })).await.unwrap();
+        node(&stand_in).post("/v1/orders", &json!({ "client_id": 1 }), None).await.unwrap();
     assert_eq!(answer.body, json!([{ "type": "admin_applied" }]));
     assert_eq!(stand_in.with(|i| i.posts.clone()), [("/v1/orders".to_owned(), json!({ "client_id": 1 }))]);
 }
@@ -68,7 +68,13 @@ async fn a_tls_key_other_than_the_pin_is_refused() {
     let url = NodeUrl { host: "127.0.0.1".into(), port: stand_in.addr.port() };
     let mut pin = stand_in.pin;
     pin[0] ^= 1;
-    let node = Node::new(Tls::new(url, Some(TlsPin(pin))).unwrap(), stand_in.signer(), deployment(), TIMEOUT);
+    let node = Node::new(
+        Tls::new(url, Some(TlsPin(pin))).unwrap(),
+        stand_in.signer(),
+        deployment(),
+        TIMEOUT,
+        &LimitsSection::default(),
+    );
     let err = node.nonce("0x1111111111111111111111111111111111111111".parse().unwrap()).await.unwrap_err();
     assert!(matches!(err, CallError::Failed { .. }), "{err}");
     assert!(stand_in.with(|i| i.posts.is_empty()));
@@ -79,7 +85,8 @@ async fn a_tls_key_other_than_the_pin_is_refused() {
 async fn without_a_pin_a_self_signed_node_is_refused() {
     let stand_in = StandIn::start().await;
     let url = NodeUrl { host: "127.0.0.1".into(), port: stand_in.addr.port() };
-    let node = Node::new(Tls::new(url, None).unwrap(), stand_in.signer(), deployment(), TIMEOUT);
+    let node =
+        Node::new(Tls::new(url, None).unwrap(), stand_in.signer(), deployment(), TIMEOUT, &LimitsSection::default());
     let err = node.markets().await.unwrap_err();
     assert!(format!("{err}").contains("certificate"), "{err}");
 }
@@ -124,5 +131,11 @@ fn deployment() -> Deployment {
 /// A client of the stand-in, pinned to its key and checking its signer.
 fn node(stand_in: &StandIn) -> Node {
     let url = NodeUrl { host: "127.0.0.1".into(), port: stand_in.addr.port() };
-    Node::new(Tls::new(url, Some(TlsPin(stand_in.pin))).unwrap(), stand_in.signer(), deployment(), TIMEOUT)
+    Node::new(
+        Tls::new(url, Some(TlsPin(stand_in.pin))).unwrap(),
+        stand_in.signer(),
+        deployment(),
+        TIMEOUT,
+        &LimitsSection::default(),
+    )
 }

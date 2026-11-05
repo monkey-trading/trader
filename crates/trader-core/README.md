@@ -12,7 +12,8 @@ the engine's `Fixed`, from the pinned `engine-core`.
 ## Features
 
 - The index mark of a USD market priced from spot quotes, derived from the log's `Prices` commands
-  with the engine's own `compute_index`, exact once the log has passed the market's quote age limit;
+  as the engine's `compute_index` derives it (the same median, worked out without allocating and checked
+  against it), exact once the log has passed the market's quote age limit;
   a market with trading hours keeps only quotes from one open session and has no mark while shut
 - Bars of whole windows of sequenced time, aligned to the Unix epoch, closed by the first command
   past them

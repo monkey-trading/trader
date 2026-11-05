@@ -12,7 +12,7 @@ use engine_core::market::MarketSpec;
 use engine_core::types::{AccountId, MarketId, Millis, OrderId};
 use serde::Deserialize;
 
-use crate::node::{CallError, Node, Verified};
+use crate::node::{Admission, CallError, Node, Verified};
 
 /// The most marks one page of `GET /v1/markets/{id}/marks` carries.
 const MARKS_PAGE: usize = 2000;
@@ -110,24 +110,36 @@ impl Node {
         }
     }
 
-    /// Places a signed order; the events it produced.
+    /// Places a signed order, sent on the leave `admission` gives; the events it produced.
     /// Error cases:
     /// - see `CallError`
-    pub async fn place_order(&self, request: &OrderRequest) -> Result<Verified<Vec<Event>>, CallError> {
-        self.post("/v1/orders", request).await
+    pub async fn place_order(
+        &self,
+        request: &OrderRequest,
+        admission: Admission,
+    ) -> Result<Verified<Vec<Event>>, CallError> {
+        self.post_admitted("/v1/orders", request, Some(request.account), Some(admission)).await
     }
 
     /// Cancels every resting order of a signed request's account.
     /// Error cases:
     /// - see `CallError`
-    pub async fn cancel_all(&self, request: &CancelAllRequest) -> Result<Verified<Vec<Event>>, CallError> {
-        self.post("/v1/orders/cancel-all", request).await
+    pub async fn cancel_all(
+        &self,
+        request: &CancelAllRequest,
+        admission: Admission,
+    ) -> Result<Verified<Vec<Event>>, CallError> {
+        self.post_admitted("/v1/orders/cancel-all", request, Some(request.account), Some(admission)).await
     }
 
     /// Closes the positions a signed request names.
     /// Error cases:
     /// - see `CallError`
-    pub async fn close_all(&self, request: &CloseAllRequest) -> Result<Verified<Vec<Event>>, CallError> {
-        self.post("/v1/positions/close-all", request).await
+    pub async fn close_all(
+        &self,
+        request: &CloseAllRequest,
+        admission: Admission,
+    ) -> Result<Verified<Vec<Event>>, CallError> {
+        self.post_admitted("/v1/positions/close-all", request, Some(request.account), Some(admission)).await
     }
 }
