@@ -32,3 +32,20 @@ fn main() {
         std::fs::write(&out, code).expect("writing console_assets.rs");
     }
 }
+
+/// Adds every regular file under `dir` to `files`, as its URL path below `root` and its absolute path.
+fn collect(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) {
+    for entry in std::fs::read_dir(dir).expect("reading the console's build") {
+        let path = entry.expect("reading the console's build").path();
+        let kind = std::fs::symlink_metadata(&path).expect("reading the console's build").file_type();
+        if kind.is_dir() {
+            collect(root, &path, files);
+        } else if kind.is_file() {
+            let relative = path.strip_prefix(root).expect("a file under the build");
+            let url = relative.components().fold(String::new(), |url, part| {
+                format!("{url}/{}", part.as_os_str().to_str().expect("built file names are UTF-8"))
+            });
+            files.push((url, path.canonicalize().expect("a built file's path")));
+        }
+    }
+}
