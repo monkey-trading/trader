@@ -66,3 +66,24 @@ export function shortAddress(address: string): string {
 export function formatTime(millis: number): string {
   return new Date(millis).toISOString().slice(0, 19).replace("T", " ");
 }
+
+/** A Unix time in milliseconds as `YYYY-MM-DD HH:MM` at `offsetMinutes` from UTC. */
+function formatMinute(millis: number, offsetMinutes: number): string {
+  return new Date(millis + offsetMinutes * 60_000).toISOString().slice(0, 16).replace("T", " ");
+}
+
+/** An offset from UTC as `UTC+01:00`. */
+function formatOffset(offsetMinutes: number): string {
+  const absolute = Math.abs(offsetMinutes);
+  const hours = String(Math.trunc(absolute / 60)).padStart(2, "0");
+  return `UTC${offsetMinutes < 0 ? "-" : "+"}${hours}:${String(absolute % 60).padStart(2, "0")}`;
+}
+
+/**
+ * The note for an account the daily loss limit has stopped: the loss and when trading resumes, in local time at
+ * `offsetMinutes` from UTC (the browser's offset at that time) and in UTC.
+ */
+export function formatDayStop(dayStop: { readonly untilMs: number; readonly loss: string }, offsetMinutes: number): string {
+  const local = `${formatMinute(dayStop.untilMs, offsetMinutes)} local time (${formatOffset(offsetMinutes)})`;
+  return `Stopped for the day: daily loss ${formatUsdc(dayStop.loss)} USD, trading resumes at ${local}, ${formatMinute(dayStop.untilMs, 0)} UTC.`;
+}

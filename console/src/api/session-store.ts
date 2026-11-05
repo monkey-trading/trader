@@ -67,11 +67,14 @@ export class SessionStore {
   }
 }
 
+/** The bot's code for a login with the wrong password. */
+const WRONG_PASSWORD = "wrong_password";
+
 /** The words for a login that did not succeed. */
 function loginMessage(outcome: Exclude<Outcome<null>, { status: "ok" }>): string {
   switch (outcome.status) {
     case "unauthenticated":
-      return "The password was not accepted.";
+      return outcome.code === WRONG_PASSWORD ? "Wrong password. Try again." : "The password was not accepted.";
     case "refused":
       return outcome.retryAfterSeconds === null
         ? outcome.message

@@ -46,8 +46,8 @@ describe("createApi", () => {
   });
 
   it("reports a 401 as an ended session", async () => {
-    const { fetchFn } = fakeFetch(401, { error: "log in first" });
-    expect(await createApi(fetchFn).session()).toEqual({ status: "unauthenticated" });
+    const { fetchFn } = fakeFetch(401, { error: "log in first", code: "session_required" });
+    expect(await createApi(fetchFn).session()).toEqual({ status: "unauthenticated", code: "session_required" });
   });
 
   it("carries the bot's reason and Retry-After on a refusal", async () => {

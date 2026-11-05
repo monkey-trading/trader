@@ -30,6 +30,7 @@ function account(index, balance, positions, orders) {
     address: `0x${String(index).repeat(40)}`,
     state: "running",
     halt: null,
+    dayStop: null,
     balance: parse(balance),
     realised: 0n,
     positions: positions.map(([market, qty, entry]) => ({ market, qty: parse(qty), entry: parse(entry) })),
@@ -74,6 +75,8 @@ export function createModel(now) {
   accounts[2].strategy.running = false;
   accounts[2].strategy.bounds = null;
   accounts[2].blocked = "the account is over its daily loss limit";
+  const midnight = new Date(now()).setUTCHours(24, 0, 0, 0);
+  accounts[2].dayStop = { until_ms: midnight, loss: "100" };
   return { accounts, marks: { 1: parse("61000"), 2: parse("2950") }, seed: 7n, now };
 }
 
@@ -124,6 +127,7 @@ export function view(model, item, whole = false) {
     address: item.address,
     state: item.state,
     halt: item.halt,
+    day_stop: item.dayStop,
     strategies: [item.strategy],
     figures: figures(model, item),
     error: null,

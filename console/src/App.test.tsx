@@ -34,6 +34,18 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Accounts" })).toBeInTheDocument();
   });
 
+  it("says the password is wrong when the bot's code says so", async () => {
+    const api = stubApi();
+    api.session.mockResolvedValue({ status: "unauthenticated" });
+    api.login.mockResolvedValueOnce({ status: "unauthenticated", code: "wrong_password" });
+    const user = userEvent.setup();
+    mount(api);
+
+    await user.type(await screen.findByLabelText("Password"), "wrong{Enter}");
+
+    expect(await screen.findByText("Wrong password. Try again.")).toBeInTheDocument();
+  });
+
   it("says how long to wait when the login is rate limited", async () => {
     const api = stubApi();
     api.session.mockResolvedValue({ status: "unauthenticated" });
@@ -78,6 +90,26 @@ describe("App", () => {
     await user.click(screen.getByRole("link", { name: "0x1111…1111" }));
     expect(await screen.findByText(/The account stopped on its own/)).toBeInTheDocument();
     expect(screen.getByText(/halted \(an answer was signed by another key/)).toBeInTheDocument();
+  });
+
+  it("shows the daily loss stop on the overview and the account page, and keeps the account's controls", async () => {
+    const stopped = viewBody({ day_stop: { until_ms: Date.UTC(2026, 10, 6), loss: "100.5" } });
+    const user = userEvent.setup();
+    mount(stubApi(overviewBody([stopped])));
+
+    const note = /^Stopped for the day: daily loss 100\.50 USD, trading resumes at .* local time \(UTC[+-]\d\d:\d\d\), 2026-11-06 00:00 UTC\.$/;
+    expect(await screen.findByText(note)).toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "0x1111…1111" }));
+
+    expect(await screen.findByText(note)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop account" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Stop strategy" })).toBeEnabled();
+  });
+
+  it("shows no stop note for an account without one", async () => {
+    mount(stubApi());
+    await screen.findByRole("table", { name: "Accounts" });
+    expect(screen.queryByText(/Stopped for the day/)).not.toBeInTheDocument();
   });
 
   it("opens an account page from the overview and shows its tables, strategies and fills", async () => {

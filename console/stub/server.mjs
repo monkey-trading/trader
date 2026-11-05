@@ -56,7 +56,7 @@ async function login(request, response) {
   const body = await readJson(request);
   if (body?.password !== PASSWORD) {
     failedLogins += 1;
-    return send(response, 401, { error: "wrong password" });
+    return send(response, 401, { error: "wrong password", code: "wrong_password" });
   }
   failedLogins = 0;
   const token = randomBytes(16).toString("hex");

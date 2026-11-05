@@ -4,6 +4,7 @@ import { useEffect, type ReactNode } from "react";
 import type { Figures } from "@/api/types";
 import { AccountControls } from "@/components/AccountControls";
 import { useLive, useServices } from "@/components/app-context";
+import { DayStopNote } from "@/components/DayStopNote";
 import { EquityCurve } from "@/components/EquityCurve";
 import { Link } from "@/components/Link";
 import { PageTitle } from "@/components/PageTitle";
@@ -74,6 +75,7 @@ export function AccountPage({ address }: { readonly address: string }) {
             {account.address} · {account.state}
             {account.halt === null ? "" : ` (${account.halt})`}
           </p>
+          {account.dayStop === null ? null : <p><DayStopNote dayStop={account.dayStop} /></p>}
           {account.error === null ? null : <p className="text-loss">{`The last read of the node failed: ${account.error}`}</p>}
           <AccountControls account={account} />
           {account.figures === null ? <p className="text-muted">The bot has not read this account's figures yet.</p> : <FigureList figures={account.figures} />}

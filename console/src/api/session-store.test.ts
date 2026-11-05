@@ -22,11 +22,13 @@ describe("SessionStore", () => {
   it("signs in on success and says why on a refusal, staying signed out", async () => {
     const outcomes: Outcome<null>[] = [
       { status: "unauthenticated" },
+      { status: "unauthenticated", code: "wrong_password" },
       { status: "refused", message: "Too many login attempts.", retryAfterSeconds: 30 },
       ok,
     ];
     const store = storeWith({ login: () => Promise.resolve(outcomes.shift() ?? ok) });
     expect(await store.login("a")).toEqual({ status: "refused", message: "The password was not accepted." });
+    expect(await store.login("a")).toEqual({ status: "refused", message: "Wrong password. Try again." });
     expect(await store.login("a")).toEqual({
       status: "refused", message: "Too many login attempts. Try again in 30 seconds.",
     });

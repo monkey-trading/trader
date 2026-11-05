@@ -35,6 +35,7 @@ export function viewBody(overrides: Record<string, unknown> = {}): Record<string
     address: ADDRESS,
     state: "running",
     halt: null,
+    day_stop: null,
     strategies: [
       {
         id: 0, kind: "sma_crossover", market: "BTC-USD", bar: "1m", running: true,

@@ -5,7 +5,11 @@ import type { AccountView, Fill } from "./types";
 /** What a call came to. A refusal or an outage is a value the control shows, not an exception. */
 export type Outcome<T> =
   | { readonly status: "ok"; readonly value: T }
-  | { readonly status: "unauthenticated" }
+  | {
+      readonly status: "unauthenticated";
+      /** The bot's code for the 401, when its body has one: `wrong_password` on a login. */
+      readonly code?: string | null;
+    }
   | {
       readonly status: "refused";
       readonly message: string;
@@ -103,10 +107,10 @@ async function call<T>(
   } catch {
     return { status: "unavailable", message: "The bot did not answer." };
   }
-  if (response.status === 401) {
-    return { status: "unauthenticated" };
-  }
   const json: unknown = await response.json().catch(() => null);
+  if (response.status === 401) {
+    return { status: "unauthenticated", code: readError(json)?.code ?? null };
+  }
   if (response.ok) {
     return checked(parseWith(read, json));
   }

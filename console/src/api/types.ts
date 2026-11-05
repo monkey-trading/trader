@@ -81,12 +81,22 @@ export interface CurvePoint {
   readonly equity: string;
 }
 
+/** The daily loss limit having tripped: the account places no order until `untilMs`. */
+export interface DayStop {
+  /** When trading resumes, Unix milliseconds: the next UTC midnight. */
+  readonly untilMs: number;
+  /** The day's loss that tripped the limit, in USD. */
+  readonly loss: string;
+}
+
 /** One account as the bot shows it. */
 export interface AccountView {
   readonly address: string;
   readonly state: AccountState;
   /** Why the account halted. */
   readonly halt: string | null;
+  /** Set while the daily loss limit keeps the account from placing orders. */
+  readonly dayStop: DayStop | null;
   readonly strategies: readonly Strategy[];
   /** The last figures read; null until the first read. */
   readonly figures: Figures | null;

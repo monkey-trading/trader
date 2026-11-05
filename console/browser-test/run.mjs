@@ -97,7 +97,7 @@ try {
   check(await page.getByRole("link", { name: "Skip to content" }).evaluate((el) => el === document.activeElement), "skip link not first");
   await page.getByLabel("Password").fill("not-the-password");
   await page.keyboard.press("Enter");
-  await page.getByText("The password was not accepted.").waitFor();
+  await page.getByText("Wrong password. Try again.").waitFor();
   await page.getByLabel("Password").fill(password);
   await page.keyboard.press("Enter");
   await page.getByRole("heading", { level: 1, name: "Accounts" }).waitFor();
@@ -146,6 +146,12 @@ try {
     await refusing.getByRole("button", { name: "Start strategy" }).click();
     await refusing.getByText(/^Failed: /).waitFor();
     check((await page.getByText(/^Failed: /).count()) === 1, "a failure showed somewhere other than its control");
+    // The daily loss stop the API reports shows on the page, and the controls stay.
+    const stopped = (await api(`/api/accounts/${process.env.REFUSING_ACCOUNT}`)).day_stop;
+    if (stopped !== null) {
+      await page.getByText(/^Stopped for the day: daily loss .* USD, trading resumes at /).waitFor();
+      check(await page.getByRole("button", { name: /^(Stop|Start) account$/ }).isEnabled(), "the account's control is not offered during a day stop");
+    }
   }
 
   // Flatten asks twice, then the positions are gone in the page and in the API.

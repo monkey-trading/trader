@@ -16,6 +16,7 @@ describe("readOverview", () => {
         address: `0x${"11".repeat(20)}`,
         state: "running",
         halt: null,
+        dayStop: null,
         strategies: [
           {
             id: 0, kind: "sma_crossover", market: "BTC-USD", bar: "1m", running: true, warmedUp: true, target: "long",
@@ -43,6 +44,13 @@ describe("readOverview", () => {
   it("reads an account with no figures yet and the reason", () => {
     const parsed = parseWith(readAccount, viewBody({ figures: null, error: "the node did not answer" }));
     expect(parsed.status === "ok" && [parsed.value.figures, parsed.value.error]).toEqual([null, "the node did not answer"]);
+  });
+
+  it("reads the day stop that the daily loss limit sets, and null when it is not set", () => {
+    const set = parseWith(readAccount, viewBody({ day_stop: { until_ms: 1_700_006_400_000, loss: "100.5" } }));
+    expect(set.status === "ok" && set.value.dayStop).toEqual({ untilMs: 1_700_006_400_000, loss: "100.5" });
+    expect(parseWith(readAccount, viewBody({ day_stop: { until_ms: 1, loss: "1e2" } })).status).toBe("invalid");
+    expect(parseWith(readAccount, viewBody({ day_stop: {} })).status).toBe("invalid");
   });
 
   it("reads strategies whose periods the console may not set", () => {

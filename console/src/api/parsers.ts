@@ -6,7 +6,7 @@ import {
 } from "@/lib/shape";
 
 import type {
-  AccountView, CurvePoint, Figures, Fill, LiveMessage, Monkey, Order, Overview, Param, Position, Strategy, Totals,
+  AccountView, CurvePoint, DayStop, Figures, Fill, LiveMessage, Monkey, Order, Overview, Param, Position, Strategy, Totals,
 } from "./types";
 
 /** The result of parsing one body: a value, or what was wrong with it. */
@@ -131,11 +131,16 @@ function pointOf(fields: Fields): CurvePoint {
   return { timeMs: count(fields, "time_ms"), equity: decimal(fields, "equity") };
 }
 
+function dayStopOf(fields: Fields): DayStop {
+  return { untilMs: count(fields, "until_ms"), loss: decimal(fields, "loss") };
+}
+
 function accountOf(fields: Fields): AccountView {
   return {
     address: text(fields, "address"),
     state: choice(fields, "state", ["starting", "running", "stopped", "flattening", "halted"]),
     halt: nullableText(fields, "halt"),
+    dayStop: fields["day_stop"] === null ? null : dayStopOf(object(fields["day_stop"], "day_stop")),
     strategies: items(fields, "strategies", strategyOf),
     figures: fields["figures"] === null ? null : figuresOf(object(fields["figures"], "figures")),
     error: nullableText(fields, "error"),

@@ -1,6 +1,6 @@
 /** Tests of display formatting. */
 import {
-  formatBpsPercent, formatDecimal, formatMonkey, formatSigned, formatTime, formatTrimmed, formatUsdc, shortAddress, UNAVAILABLE,
+  formatBpsPercent, formatDayStop, formatDecimal, formatMonkey, formatSigned, formatTime, formatTrimmed, formatUsdc, shortAddress, UNAVAILABLE,
 } from "./format";
 
 describe("formatUsdc", () => {
@@ -75,5 +75,20 @@ describe("shortAddress and formatTime", () => {
 
   it("renders UTC regardless of the machine", () => {
     expect(formatTime(1_700_000_000_000)).toBe("2023-11-14 22:13:20");
+  });
+});
+
+describe("formatDayStop", () => {
+  const stop = { untilMs: Date.UTC(2026, 10, 6), loss: "100.5" };
+
+  it("names the loss and when trading resumes, in local time and in UTC", () => {
+    expect(formatDayStop(stop, 60)).toBe(
+      "Stopped for the day: daily loss 100.50 USD, trading resumes at 2026-11-06 01:00 local time (UTC+01:00), 2026-11-06 00:00 UTC.",
+    );
+  });
+
+  it("carries the day back for a zone west of UTC and writes half-hour offsets", () => {
+    expect(formatDayStop(stop, -300)).toContain("2026-11-05 19:00 local time (UTC-05:00)");
+    expect(formatDayStop(stop, 330)).toContain("2026-11-06 05:30 local time (UTC+05:30)");
   });
 });

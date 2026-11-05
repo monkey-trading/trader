@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 import type { AccountView } from "@/api/types";
 import { useLive } from "@/components/app-context";
+import { DayStopNote } from "@/components/DayStopNote";
 import { CELL, DataTable } from "@/components/DataTable";
 import { Link } from "@/components/Link";
 import { PageTitle } from "@/components/PageTitle";
@@ -41,7 +42,10 @@ function AccountRow({ account }: { readonly account: AccountView }) {
         <Link to={accountPath(account.address)}>{shortAddress(account.address)}</Link>
         {account.error === null ? null : <span className="ml-2 text-loss">{`Read failed: ${account.error}`}</span>}
       </th>
-      <td className={CELL}>{account.halt === null ? account.state : `${account.state} (${account.halt})`}</td>
+      <td className="min-w-48 px-2 py-1">
+        {account.halt === null ? account.state : `${account.state} (${account.halt})`}
+        {account.dayStop === null ? null : <DayStopNote dayStop={account.dayStop} />}
+      </td>
       <Num>{maybe(figures, (f) => formatUsdc(f.equity))}</Num>
       <Num>{maybe(figures, (f) => <Pnl value={f.realisedPnl} />)}</Num>
       <Num>{maybe(figures, (f) => <Pnl value={f.unrealisedPnl} />)}</Num>
