@@ -1,5 +1,5 @@
 //! The node client against the stand-in: an answer counts only once its signature verifies against
-//! the configured signer, the request as sent, and the challenge sent with it.
+//! the attested signer, the request as sent, and the challenge sent with it.
 
 mod common;
 
@@ -74,14 +74,18 @@ async fn a_tls_key_other_than_the_pin_is_refused() {
     assert!(stand_in.with(|i| i.posts.is_empty()));
 }
 
-/// Without a pin the certificate must chain to a public root, which a self-signed one does not.
+/// Without a pin the certificate must chain to a public root, which a self-signed one does not, even
+/// once the attested key is the node's.
 #[tokio::test]
 async fn without_a_pin_a_self_signed_node_is_refused() {
     let stand_in = StandIn::start().await;
     let url = NodeUrl { host: "127.0.0.1".into(), port: stand_in.addr.port() };
-    let node = Node::new(Tls::new(url, None).unwrap(), stand_in.signer(), deployment(), TIMEOUT);
-    let err = node.markets().await.unwrap_err();
-    assert!(format!("{err}").contains("certificate"), "{err}");
+    let public = Tls::new(url, None).unwrap();
+    for tls in [public.clone(), public.attested(stand_in.pin).unwrap()] {
+        let node = Node::new(tls, stand_in.signer(), deployment(), TIMEOUT);
+        let err = node.markets().await.unwrap_err();
+        assert!(format!("{err}").contains("certificate"), "{err}");
+    }
 }
 
 /// The marks history is read page by page through its window, each page verified, until the node

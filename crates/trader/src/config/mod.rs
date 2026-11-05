@@ -4,6 +4,7 @@
 
 mod validation;
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -13,6 +14,8 @@ use serde::Deserialize;
 use trader_core::risk::RiskParams;
 use trader_core::sizing::Sizing;
 use trader_core::strategies::StrategyParams;
+
+use crate::PRODUCTION_BUILD;
 
 /// The default time a call to the node may take, connection included.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,6 +33,8 @@ pub struct Config {
     pub risk: RiskParams,
     #[serde(default)]
     pub logging: LoggingSection,
+    #[serde(default)]
+    pub metrics: Option<MetricsSection>,
 }
 
 /// The node the bot trades against, and what its answers are checked against.
@@ -41,17 +46,35 @@ pub struct NodeSection {
     /// The custody chain and vault every signature names.
     pub chain_id: u64,
     pub vault: AccountId,
-    /// The enclave key's address, which must sign every answer and stream frame.
-    pub signer: AccountId,
+    /// What the node's attestation must prove. The enclave address it names is the signer every
+    /// answer and stream frame must carry, and the TLS key it names the only one the bot accepts.
+    pub attestation: AttestationSection,
     /// The SHA-256 of the node's TLS key (its DER SubjectPublicKeyInfo), as the node's attestation
-    /// names it, for a node whose certificate no public CA signs, as a dev node's. Without it the
-    /// certificate must chain to a public root.
+    /// names it, for a node whose certificate no public CA signs, as a dev node's. Dev builds only.
+    /// Without it the certificate must chain to a public root.
     #[serde(default)]
     pub tls_key_sha256: Option<TlsPin>,
     #[serde(default = "default_request_timeout", with = "humantime_serde")]
     pub request_timeout: Duration,
     #[serde(default = "default_stream_timeout", with = "humantime_serde")]
     pub stream_timeout: Duration,
+}
+
+/// What the node's attestation must prove before the bot trusts its enclave key.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AttestationSection {
+    /// An SEV-SNP quote whose certificate chain ends at a vendor root and which matches one of
+    /// `releases`, the manifests engine releases publish.
+    SevSnp {
+        releases: Vec<PathBuf>,
+        /// A PEM root certificate the quote's chain may also end at, for a test chain. Dev builds
+        /// only.
+        #[serde(default)]
+        root: Option<PathBuf>,
+    },
+    /// A dev node's mock attestation, which proves nothing. Dev builds only.
+    Mock,
 }
 
 /// The node's API address: a host and a port, over TLS.
@@ -122,6 +145,15 @@ pub struct LoggingSection {
     pub level: String,
 }
 
+/// The Prometheus metrics listener.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsSection {
+    /// A loopback address and port, such as `127.0.0.1:9466`: the metrics name accounts and their
+    /// equity, so they are served to this machine alone.
+    pub listen: SocketAddr,
+}
+
 impl Default for LoggingSection {
     /// Logs at `info`.
     fn default() -> Self {
@@ -149,12 +181,12 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        cfg.validate(cfg!(debug_assertions)).with_context(|| format!("checking {}", path.display()))?;
+        cfg.validate(!PRODUCTION_BUILD).with_context(|| format!("checking {}", path.display()))?;
         cfg.resolve_paths(path.parent().unwrap_or(Path::new(".")));
         Ok(cfg)
     }
 
-    /// Makes the key's relative paths relative to `dir`.
+    /// Makes the key's and the attestation's relative paths relative to `dir`.
     fn resolve_paths(&mut self, dir: &Path) {
         let resolve = |path: &mut PathBuf| {
             if path.is_relative() {
@@ -162,6 +194,9 @@ impl Config {
             }
         };
         resolve(&mut self.account.state_dir);
+        if let AttestationSection::SevSnp { releases, root } = &mut self.node.attestation {
+            releases.iter_mut().chain(root).for_each(resolve);
+        }
         match &mut self.account.key {
             KeySource::Keystore { path, password } => {
                 resolve(path);

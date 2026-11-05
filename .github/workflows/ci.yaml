@@ -36,6 +36,7 @@ jobs:
       cache: ${{ steps.classify.outputs.cache }}
       rust: ${{ steps.classify.outputs.rust }}
       console: ${{ steps.classify.outputs.console }}
+      image: ${{ steps.classify.outputs.image }}
       agent_docs: ${{ steps.classify.outputs.agent_docs }}
       agent_scripts: ${{ steps.classify.outputs.agent_scripts }}
       merge_approval: ${{ steps.classify.outputs.merge_approval }}
@@ -139,6 +140,8 @@ jobs:
           cache-on-failure: true
       - name: Test
         run: cargo test --workspace --locked ${{ needs.changes.outputs.cache == 'true' && '--no-run' || '' }}
+      - name: Test the production build's refusals
+        run: cargo test -p trader --locked --features production --lib production_build ${{ needs.changes.outputs.cache == 'true' && '--no-run' || '' }}
 
   cargo-deny:
     needs: changes
@@ -323,6 +326,104 @@ jobs:
       - name: Keep the scenario's logs
         if: failure() && needs.changes.outputs.cache != 'true'
         run: tail -n 200 "$RUNNER_TEMP"/dev-strategies/*.log
+
+  # The release image (Dockerfile): lint, the production variant built for linux/amd64, its binary
+  # checked static, and the dev scenario that a production build refuses the dev stack's config and
+  # a test-signed attestation verifies (scripts/dev-attestation.sh), run with the image as the bot.
+  image:
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the Dockerfile
+        run: |
+          docker run --rm -i \
+            ghcr.io/hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d \
+            < Dockerfile
+      - name: Build the production image
+        run: docker buildx build --platform linux/amd64 --build-arg VARIANT=production -t trader:production --load .
+      - name: Check the binary is static and runs alone
+        run: ./scripts/check-image-binary.sh trader:production x86-64
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update
+      - name: Read the pinned engine commit
+        id: engine
+        run: |
+          commit=$(grep -o 'git+https://github.com/monkey-trading/engine?rev=[0-9a-f]*#[0-9a-f]*' Cargo.lock \
+            | sed 's/.*#//' | sort -u)
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          echo "commit=$commit" | tee -a "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/monkeytrading-trader/engine/${{ steps.engine.outputs.commit }}/dist
+          key: engine-${{ runner.os }}-${{ steps.engine.outputs.commit }}
+      - name: Build the engine at the pinned commit
+        run: bash -c 'source scripts/dev-stack.sh && dev_stack_build'
+      - name: Run the attestation dev scenario with the image as the bot
+        env:
+          TRADER_BIN: ${{ github.workspace }}/scripts/docker-trader.sh
+          TRADER_IMAGE: trader:production
+          SCENARIO_ARTIFACTS: ${{ runner.temp }}/dev-attestation
+        run: ./scripts/dev-attestation.sh
+      - name: Keep the scenario's logs
+        if: failure()
+        run: tail -n 200 "$RUNNER_TEMP"/dev-attestation/*.log
+
+  # The image's dev variant, built for linux/amd64, runs the bot's dev scenario unchanged.
+  image-dev:
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the dev image
+        run: docker buildx build --platform linux/amd64 --build-arg VARIANT=dev -t trader:dev --load .
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update
+      - name: Read the pinned engine commit
+        id: engine
+        run: |
+          commit=$(grep -o 'git+https://github.com/monkey-trading/engine?rev=[0-9a-f]*#[0-9a-f]*' Cargo.lock \
+            | sed 's/.*#//' | sort -u)
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          echo "commit=$commit" | tee -a "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/monkeytrading-trader/engine/${{ steps.engine.outputs.commit }}/dist
+          key: engine-${{ runner.os }}-${{ steps.engine.outputs.commit }}
+      - name: Build the engine at the pinned commit
+        run: bash -c 'source scripts/dev-stack.sh && dev_stack_build'
+      - name: Run the dev scenario with the image as the bot
+        env:
+          TRADER_BIN: ${{ github.workspace }}/scripts/docker-trader.sh
+          TRADER_IMAGE: trader:dev
+          SCENARIO_ARTIFACTS: ${{ runner.temp }}/dev-trade-one
+        run: ./scripts/dev-trade-one.sh
+      - name: Keep the scenario's logs
+        if: failure()
+        run: tail -n 200 "$RUNNER_TEMP"/dev-trade-one/*.log
+
+  # The production image built natively for linux/arm64, its binary checked static.
+  image-arm64:
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the production image
+        run: docker buildx build --platform linux/arm64 --build-arg VARIANT=production -t trader:production --load .
+      - name: Check the binary is static and runs alone
+        run: ./scripts/check-image-binary.sh trader:production aarch64
 
   # Each job above but `changes` has a `cancel-` companion that runs only on a pull request or a
   # merge group, and only when that job itself fails (`failure()` alone is also true for a failed
@@ -538,13 +639,65 @@ jobs:
           gh run cancel ${{ github.run_id }} \
             || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
 
+  cancel-image:
+    needs: image
+    if: failure() && needs.image.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  cancel-image-dev:
+    needs: image-dev
+    if: failure() && needs.image-dev.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
+  cancel-image-arm64:
+    needs: image-arm64
+    if: failure() && needs.image-arm64.result == 'failure'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run cancel ${{ github.run_id }} \
+            || echo "::warning::Run not cancelled (read-only fork token, or an API error); other jobs continue."
+
   # The single check to require in branch rules. It runs even when a job it needs fails, is
   # cancelled, or is skipped, and passes only if every one of them succeeded or was skipped while
   # `changes` set its area false. Add every new job to `needs`, and a gated one to the area map in
   # scripts/check-ci-passed.sh.
   ci-passed:
     if: always()
-    needs: [changes, fmt, file-loc, clippy, test, cargo-deny, dev-trade-one, dev-strategies, console, agent-links, review-delta, merge-approval, ci-scripts]
+    needs: [changes, fmt, file-loc, clippy, test, cargo-deny, dev-trade-one, dev-strategies, image, image-dev, image-arm64,
+      console, agent-links, review-delta, merge-approval, ci-scripts]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

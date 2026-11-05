@@ -23,16 +23,22 @@ areas() {
   printf '%s\n' "$@" | ./scripts/ci-areas.sh | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//'
 }
 
-every="agent_docs agent_scripts ci_scripts console merge_approval rust"
-check "a Rust source file" "rust" "$(areas crates/trader/src/lib.rs)"
-check "the manifests, lockfile, toolchain and policy" "rust" \
-  "$(areas Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml deny.toml)"
-check "the example config and the dev scenarios" "rust" "$(areas config/example.toml scripts/dev-trade-one.sh scripts/dev-strategies.sh)"
-check "the dev stack feeds the dev scenario and its test" "ci_scripts rust" "$(areas scripts/dev-stack.sh)"
+every="agent_docs agent_scripts ci_scripts console image merge_approval rust"
+check "a Rust source file feeds the Rust jobs and the image" "image rust" "$(areas crates/trader/src/lib.rs)"
+check "the manifests, lockfile and toolchain feed the image too" "image rust" \
+  "$(areas Cargo.toml Cargo.lock rust-toolchain.toml)"
+check "the format and supply-chain policies, the example config and the strategies' scenario" "rust" \
+  "$(areas rustfmt.toml deny.toml config/example.toml scripts/dev-strategies.sh)"
+check "the dev scenario runs in the Rust jobs and the image" "image rust" "$(areas scripts/dev-trade-one.sh)"
+check "the dev stack feeds the dev scenarios and its test" "ci_scripts image rust" "$(areas scripts/dev-stack.sh)"
 check "the dev stack's test" "ci_scripts" "$(areas scripts/dev-stack-test.sh)"
 check "the line cap feeds the Rust jobs and its test" "ci_scripts rust" "$(areas scripts/check-file-loc.sh)"
 check "a crate README reads nothing" "" "$(areas crates/trader/README.md)"
-check "a console file" "console" "$(areas console/src/App.tsx console/package-lock.json)"
+check "a console file feeds the console job and the image" "console image" \
+  "$(areas console/src/App.tsx console/package-lock.json)"
+check "the image's build, its check, its wrapper and its scenario" "image" \
+  "$(areas Dockerfile .dockerignore docker/retry docker/apt.conf scripts/check-image-binary.sh scripts/docker-trader.sh \
+    scripts/dev-attestation.sh)"
 check "the README, SECURITY.md and LICENSE feed the link checker" "agent_docs" \
   "$(areas README.md SECURITY.md LICENSE)"
 check "the agent docs and the link checker" "agent_docs" \
@@ -43,7 +49,7 @@ check "the merge gate" "merge_approval" \
   "$(areas scripts/check-merge-approved.sh scripts/check-merge-approved-test.sh)"
 check "the CI scripts and the line cap's test" "ci_scripts" \
   "$(areas scripts/ci-areas.sh scripts/check-ci-passed.sh scripts/ci-test.sh scripts/check-file-loc-test.sh)"
-check "several areas" "console rust" "$(areas crates/trader/src/main.rs console/index.html)"
+check "several areas" "console image rust" "$(areas crates/trader/src/main.rs console/index.html)"
 check "a workflow change selects every area" "$every" "$(areas .github/workflows/ci.yaml)"
 check "an unlisted path selects every area" "$every" "$(areas .gitignore)"
 check "an unlisted path among listed ones selects every area" "$every" "$(areas README.md .gitignore)"

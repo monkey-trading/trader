@@ -1,14 +1,16 @@
 //! The node's REST API. Every call carries a fresh challenge, and its answer counts only once the
 //! enclave key's signature over it, the request, and that challenge verifies (`engine_wire`). An
-//! answer that does not verify is an error, never data.
+//! answer that does not verify is an error, never data. The signer is the enclave address the
+//! node's attestation names (`attestation`), read once before any call.
 
 pub mod api;
+pub mod attestation;
 mod tls;
 pub use tls::Tls;
 
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use bytes::Bytes;
 use engine_wire::{
     CHALLENGE_HEADER, Deployment, Error as WireError, Received, ReceivedError, SEQ_HEADER, SIGNATURE_HEADER,
@@ -45,10 +47,10 @@ pub struct Verified<T> {
 /// Why a call has no answer to act on.
 #[derive(Debug, thiserror::Error)]
 pub enum CallError {
-    /// The answer's signature is not the configured signer's over it: another key signed it, or it
+    /// The answer's signature is not the attested signer's over it: another key signed it, or it
     /// is not the answer that was signed. `engine_wire` cannot tell the two apart, and over a
     /// pinned TLS connection neither passes by chance.
-    #[error("{target}: the answer is not signed by the configured signer")]
+    #[error("{target}: the answer is not signed by the attested signer")]
     WrongSigner { target: String },
     /// The answer is unsigned, malformed, or not for this request.
     #[error("{target}: the answer does not verify: {source}")]
@@ -100,7 +102,7 @@ impl Node {
         let target = target(method.as_str(), path);
         let mut challenge = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut challenge);
-        let answer = timeout(self.timeout, self.exchange(&method, path, &body, &challenge))
+        let answer = timeout(self.timeout, exchange(&self.tls, &method, path, &body, Some(&challenge)))
             .await
             .map_err(|_| anyhow!("no answer within {:?}", self.timeout))
             .and_then(|answer| answer)
@@ -129,36 +131,54 @@ impl Node {
             .map_err(|source| CallError::Failed { target, source })?;
         Ok(Verified { body, time_ms: verified.time_ms, head_seq: verified.head_seq })
     }
+}
 
-    /// Sends one HTTP/1.1 request on a new connection and reads its answer whole.
-    /// Error cases:
-    /// - the connection or the exchange fails, or the body is over `MAX_ANSWER_BYTES`
-    async fn exchange(
-        &self,
-        method: &Method,
-        path: &str,
-        body: &Bytes,
-        challenge: &[u8; 32],
-    ) -> anyhow::Result<Answer> {
-        let stream = self.tls.connect().await?;
-        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
-        let request = Request::builder()
-            .method(method)
-            .uri(path)
-            .header(HOST, self.tls.url().authority())
-            .header(CONTENT_TYPE, "application/json")
-            .header(CHALLENGE_HEADER, hex::encode(challenge))
-            .body(Full::new(body.clone()))?;
-        // The connection closes once the answer is read and `sender` is dropped.
-        let answer = async move {
-            let response = sender.send_request(request).await?;
-            let (parts, body) = response.into_parts();
-            let body = Limited::new(body, MAX_ANSWER_BYTES).collect().await.map_err(|e| anyhow!(e))?;
-            anyhow::Ok(Answer { status: parts.status.as_u16(), headers: parts.headers, body: body.to_bytes() })
-        };
-        let (answer, _) = tokio::join!(answer, connection);
-        answer
+/// `GET path` from the node `tls` connects to, an answer the node does not sign (its attestation and
+/// the attestation's collateral), as its 200 body. It proves nothing by itself: the caller checks it.
+/// Error cases:
+/// - no 200 answer within `timeout`, or a body over `MAX_ANSWER_BYTES`
+pub async fn fetch_unsigned(tls: &Tls, path: &str, timeout_after: Duration) -> anyhow::Result<Bytes> {
+    let answer = timeout(timeout_after, exchange(tls, &Method::GET, path, &Bytes::new(), None))
+        .await
+        .map_err(|_| anyhow!("GET {path}: no answer within {timeout_after:?}"))?
+        .with_context(|| format!("GET {path}"))?;
+    if answer.status != 200 {
+        bail!("GET {path}: {} {}", answer.status, String::from_utf8_lossy(&answer.body));
     }
+    Ok(answer.body)
+}
+
+/// Sends one HTTP/1.1 request on a new connection, under `challenge` when given, and reads its
+/// answer whole.
+/// Error cases:
+/// - the connection or the exchange fails, or the body is over `MAX_ANSWER_BYTES`
+async fn exchange(
+    tls: &Tls,
+    method: &Method,
+    path: &str,
+    body: &Bytes,
+    challenge: Option<&[u8; 32]>,
+) -> anyhow::Result<Answer> {
+    let stream = tls.connect().await?;
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(HOST, tls.url().authority())
+        .header(CONTENT_TYPE, "application/json");
+    if let Some(challenge) = challenge {
+        request = request.header(CHALLENGE_HEADER, hex::encode(challenge));
+    }
+    let request = request.body(Full::new(body.clone()))?;
+    // The connection closes once the answer is read and `sender` is dropped.
+    let answer = async move {
+        let response = sender.send_request(request).await?;
+        let (parts, body) = response.into_parts();
+        let body = Limited::new(body, MAX_ANSWER_BYTES).collect().await.map_err(|e| anyhow!(e))?;
+        anyhow::Ok(Answer { status: parts.status.as_u16(), headers: parts.headers, body: body.to_bytes() })
+    };
+    let (answer, _) = tokio::join!(answer, connection);
+    answer
 }
 
 /// An answer as received.

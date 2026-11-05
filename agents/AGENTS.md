@@ -8,7 +8,7 @@ own account, and serves a web console on the host's address. The layout is a Car
 workspace with `trader-core` (indicators, strategies, sizing and risk limits, with no IO) and
 `trader` (the binary: the node's API and stream, signing, keys, chain calls, and the console
 server), and `console/`, a Vite, React and TypeScript app built to static files that the binary
-will embed. The engine's own crates (`engine-core`, `engine-wire`, and later `engine-verify`) are
+will embed. The engine's own crates (`engine-core`, `engine-wire`, and `engine-verify`) are
 Cargo git dependencies pinned by one `rev`. This file is an index: load only the rule whose
 hint matches the current action. Links in this file are relative to `agents/`; commands run from
 the repository root.
@@ -39,7 +39,10 @@ list.
 - **crates/trader/** — `trader`, the binary (`main.rs` over `lib.rs`): `trader run --config` trades
   one account in one market. `config/` loads and checks the TOML config; `keys.rs` unlocks the
   account key (a Web3 Secret Storage keystore, or a hex file in a dev build) into a signing key that
-  zeroes on drop, and refuses outside a dev build the keys the repository publishes; `node/` makes
+  zeroes on drop, and refuses in a production build the keys the repository publishes; `node/`
+  verifies the node's attestation before any other call (`attestation.rs`: an SEV-SNP quote with
+  `engine-verify` against the release manifests the config names, or a dev build's mock), whose
+  enclave address is the signer and whose TLS key every later connection must present, and makes
   REST calls over TLS pinned to the node's key hash (or publicly rooted), each under a fresh
   challenge and verified with `engine_wire::verify_received`; `stream/` reads the public log over
   one `signed=1` connection, verifying each frame with `FrameVerifier`, refusing gaps and resuming
@@ -58,10 +61,13 @@ list.
   time and a split's halt in a file under `state_dir`, reads the account's equity against the daily
   loss limit, and closes the position when the limit stops the account; the account is read again
   after each fill, every minute, and at each bar, and nothing is valued or ordered from a read that
-  is not at the log.
-  `tests/` runs it against a local stand-in node (`tests/common/`) that signs its answers and
-  frames and injects faults. Its `README.md` lists every file.
-- **config/** — `example.toml`, the bot's documented example config, which the config tests load.
+  is not at the log. `metrics.rs` holds the Prometheus registry the process owns, served on a
+  loopback listener. The `production` feature refuses at config load what only a dev build takes (a
+  mock attestation, an extra root, a pinned TLS key, a hex key). `tests/` runs it against a local
+  stand-in node (`tests/common/`) that signs its answers and frames, serves a mock or a test-signed
+  attestation, and injects faults. Its `README.md` lists every file.
+- **config/** — `example.toml`, the bot's documented example config, which the config tests load,
+  and `README.md`, the config reference, which documents every key.
 - **console/** — the Vite, React and TypeScript app (`src/` with `main.tsx`, `App.tsx`,
   `styles.css`, and its tests; `index.html`, the page that mounts `src/main.tsx`;
   `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`,
@@ -73,15 +79,24 @@ list.
 - **rustfmt.toml** — `max_width = 120` and `use_small_heuristics = "Max"`.
 - **deny.toml** — `cargo-deny` policy: advisories, allowed licenses, bans, and sources, with the
   engine repository as the one allowed git source.
+- **Dockerfile**, **.dockerignore**, **docker/** — the image: a static `trader` with the console
+  embedded on an empty base, built natively for linux/amd64 and linux/arm64 with every input pinned
+  (base images by digest, the musl standard library by SHA-256, `musl-tools` from a Debian
+  snapshot through `docker/apt.conf`, downloads under `docker/retry`); `VARIANT=production` (the
+  default) or `dev`, and a `binary` target for the binary alone.
 - **README.md**, **SECURITY.md**, **LICENSE** — the public introduction, the security policy (the
   private reporting address, response times, disclosure, safe harbour, scope), and Apache License
   2.0.
 - **.github/workflows/** — `ci.yaml`: fmt, the file line cap, clippy, tests, `cargo-deny`, the dev
   scenarios (`dev-trade-one` and `dev-strategies`, which cache the engine's built binaries by the pinned commit), the
   console's audit, lint, type check, tests and build, the agent docs' links, the review-delta
-  helper's test, the merge approval gate's test, and the CI scripts' test, on every push to `main`, every PR, and every
+  helper's test, the merge approval gate's test, the CI scripts' test, the production build's
+  refusals (in `test`), and the image (`image`: the Dockerfile's lint, the production image for
+  linux/amd64 with its binary checked static and `dev-attestation.sh` run with it as the bot;
+  `image-dev`: the dev image running `dev-trade-one.sh`; `image-arm64`: the production image built
+  on an arm64 runner), on every push to `main`, every PR, and every
   merge group of the merge queue. On a PR, the first job, `changes`, sorts the changed files into
-  the Rust, console, agent-docs, agent-script, merge-approval and CI-script areas with
+  the Rust, console, image, agent-docs, agent-script, merge-approval and CI-script areas with
   `scripts/ci-areas.sh` (an explicit path list), and each job runs only when its area changed; a push to `main`, a merge group, a manual run, a
   workflow change, a failed diff, or any path the list does not name runs every job. A push to
   `main` whose commit passed a merge group runs no area, only compiling in the jobs that save a
@@ -98,6 +113,10 @@ list.
   which follows the queue's entries from the group's head down to `main` and passes only if the
   latest `merge-approved` status on the head of every PR in the group is `success` from the owner's
   account. It never runs on a pull request, where the owner's commit status is the check.
+  `release.yaml` runs on a `v*` tag only when the owner's account pushed it on a commit of `main`:
+  it builds the production binary and image on an amd64 and an arm64 runner, pushes the image to
+  the GitHub Container Registry under the tag, and attaches the binaries and `SHA256SUMS` to the
+  tag's GitHub release.
 - **scripts/** — `dev-stack.sh`, a dev node for the bot: it reads the engine commit from
   `Cargo.lock`, fetches it into a cache outside the repository (`TRADER_ENGINE_CACHE`, by default
   under `~/.cache/monkeytrading-trader/engine/`), builds the node and its scenario tools once per
@@ -109,6 +128,9 @@ list.
   scenario on it: one account trading BTC-USD for fifteen minutes, checked against its history and
   emissions; `dev-strategies.sh`, the strategies' scenario: seven accounts on the six strategies and
   a tiny daily loss limit for fifteen minutes, checked against their limits and history;
+  `dev-attestation.sh`, the production build refusing the dev stack's config and the `attestation`
+  tests; `docker-trader.sh`, which runs the image as `TRADER_BIN` for a scenario;
+  `check-image-binary.sh`, which checks an image's binary is static for its platform and runs;
   `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
   `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo;
@@ -136,7 +158,15 @@ Run from the repo root:
   `SCENARIO_ARTIFACTS` keeps the logs); the strategies' scenario: `./scripts/dev-strategies.sh`
   (about twenty minutes, the same variables)
 - Test one crate: `cargo test -p trader-core` or `cargo test -p trader`; the workspace:
-  `cargo test --workspace --locked`
+  `cargo test --workspace --locked`; the production build's refusals:
+  `cargo test -p trader --locked --features production --lib production_build`
+- Attestation dev scenario: `./scripts/dev-attestation.sh` (what `dev-stack.sh` needs; about two
+  minutes; `TRADER_BIN` uses a built production bot)
+- Image: `docker buildx build --platform linux/amd64 --build-arg VARIANT=production -t trader .`
+  (`VARIANT=dev` for the dev scenarios, `--target binary --output type=local,dest=<dir>` for the
+  binary alone); its check: `./scripts/check-image-binary.sh <image> <x86-64|aarch64>`; a scenario
+  with the image as the bot: `TRADER_BIN=$PWD/scripts/docker-trader.sh TRADER_IMAGE=<image>
+  ./scripts/dev-trade-one.sh`; lint: `hadolint Dockerfile`
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - Format check: `cargo fmt --all -- --check`
 - File line cap: `./scripts/check-file-loc.sh`; its test: `./scripts/check-file-loc-test.sh`
@@ -174,16 +204,16 @@ Run from the repo root:
   [git-workflow](rules/git-workflow.md#local-checks-before-push) come first.
 - **No git submodules, ever.** Code from another repository comes through Cargo, npm, or a
   script-managed gitignored cache, never a submodule.
-- **The engine is pinned once.** `engine-core` and `engine-wire` (and `engine-verify`, once the
-  production build uses it) are Cargo git dependencies on `https://github.com/monkey-trading/engine`
-  with one shared `rev`; `Cargo.lock` records the commit, so the bot signs exactly what the node
+- **The engine is pinned once.** `engine-core`, `engine-wire` and `engine-verify` are Cargo git
+  dependencies on `https://github.com/monkey-trading/engine` with one shared `rev`; `Cargo.lock` records the commit, so the bot signs exactly what the node
   checks. That `rev` is the only pin of the engine, `scripts/dev-stack.sh` builds its node from the
   same commit, and the README names the node it supports
   ([rust-implementation](skills/rust-implementation/SKILL.md#the-engine-crates)).
 - **`trader-core` does no IO.** No clocks, randomness, files, environment, or network: time and
   prices arrive as arguments, so strategies are tested and benchmarked without a network.
-- **The node's answers are verified.** Every signed answer and stream frame is checked against the
-  node's signer before the bot acts on it; one that fails the check is no data.
+- **The node's answers are verified.** The signer is the enclave address the node's verified
+  attestation names, never a config value. Every signed answer and stream frame is checked against
+  it before the bot acts on it; one that fails the check is no data.
 - **Keys stay with the bot.** No route of the console returns a key, and nothing the console can do
   moves funds away from an account's own key.
 - **Public text.** The repository is public. Its README, docs, code comments, issues, and PR text

@@ -1,5 +1,5 @@
 //! The public log over one signed stream connection (`/v1/stream?signed=1`). Each frame is checked
-//! with `engine_wire::FrameVerifier` against the configured signer before its message is read, and
+//! with `engine_wire::FrameVerifier` against the attested signer before its message is read, and
 //! the messages must follow each other with no gap. A connection that fails a check, falls silent
 //! for longer than the stream timeout, or drops is closed, and a new one resumes right after the
 //! last message returned, so the caller sees every message once, in order.
@@ -41,9 +41,9 @@ pub struct Frame {
 /// Why the stream cannot go on.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
-    /// A frame's signature is not the configured signer's over it: another key signed it, or it is
+    /// A frame's signature is not the attested signer's over it: another key signed it, or it is
     /// not the frame that was signed.
-    #[error("a stream frame is not signed by the configured signer")]
+    #[error("a stream frame is not signed by the attested signer")]
     WrongSigner,
     /// A frame of a version or shape this crate cannot read, or a verified message the bot cannot
     /// place in the log: no type, or no offset it can read. The node would send it again on every
@@ -84,7 +84,7 @@ impl Stream {
     /// The next message after the last one returned, verified and in order, connecting and
     /// reconnecting as needed. Cancel-safe: a frame counts as returned only once this returns it.
     /// Error cases:
-    /// - a frame's signature is not the configured signer's over it
+    /// - a frame's signature is not the attested signer's over it
     /// - a frame of another version or shape, or a verified message with no type or readable offset
     pub async fn next(&mut self) -> Result<Frame, StreamError> {
         loop {

@@ -13,6 +13,7 @@ pub use startup::stop_signal;
 mod stop;
 
 use std::collections::VecDeque;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
 use engine_core::Fixed;
@@ -31,6 +32,7 @@ use trader_core::strategies::{Strategy, is_valid_close};
 use crate::bot::day::{Saved, StateFile, holding};
 use crate::config::Config;
 use crate::keys::AccountKey;
+use crate::metrics::{AccountMetrics, FloatGauge, Metrics};
 use crate::node::{CallError, Node};
 use crate::stream::message::{CommandMessage, Head, Quotes};
 use crate::stream::{Frame, Stream, StreamError};
@@ -48,9 +50,9 @@ pub(super) const READ_EVERY_MS: Millis = 60_000;
 /// Why the bot stopped on its own.
 #[derive(Debug, thiserror::Error)]
 pub enum Halt {
-    /// An answer or frame from the node is not the configured signer's: nothing it says is trusted,
+    /// An answer or frame from the node is not the attested signer's: nothing it says is trusted,
     /// and nothing more is sent to it.
-    #[error("the node's answers are not signed by the configured signer")]
+    #[error("the node's answers are not signed by the attested signer")]
     WrongSigner,
     /// The log holds what the bot cannot follow; it stops before acting on a view it cannot confirm.
     #[error("{0:#}")]
@@ -128,10 +130,14 @@ pub struct Bot {
     trading_from: Millis,
     /// The time of the last command read from the log.
     log_ts: Millis,
+    /// The account's series in the market, and the stream's lag.
+    metrics: AccountMetrics,
+    stream_lag: FloatGauge,
 }
 
 /// Runs the bot until `stop` completes, then cancels the account's resting orders and, when
-/// configured, closes its position; or until it halts on its own, leaving the account as it is.
+/// configured, closes its position; or until it halts on its own, leaving the account as it is. It
+/// records what it does in `metrics`.
 /// Error cases:
 /// - the key or the startup reads fail (see `startup::start`)
 /// - the bot halts (see `Halt`)
@@ -139,10 +145,11 @@ pub async fn run(
     cfg: Config,
     env: impl Fn(&str) -> Option<String>,
     stop: impl Future<Output = ()>,
+    metrics: &Metrics,
 ) -> anyhow::Result<()> {
     let key = AccountKey::load(&cfg.account.key, env).await?;
     info!(account = %key.address(), "account key unlocked");
-    let (mut bot, mut stream) = match startup::start(&cfg, key).await {
+    let (mut bot, mut stream) = match startup::start(&cfg, key, metrics).await {
         Ok(started) => started,
         Err(e) => {
             if let Some(CallError::WrongSigner { .. }) = e.downcast_ref::<CallError>() {
@@ -208,6 +215,7 @@ impl Bot {
         let message: CommandMessage<'_> = serde_json::from_str(&frame.msg).map_err(|e| unreadable(e.into()))?;
         self.log_ts = message.ts;
         self.marks.advance(message.ts);
+        self.stream_lag.set(lag_seconds(SystemTime::now(), message.ts));
         let command = message.head().map_err(unreadable)?;
         let events = message.events().map_err(unreadable)?;
         match command.kind {
@@ -373,6 +381,13 @@ impl Bot {
             info!(alert_resolved = "cash_not_positive", balance = %self.balance, "cash is positive again");
         }
     }
+}
+
+/// How long after `ts`, a sequenced time in milliseconds, the clock read `now`, in seconds: a float
+/// for reading only, negative when the bot's clock is behind the node's.
+fn lag_seconds(now: SystemTime, ts: Millis) -> f64 {
+    let now_ms = now.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
+    (now_ms as f64 - ts as f64) / 1000.0
 }
 
 /// Checks the bot can follow `spec`'s index from the log: a market quoted in USD and priced from spot

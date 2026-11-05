@@ -102,7 +102,7 @@ async fn another_signer_mid_run_halts_without_sending() {
         stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
     }
     let err = tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap_err();
-    assert!(err.to_string().contains("not signed by the configured signer"), "{err:#}");
+    assert!(err.to_string().contains("not signed by the attested signer"), "{err:#}");
     assert!(stand_in.with(|i| i.posts.is_empty()));
 }
 
