@@ -17,6 +17,7 @@ mod reads;
 mod run;
 mod startup;
 pub use startup::stop_signal;
+pub(crate) use startup::{UNLOCKS_AT_ONCE, label};
 mod stop;
 mod warm;
 

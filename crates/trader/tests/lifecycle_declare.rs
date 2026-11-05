@@ -165,6 +165,35 @@ async fn the_command_declares_only_for_confirmed_accounts() {
     assert_eq!(s.posts("/v1/eligibility").len(), 1);
 }
 
+/// An account whose key does not unlock, or that is listed twice, is reported under its key's path
+/// and fails the command, and the others carry on; an account named alone is acted for without them.
+#[tokio::test]
+async fn an_account_that_cannot_be_used_is_reported_and_the_others_carry_on() {
+    let s = Setup::start(false).await;
+    s.answer(&eligibility_path(), 200, declared("professional"));
+    let entry = |file: &str| {
+        format!(
+            "[[account]]\nkey = {{ type = \"hex_file\", path = \"{file}\" }}\n[[account.strategy]]\n\
+             market = \"BTC-USD\"\nbar = \"1m\"\nfast = 1\nslow = 2\nqty = \"1\"\nmax_slippage_bps = 25\n"
+        )
+    };
+    let extra = format!("{}{}", entry("missing.hex"), entry("account.hex"));
+    let cfg = || common::lifecycle::config(&s.node, &[s.chain.url()], s.dir.path(), false, &extra);
+    let declare = || Action::Declare { class: Class::Professional, confirm: vec![] };
+    let mut out = Vec::new();
+    let err = within(cli::run(cfg(), vec![], declare(), |_| None, false, &mut out)).await.unwrap_err();
+    assert!(err.to_string().contains("2 of 3 accounts failed"), "{err}");
+    let out = String::from_utf8(out).unwrap();
+    let missing = s.dir.path().join("missing.hex").display().to_string();
+    let twice = format!("{}: {} is listed twice", s.dir.path().join("account.hex").display(), account());
+    assert!(out.contains(&format!("{missing}: ")) && out.contains(&twice), "{out}");
+    assert!(out.contains(&format!("{}: declared Professional already", account())), "{out}");
+    let mut out = Vec::new();
+    within(cli::run(cfg(), vec![account()], declare(), |_| None, false, &mut out)).await.unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(!out.contains("missing.hex") && !out.contains("listed twice"), "{out}");
+}
+
 // ── Helpers ──
 
 fn eligibility_path() -> String {

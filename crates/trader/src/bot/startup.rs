@@ -30,7 +30,7 @@ use crate::stream::Stream;
 const READ_TRIES: u32 = 3;
 const READ_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 /// How many keystores are decrypted at once: key derivation is slow by design.
-const UNLOCKS_AT_ONCE: usize = 4;
+pub(crate) const UNLOCKS_AT_ONCE: usize = 4;
 
 /// A future that completes on SIGINT or SIGTERM.
 /// Error cases:
@@ -291,7 +291,7 @@ async fn account_in(
 }
 
 /// What names an account in a report before its address is known: its key file.
-fn label(plan: &AccountPlan) -> String {
+pub(crate) fn label(plan: &AccountPlan) -> String {
     match &plan.key {
         KeySource::Keystore { path, .. } | KeySource::HexFile { path } => path.display().to_string(),
     }
