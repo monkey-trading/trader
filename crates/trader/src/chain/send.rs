@@ -1,13 +1,15 @@
 //! A transaction: estimated, priced within the cap, signed with the payer's key, sent to every
-//! endpoint, and followed to its receipt. A transaction is signed again on a fresh nonce only once
-//! its nonce is mined by another: an endpoint that took it without answering, or answered that its
-//! nonce is spent because it was itself mined, leaves it to be followed, never sent twice.
+//! endpoint, and followed to its receipt. It is estimated and signed again on a fresh nonce only
+//! once another transaction from the same key took its nonce: the nonce is mined and every
+//! endpoint, poll after poll, answers that it holds no receipt for it. An endpoint that took it
+//! without answering, one that answered that its nonce is spent because it was itself mined, or one
+//! that fails to say whether it holds the receipt, leaves it to be followed, never sent twice.
 
 use std::sync::atomic::Ordering;
 
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::{Address, B256, Signature, TxKind, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256};
 use alloy_provider::Provider;
 use alloy_provider::transport::RpcError;
 use alloy_rpc_types_eth::{BlockId, TransactionReceipt};
@@ -22,6 +24,9 @@ use crate::keys::AccountKey;
 const NONCE_ATTEMPTS: usize = 3;
 /// The gas limit's margin over the estimate, in percent: state can move between the two.
 const GAS_HEADROOM_PERCENT: u64 = 20;
+/// How many polls in a row every endpoint must answer that it holds no receipt for a transaction
+/// whose nonce is mined before it counts as replaced: an endpoint can lag the block that mined it.
+const ABSENT_POLLS: u32 = 5;
 
 /// What sending a signed transaction to every endpoint came to.
 enum Broadcast {
@@ -35,6 +40,15 @@ enum Broadcast {
     Refused(String),
 }
 
+/// What the endpoints say of a transaction's receipt.
+enum Lookup {
+    Found(Box<TransactionReceipt>),
+    /// Every endpoint answered that it holds none.
+    Absent,
+    /// No endpoint holds one, and at least one did not answer.
+    Unknown,
+}
+
 impl Chain {
     /// Sends `call` from `payer`, which signs it and pays its gas, and waits for its receipt.
     /// Error cases:
@@ -43,25 +57,6 @@ impl Chain {
         let from = Address::from(payer.address().0);
         let what = &call.what;
         let not_sent = |reason: String| TxError::NotSent { what: what.clone(), reason };
-        let estimate = request(Some(from), call.to, call.data.clone());
-        let gas = match self
-            .read(|endpoint| {
-                let estimate = estimate.clone();
-                async move { endpoint.estimate_gas(estimate).await }
-            })
-            .await
-        {
-            Ok(gas) => gas,
-            Err(ReadError::Answer { revert: Some(data), .. }) => {
-                let reason = revert_reason(&data);
-                return Err(TxError::WouldRevert { what: what.clone(), reason, revert: Some(data) });
-            }
-            Err(ReadError::Answer { message, .. }) if message.contains("revert") => {
-                return Err(TxError::WouldRevert { what: what.clone(), reason: message, revert: None });
-            }
-            Err(e) => return Err(not_sent(format!("estimating its gas: {e}"))),
-        };
-        let gas_limit = gas.saturating_add(gas.saturating_mul(GAS_HEADROOM_PERCENT) / 100);
         let fee = |e: ReadError| not_sent(format!("its fee: {e}"));
         let price = self.read(|endpoint| async move { endpoint.get_gas_price().await }).await.map_err(fee)?;
         let tip =
@@ -74,6 +69,8 @@ impl Chain {
             return Err(not_sent(reason));
         }
         for attempt in 1..=NONCE_ATTEMPTS {
+            // Estimated on each attempt: one signed again runs on the state that spent the last nonce.
+            let gas_limit = self.gas_limit(from, call).await?;
             let nonce = self
                 .read(|endpoint| async move { endpoint.get_transaction_count(from).pending().await })
                 .await
@@ -97,32 +94,56 @@ impl Chain {
             match self.broadcast(&envelope.encoded_2718()).await {
                 Broadcast::Sent => {
                     info!(tx = %hash, nonce, gas_limit, max_fee, to = %call.to, from = %from, "{what}: sent");
-                    return self.landed(call, hash, gas_limit).await;
                 }
                 Broadcast::Unanswered(reason) => {
                     warn!(tx = %hash, nonce, "{what}: no endpoint answered ({reason}); following it, as one may have taken it");
-                    return self.landed(call, hash, gas_limit).await;
                 }
                 Broadcast::NonceSpent(message) => {
-                    info!(tx = %hash, nonce, "{what}: the nonce is spent or taken ({message}); waiting for it to be mined");
-                    if let Some(receipt) = self.spent_by(call, from, nonce, hash).await? {
-                        return self.checked(call, hash, receipt, gas_limit).await;
-                    }
-                    if attempt == NONCE_ATTEMPTS {
-                        return Err(not_sent(message));
-                    }
-                    warn!(nonce, "{what}: another transaction spent the nonce; signing again");
+                    info!(tx = %hash, nonce, "{what}: the nonce is spent or taken ({message}); following it");
                 }
                 Broadcast::Refused(message) => return Err(not_sent(message)),
             }
+            if let Some(receipt) = self.follow(call, from, nonce, hash).await? {
+                return self.checked(call, hash, receipt, gas_limit).await;
+            }
+            if attempt == NONCE_ATTEMPTS {
+                return Err(not_sent(format!("another transaction from {from} took each nonce it was signed on")));
+            }
+            warn!(nonce, "{what}: another transaction from the same key took the nonce; signing again");
         }
         unreachable!("the last attempt returns")
     }
 
-    /// Sends a signed transaction to every endpoint: it is sent once one takes it or already has it.
+    /// The gas limit for `call` from `from`: its estimate, with headroom.
+    /// Error cases:
+    /// - the call would revert (`WouldRevert`), or no estimate is read (`NotSent`)
+    async fn gas_limit(&self, from: Address, call: &Call) -> Result<u64, TxError> {
+        let what = &call.what;
+        let estimate = request(Some(from), call.to, call.data.clone());
+        let gas = match self
+            .read(|endpoint| {
+                let estimate = estimate.clone();
+                async move { endpoint.estimate_gas(estimate).await }
+            })
+            .await
+        {
+            Ok(gas) => gas,
+            Err(ReadError::Answer { revert: Some(data), .. }) => {
+                let reason = revert_reason(&data);
+                return Err(TxError::WouldRevert { what: what.clone(), reason, revert: Some(data) });
+            }
+            Err(ReadError::Answer { message, .. }) if message.contains("revert") => {
+                return Err(TxError::WouldRevert { what: what.clone(), reason: message, revert: None });
+            }
+            Err(e) => return Err(TxError::NotSent { what: what.clone(), reason: format!("estimating its gas: {e}") }),
+        };
+        Ok(gas.saturating_add(gas.saturating_mul(GAS_HEADROOM_PERCENT) / 100))
+    }
+
+    /// Sends a signed transaction to every endpoint: it is sent once one takes it or already has it,
+    /// and may be once one does not answer.
     async fn broadcast(&self, raw: &[u8]) -> Broadcast {
-        let (mut sent, mut spent, mut refused) = (false, None, None);
-        let mut unanswered = String::from("no endpoint");
+        let (mut sent, mut spent, mut refused, mut unanswered) = (false, None, None, None);
         for (index, endpoint) in self.endpoints.iter().enumerate() {
             match endpoint.send_raw_transaction(raw).await {
                 Ok(_) => sent = true,
@@ -140,40 +161,32 @@ impl Chain {
                     }
                 }
                 Err(e) => {
-                    unanswered = describe(&e);
-                    debug!(endpoint = index, "the transaction was not answered: {unanswered}");
+                    let reason = describe(&e);
+                    debug!(endpoint = index, "the transaction was not answered: {reason}");
+                    unanswered = Some(reason);
                 }
             }
         }
-        match (sent, spent, refused) {
+        // An endpoint that did not answer may have taken it, whatever another refused it for.
+        match (sent, spent, unanswered, refused) {
             (true, ..) => Broadcast::Sent,
-            (false, Some(message), _) => Broadcast::NonceSpent(message),
-            (false, None, Some(message)) => Broadcast::Refused(message),
-            (false, None, None) => Broadcast::Unanswered(unanswered),
+            (false, Some(message), ..) => Broadcast::NonceSpent(message),
+            (false, None, Some(reason), Some(refused)) => {
+                Broadcast::Unanswered(format!("{reason}; another: {refused}"))
+            }
+            (false, None, Some(reason), None) => Broadcast::Unanswered(reason),
+            (false, None, None, Some(message)) => Broadcast::Refused(message),
+            (false, None, None, None) => Broadcast::Unanswered(String::from("no endpoint")),
         }
     }
 
-    /// Waits for `hash`'s receipt, from whichever endpoint has it first, and checks it succeeded.
+    /// Follows `hash`, signed on `from`'s nonce `nonce`: its receipt once an endpoint holds it, or
+    /// `None` once another transaction took the nonce, which is when the nonce is mined and every
+    /// endpoint has answered that it holds no receipt for `hash` on `ABSENT_POLLS` polls in a row
+    /// since.
     /// Error cases:
-    /// - the transaction reverted, or no receipt came within the wait
-    async fn landed(&self, call: &Call, hash: B256, gas_limit: u64) -> Result<TransactionReceipt, TxError> {
-        let deadline = Instant::now() + self.receipt_timeout;
-        loop {
-            if let Some(receipt) = self.receipt(hash).await {
-                return self.checked(call, hash, receipt, gas_limit).await;
-            }
-            if Instant::now() >= deadline {
-                return Err(TxError::NoReceipt { what: call.what.clone(), hash, wait: self.receipt_timeout });
-            }
-            sleep(self.poll_interval).await;
-        }
-    }
-
-    /// Once `from`'s nonce `nonce` is mined, the receipt of `hash` if it is the transaction that
-    /// spent it, or `None` when another did.
-    /// Error cases:
-    /// - the nonce is still not mined after `receipt_timeout`: `hash` may yet be
-    async fn spent_by(
+    /// - neither is shown within `receipt_timeout`: `hash` may yet be mined
+    async fn follow(
         &self,
         call: &Call,
         from: Address,
@@ -181,14 +194,24 @@ impl Chain {
         hash: B256,
     ) -> Result<Option<TransactionReceipt>, TxError> {
         let deadline = Instant::now() + self.receipt_timeout;
+        let (mut mined, mut absent) = (false, 0);
         loop {
-            if let Some(receipt) = self.receipt(hash).await {
-                return Ok(Some(receipt));
+            let lookup = self.lookup(hash).await;
+            if let Lookup::Found(receipt) = lookup {
+                return Ok(Some(*receipt));
             }
-            let mined = self.read(|endpoint| async move { endpoint.get_transaction_count(from).latest().await }).await;
-            if mined.is_ok_and(|mined| mined > nonce) {
-                // Its nonce is mined: by this transaction if a receipt shows it now.
-                return Ok(self.receipt(hash).await);
+            if !mined {
+                let count =
+                    self.read(|endpoint| async move { endpoint.get_transaction_count(from).latest().await }).await;
+                // Its nonce is mined: by this transaction only if a receipt shows it.
+                mined = count.is_ok_and(|count| count > nonce);
+            } else if matches!(lookup, Lookup::Absent) {
+                absent += 1;
+                if absent >= ABSENT_POLLS {
+                    return Ok(None);
+                }
+            } else {
+                absent = 0;
             }
             if Instant::now() >= deadline {
                 return Err(TxError::NoReceipt { what: call.what.clone(), hash, wait: self.receipt_timeout });
@@ -197,14 +220,18 @@ impl Chain {
         }
     }
 
-    /// `hash`'s receipt from the first endpoint that has it.
-    async fn receipt(&self, hash: B256) -> Option<TransactionReceipt> {
+    /// What the endpoints say of `hash`'s receipt: the first that holds it, or whether every
+    /// endpoint answered.
+    async fn lookup(&self, hash: B256) -> Lookup {
+        let mut unknown = false;
         for endpoint in &self.endpoints {
-            if let Ok(Some(receipt)) = endpoint.get_transaction_receipt(hash).await {
-                return Some(receipt);
+            match endpoint.get_transaction_receipt(hash).await {
+                Ok(Some(receipt)) => return Lookup::Found(Box::new(receipt)),
+                Ok(None) => {}
+                Err(_) => unknown = true,
             }
         }
-        None
+        if unknown { Lookup::Unknown } else { Lookup::Absent }
     }
 
     /// `receipt` when its transaction succeeded, and raises the floor reads must reach to its
@@ -225,15 +252,16 @@ impl Chain {
             info!(tx = %hash, block = receipt.block_number, gas_used = receipt.gas_used, "{}: mined", call.what);
             return Ok(receipt);
         }
-        let reason = if receipt.gas_used >= gas_limit {
-            format!("it ran out of its {gas_limit} gas")
+        let (reason, revert) = if receipt.gas_used >= gas_limit {
+            (format!("it ran out of its {gas_limit} gas"), None)
         } else {
             self.replayed_reason(call, &receipt).await
         };
-        Err(TxError::Reverted { what: call.what.clone(), hash, reason })
+        Err(TxError::Reverted { what: call.what.clone(), hash, reason, revert })
     }
-    /// Why a reverted transaction reverted: its call replayed at its block.
-    async fn replayed_reason(&self, call: &Call, receipt: &TransactionReceipt) -> String {
+
+    /// Why a reverted transaction reverted, and its revert data: its call replayed at its block.
+    async fn replayed_reason(&self, call: &Call, receipt: &TransactionReceipt) -> (String, Option<Bytes>) {
         let replay = request(Some(receipt.from), call.to, call.data.clone());
         let block = BlockId::number(receipt.block_number.unwrap_or_default());
         match self
@@ -243,10 +271,10 @@ impl Chain {
             })
             .await
         {
-            Err(ReadError::Answer { revert: Some(data), .. }) => revert_reason(&data),
-            Err(ReadError::Answer { message, .. }) => message,
-            Ok(_) => String::from("its call no longer reverts, so the reason is unknown"),
-            Err(e) => format!("the reason was not read: {e}"),
+            Err(ReadError::Answer { revert: Some(data), .. }) => (revert_reason(&data), Some(data)),
+            Err(ReadError::Answer { message, .. }) => (message, None),
+            Ok(_) => (String::from("its call no longer reverts, so the reason is unknown"), None),
+            Err(e) => (format!("the reason was not read: {e}"), None),
         }
     }
 }

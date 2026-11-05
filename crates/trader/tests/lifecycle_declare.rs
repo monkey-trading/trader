@@ -100,6 +100,24 @@ async fn a_refusal_in_the_log_is_reported() {
     assert_eq!(s.posts("/v1/eligibility").len(), 1);
 }
 
+/// A declaration the node refuses in the log fails the command, so nothing run after it takes the
+/// account for declared.
+#[tokio::test]
+async fn the_command_fails_for_a_refused_declaration() {
+    let s = Setup::start(false).await;
+    s.answer(&eligibility_path(), 200, declared_none());
+    let rejected = json!([{ "type": "eligibility_rejected", "account": account(),
+        "reason": { "kind": "access", "reason": "united_states" } }]);
+    s.node.with(|i| i.replies.push_back(rejected));
+    let declare = Action::Declare { class: Class::Professional, confirm: vec![account()] };
+    let mut out = Vec::new();
+    let cfg = common::lifecycle::config(&s.node, &[s.chain.url()], s.dir.path(), false, "");
+    let err = within(cli::run(cfg, vec![], declare, |_| None, false, &mut out)).await.unwrap_err();
+    assert!(err.to_string().contains("1 of 1 accounts failed"), "{err}");
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains(&format!("{}: failed: the node refused the declaration", account())), "{out}");
+}
+
 /// When the answer never comes, the recorded declaration says whether it took: it is not asked
 /// again once it has.
 #[tokio::test]
@@ -192,6 +210,20 @@ async fn an_account_that_cannot_be_used_is_reported_and_the_others_carry_on() {
     within(cli::run(cfg(), vec![account()], declare(), |_| None, false, &mut out)).await.unwrap();
     let out = String::from_utf8(out).unwrap();
     assert!(!out.contains("missing.hex") && !out.contains("listed twice"), "{out}");
+}
+
+/// An action that sends nothing from the funding key goes ahead without it: a funding key that does
+/// not load fails only the actions it pays for.
+#[tokio::test]
+async fn the_funding_key_is_unlocked_only_for_the_actions_it_pays_for() {
+    let s = Setup::start(false).await;
+    s.answer(&eligibility_path(), 200, declared("professional"));
+    let unloadable = "[funding]\nkey = { type = \"hex_file\", path = \"missing.hex\" }\n";
+    let cfg = || common::lifecycle::config(&s.node, &[s.chain.url()], s.dir.path(), false, unloadable);
+    let declare = Action::Declare { class: Class::Professional, confirm: vec![] };
+    within(cli::run(cfg(), vec![], declare, |_| None, false, &mut Vec::new())).await.unwrap();
+    let err = within(cli::run(cfg(), vec![], Action::Claim, |_| None, false, &mut Vec::new())).await.unwrap_err();
+    assert!(format!("{err:#}").contains("the funding key"), "{err:#}");
 }
 
 // ── Helpers ──

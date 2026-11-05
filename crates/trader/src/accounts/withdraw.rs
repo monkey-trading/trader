@@ -18,7 +18,7 @@ use engine_core::types::AccountId;
 use tokio::time::{Instant, sleep};
 use tracing::{Instrument, info, info_span, warn};
 
-use crate::accounts::{Lifecycle, REQUEST_EXPIRY_MS, usdc_units};
+use crate::accounts::{Lifecycle, REQUEST_EXPIRY_MS, retry_later, usdc_units};
 use crate::chain::contracts::Vault;
 use crate::chain::{Call, TxError};
 use crate::keys::AccountKey;
@@ -52,12 +52,14 @@ pub struct Paid {
 
 impl Lifecycle {
     /// Withdraws `amount` USDC from `key`'s account when given, then pays every unpaid payout of
-    /// the account to the account, each sent by the funding key when there is one: it waits for the
-    /// queue to approve the request, for each payout's authorization, and for a replacement of any
-    /// that expired. Without an amount it only pays what is already approved.
+    /// the account to the account, each sent by the funding key when there is one: it pays each part
+    /// the queue approves as its authorization comes, asks for a replacement of one that expired,
+    /// and waits until the queue holds nothing more of the request. Without an amount it only pays
+    /// what is already approved.
     /// Error cases:
     /// - the amount is not whole USDC base units above zero
-    /// - the node refuses the request, or gives no answer to it
+    /// - the node refuses the request, gives no answer to it, or may have taken a request it asked
+    ///   to have sent again
     /// - a payout's authorization is not for this account, vault and chain
     /// - a transaction would revert, reverts, or gets no receipt (see `TxError`)
     /// - the request or a payout is still waiting after `settle_timeout`
@@ -68,30 +70,36 @@ impl Lifecycle {
             // The chain that pays it is checked before anything is asked of the node.
             self.tokens().await?;
             let deadline = Instant::now() + self.settle_timeout;
-            if let Some(amount) = amount {
-                let requested_seq = self.request(key, amount, deadline).await?;
-                self.approved(account, requested_seq, deadline).await?;
-            }
-            self.pay(key, deadline).await
+            let requested_seq = match amount {
+                Some(amount) => Some(self.request(key, amount, deadline).await?),
+                None => None,
+            };
+            self.pay(key, requested_seq, deadline).await
         }
         .instrument(span)
         .await
     }
 
     /// Requests a withdrawal of `amount`, asking again on a retry-later answer or a stale nonce
-    /// until `deadline`; the seq the queue knows the request by.
+    /// until `deadline`; the seq the queue knows the request by. A retry-later answer does not say
+    /// the node did not take the request, so it is asked again on the same nonce, which the node
+    /// takes at most once: a stale nonce after it may mean it was taken.
     /// Error cases:
     /// - the amount is not whole USDC base units above zero
     /// - the node refuses it, in the log or outside it, or gives no answer to it
+    /// - the node answers a stale nonce to a request asked again after a retry-later answer
     /// - it is still not taken at `deadline`
     async fn request(&self, key: &AccountKey, amount: Fixed, deadline: Instant) -> anyhow::Result<u64> {
         usdc_units(amount)?;
         let account = key.address();
+        // The nonce of a request the node asked to have sent later, which it may yet have taken.
+        let mut unsettled = None;
         loop {
             if Instant::now() >= deadline {
                 bail!("the node did not take the withdrawal request within {:?}", self.settle_timeout);
             }
-            let (nonce, now) = self.next_nonce(account).await?;
+            let (next, now) = self.next_nonce(account).await?;
+            let nonce = unsettled.unwrap_or(next);
             let expires_at = now.saturating_add(REQUEST_EXPIRY_MS);
             let hash = withdrawal_hash(&self.domain, account, amount, nonce, expires_at);
             let auth = RequestAuth { nonce, expires_at, signature: key.sign(&hash) };
@@ -101,10 +109,17 @@ impl Lifecycle {
                 Ok(answer) => return queued(&answer.body),
                 Err(error) => error,
             };
-            match (self.retry_later(&error), &error) {
+            match (retry_later(&error), &error) {
                 (Some(wait), _) => {
                     info!(?wait, "the node asks to request later: {error}");
-                    sleep(wait).await;
+                    unsettled = Some(nonce);
+                    sleep(wait.min(deadline.saturating_duration_since(Instant::now()))).await;
+                }
+                (None, CallError::Refused { status: 409, .. }) if unsettled.is_some() => {
+                    bail!(
+                        "the node may have taken the withdrawal request it asked to have sent again (nonce {nonce} \
+                         is spent): see `trader accounts status` before asking again"
+                    );
                 }
                 (None, CallError::Refused { status: 409, .. }) => info!("the nonce moved on; signing again"),
                 (None, CallError::Failed { .. }) => {
@@ -117,46 +132,45 @@ impl Lifecycle {
         }
     }
 
-    /// Waits until the queue holds nothing more of request `requested_seq`: every part approved.
-    /// Error cases:
-    /// - a read fails, or the request is still queued after `deadline`
-    async fn approved(&self, account: AccountId, requested_seq: u64, deadline: Instant) -> anyhow::Result<()> {
-        let mut position = None;
-        loop {
-            let queued = self.node.withdrawal_queue(account).await?;
-            let Some(mine) = queued.iter().find(|queued| queued.requested_seq == requested_seq) else {
-                info!(requested_seq, "the withdrawal is approved");
-                return Ok(());
-            };
-            if position != Some(mine.position) {
-                info!(position = mine.position, remaining = %mine.remaining, "the withdrawal waits in the queue");
-                position = Some(mine.position);
-            }
-            if Instant::now() >= deadline {
-                bail!("the withdrawal is still queued at position {} after {:?}", mine.position, self.settle_timeout);
-            }
-            sleep(self.poll_interval).await;
-        }
-    }
-
     /// Pays each of the account's unpaid payouts once its authorization is signed and usable,
-    /// asking for a replacement of one that expired, until none is left unpaid.
+    /// asking for a replacement of one that expired, until none is left unpaid and the queue holds
+    /// nothing more of request `requested_seq`, when there is one.
     /// Error cases:
     /// - a read fails, or an authorization does not match the account, vault and chain
     /// - a payment would revert, reverts, or gets no receipt
-    /// - a payout is still unpaid after `deadline`
-    async fn pay(&self, key: &AccountKey, deadline: Instant) -> anyhow::Result<Vec<Paid>> {
+    /// - the request is still queued, or a payout unpaid, after `deadline`
+    async fn pay(
+        &self,
+        key: &AccountKey,
+        mut requested_seq: Option<u64>,
+        deadline: Instant,
+    ) -> anyhow::Result<Vec<Paid>> {
         let account = key.address();
         let wallet = Address::from(account.0);
         let mut paid = Vec::new();
         let mut done = BTreeSet::new();
+        let mut position = None;
         // Each expired authorization the bot asked to replace, and the polls since it asked.
         let mut reissued: BTreeMap<(u64, u64), u32> = BTreeMap::new();
         loop {
+            // The queue is read before the payouts, so a part it no longer holds is among them.
+            if let Some(seq) = requested_seq {
+                match self.node.withdrawal_queue(account).await?.iter().find(|queued| queued.requested_seq == seq) {
+                    None => {
+                        info!(requested_seq = seq, "the withdrawal is approved");
+                        requested_seq = None;
+                    }
+                    Some(mine) if position != Some(mine.position) => {
+                        info!(position = mine.position, remaining = %mine.remaining, "the withdrawal waits in the queue");
+                        position = Some(mine.position);
+                    }
+                    Some(_) => {}
+                }
+            }
             let answer = self.node.payouts(account).await?;
             let now_s = answer.time_ms / 1000;
             let unpaid: Vec<&Payout> = answer.payouts.iter().filter(|payout| !done.contains(&payout.nonce)).collect();
-            if unpaid.is_empty() && answer.loaded {
+            if unpaid.is_empty() && answer.loaded && requested_seq.is_none() {
                 return Ok(paid);
             }
             for payout in unpaid {
@@ -177,7 +191,11 @@ impl Lifecycle {
                             info!(nonce, amount = %payout.amount, tx = %receipt.transaction_hash, "withdrawal paid");
                             paid.push(Paid { nonce, amount: payout.amount, tx: receipt.transaction_hash });
                         }
-                        Err(TxError::WouldRevert { revert: Some(data), .. }) if already_paid(&data) => {
+                        // Paid by another sender since the bot read it unpaid, perhaps on an endpoint behind.
+                        Err(
+                            TxError::WouldRevert { revert: Some(data), .. }
+                            | TxError::Reverted { revert: Some(data), .. },
+                        ) if already_paid(&data) => {
                             info!(nonce, "the payout is paid already");
                         }
                         Err(e) => return Err(e.into()),
@@ -193,7 +211,19 @@ impl Lifecycle {
                 }
             }
             if Instant::now() >= deadline {
-                bail!("withdrawals are still unpaid after {:?}: see `trader accounts status`", self.settle_timeout);
+                let paid: Vec<String> =
+                    paid.iter().map(|paid| format!("{} USDC in {}", paid.amount, paid.tx)).collect();
+                let paid = if paid.is_empty() { String::new() } else { format!(" (paid {})", paid.join(", ")) };
+                match position.filter(|_| requested_seq.is_some()) {
+                    Some(position) => bail!(
+                        "the withdrawal is still queued at position {position} after {:?}{paid}: see `trader accounts status`",
+                        self.settle_timeout
+                    ),
+                    None => bail!(
+                        "withdrawals are still unpaid after {:?}{paid}: see `trader accounts status`",
+                        self.settle_timeout
+                    ),
+                }
             }
             sleep(self.poll_interval).await;
         }
@@ -251,7 +281,7 @@ impl Lifecycle {
             Ok(_) => Ok(()),
             // Already replaced, or not yet expired by the node's clock: the payouts show which, and the
             // bot asks again later if they still show it expired.
-            Err(e @ CallError::Refused { status: 400, .. }) => {
+            Err(e @ (CallError::Refused { status: 400, .. } | CallError::RetryLater { .. })) => {
                 warn!("the reissue was not taken: {e}");
                 Ok(())
             }

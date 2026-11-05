@@ -6,7 +6,7 @@ use std::io::{BufRead, Write};
 
 use alloy_primitives::U256;
 use alloy_primitives::utils::format_units;
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 use clap::{Subcommand, ValueEnum};
 use engine_core::Fixed;
 use engine_core::access::EligibilityClass;
@@ -81,7 +81,7 @@ impl From<Class> for EligibilityClass {
 /// - the lifecycle cannot connect (see `Lifecycle::connect`)
 /// - the action fails for any account, or, without `only`, a key does not unlock or is listed twice
 pub async fn run(
-    cfg: Config,
+    mut cfg: Config,
     only: Vec<AccountId>,
     action: Action,
     env: impl Fn(&str) -> Option<String>,
@@ -118,6 +118,10 @@ pub async fn run(
     }
     let mut failed = unusable.len();
     let accounts = keys.len() + unusable.len();
+    // An action that sends nothing from the funding key leaves it locked.
+    if !matches!(action, Action::Deposit { from_funding: true, .. } | Action::Claim | Action::Withdraw { .. }) {
+        cfg.funding = None;
+    }
     let lifecycle = Lifecycle::connect(&cfg, &env).await?;
     let confirmed = match &action {
         Action::Declare { class, confirm } => {
@@ -130,14 +134,14 @@ pub async fn run(
         let outcome = match &action {
             Action::Status => lifecycle.status(account).await.map(|status| describe_status(&status)),
             Action::Declare { .. } => match confirmed.iter().find(|confirmed| confirmed.account == account) {
-                Some(confirmed) => lifecycle.declare(key, *confirmed).await.map(|declared| match declared {
-                    Declared::Already(class) => format!("declared {class:?} already"),
-                    Declared::Recorded(class) => format!("declared {class:?}"),
-                    Declared::Refused(reason) => format!("declaration refused by the node: {reason}"),
+                Some(confirmed) => lifecycle.declare(key, *confirmed).await.and_then(|declared| match declared {
+                    Declared::Already(class) => Ok(format!("declared {class:?} already")),
+                    Declared::Recorded(class) => Ok(format!("declared {class:?}")),
+                    Declared::Refused(reason) => Err(anyhow!("the node refused the declaration: {reason}")),
                 }),
                 None => lifecycle.declared(account).await.map(|declared| match declared {
                     Some(class) => format!("declared {class:?} already"),
-                    None => String::from("not declared: not confirmed"),
+                    None => format!("not declared: not confirmed; pass --confirm {account} or run in a terminal"),
                 }),
             },
             Action::Deposit { amount, from_funding } => {
@@ -213,11 +217,8 @@ async fn confirm_declarations(
     for account in undeclared {
         let yes = if confirm.contains(&account) {
             true
-        } else if terminal {
-            ask(format!("Declare for {account}? Type yes to confirm: ")).await?
         } else {
-            writeln!(out, "{account}: not confirmed; pass --confirm {account} or run in a terminal")?;
-            false
+            terminal && ask(format!("Declare for {account}? Type yes to confirm: ")).await?
         };
         if yes {
             confirmed.push(Confirmed { account, class });

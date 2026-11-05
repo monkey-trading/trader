@@ -250,7 +250,7 @@ cargo test -p trader --test hot_path -- --nocapture   # the benchmark's measurem
 ./scripts/dev-trade-one.sh    # a dev scenario, about seventeen minutes
 ./scripts/dev-trade-many.sh   # twenty accounts, about seventeen minutes
 ./scripts/dev-strategies.sh   # another, about twenty minutes
-./scripts/dev-lifecycle.sh    # the account lifecycle on a local chain, about fifteen minutes
+./scripts/dev-lifecycle.sh    # the account lifecycle on a local chain, about fifteen minutes, up to forty
 ```
 
 ## Authors

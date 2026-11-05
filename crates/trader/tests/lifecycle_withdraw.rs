@@ -15,7 +15,7 @@ use trader::accounts::withdraw::{Paid, reissue_hash};
 use trader::chain::contracts::Vault;
 
 use common::chain::VAULT;
-use common::lifecycle::{Setup, account, funding_wallet, until, usdc, wallet};
+use common::lifecycle::{Setup, account, funding_wallet, until, usdc, wallet, within};
 use common::{CHAIN_ID, VAULT as NODE_VAULT};
 
 /// The stand-in node's time, in seconds.
@@ -146,26 +146,52 @@ async fn refused_and_unanswered_requests_are_not_asked_again() {
     assert!(s.chain.sent().is_empty());
 }
 
-/// A retry-later answer and a stale nonce are followed by the request again, signed on the
-/// account's current nonce, and the withdrawal then goes ahead.
+/// A stale nonce is followed by the request again on the account's current nonce, and a retry-later
+/// answer by the request again on the same nonce, which the node takes at most once; the
+/// withdrawal then goes ahead.
 #[tokio::test]
-async fn retry_later_and_stale_nonce_answers_request_again() {
+async fn stale_nonce_and_retry_later_answers_request_again() {
+    for (status, expected) in [(409, [0, 1]), (429, [0, 0]), (503, [0, 0])] {
+        let s = Setup::start(false).await;
+        s.node.with(|i| {
+            i.statuses.push_back(status);
+            i.replies.push_back(queued_reply());
+        });
+        s.answer(&queue_path(), 200, queue(&[]));
+        s.answer(&payouts_path(), 200, payouts(vec![payout(5, "50", Some(NOW_S + 86_400))]));
+        let paid = within(s.lifecycle.withdraw(&s.key, Some("50".parse().unwrap()))).await;
+        assert_eq!(paid.unwrap().len(), 1, "after {status}");
+        assert_eq!(request_nonces(&s), expected, "after {status}");
+    }
+}
+
+/// A stale nonce answered to a request asked again after a retry-later answer may mean the node took
+/// the first: it is reported, and nothing more is requested or paid.
+#[tokio::test]
+async fn a_stale_nonce_after_a_retry_later_answer_is_reported() {
     let s = Setup::start(false).await;
-    s.node.with(|i| {
-        i.statuses.extend([429, 409]);
-        i.replies.push_back(
-            json!([{ "type": "withdrawal_queued", "account": account(), "amount": "50", "requested_seq": 12 }]),
-        );
-    });
-    s.answer(&queue_path(), 200, queue(&[]));
-    s.answer(&payouts_path(), 200, payouts(vec![payout(5, "50", Some(NOW_S + 86_400))]));
-    assert_eq!(s.lifecycle.withdraw(&s.key, Some("50".parse().unwrap())).await.unwrap().len(), 1);
-    let nonces: Vec<u64> = s
-        .posts("/v1/withdrawals")
-        .iter()
-        .map(|post| serde_json::from_value::<WithdrawalRequest>(post.clone()).unwrap().auth.unwrap().nonce)
-        .collect();
-    assert_eq!(nonces, vec![0, 1, 2], "each request on the nonce the node gave");
+    s.node.with(|i| i.statuses.extend([503, 409]));
+    let err = within(s.lifecycle.withdraw(&s.key, Some("50".parse().unwrap()))).await.unwrap_err();
+    assert!(err.to_string().contains("may have taken the withdrawal request"), "{err}");
+    assert_eq!(request_nonces(&s), [0, 0]);
+    assert!(s.chain.sent().is_empty());
+}
+
+/// A part the queue approves is paid while the rest of the request waits, and the rest once approved.
+#[tokio::test]
+async fn approved_parts_are_paid_while_the_rest_waits() {
+    let s = Setup::start(false).await;
+    s.node.with(|i| i.replies.push_back(queued_reply()));
+    s.answer(&queue_path(), 200, queue(&[12]));
+    s.answer(&payouts_path(), 200, payouts(vec![payout(5, "20", Some(NOW_S + 86_400))]));
+    let rest = async {
+        s.chain.sent_count(1).await;
+        s.answer(&queue_path(), 200, queue(&[]));
+        s.answer(&payouts_path(), 200, payouts(vec![payout(6, "30", Some(NOW_S + 86_400))]));
+    };
+    let (paid, ()) = tokio::join!(within(s.lifecycle.withdraw(&s.key, Some("50".parse().unwrap()))), rest);
+    let paid: Vec<(u64, String)> = paid.unwrap().iter().map(|paid| (paid.nonce, paid.amount.to_string())).collect();
+    assert_eq!(paid, [(5, "20".to_owned()), (6, "30".to_owned())]);
 }
 
 /// An authorization too close to its expiry to be mined in time is not sent; its replacement is.
@@ -214,6 +240,17 @@ async fn a_payout_the_vault_refuses_as_paid_is_left() {
     let err = s.lifecycle.withdraw(&s.key, None).await.unwrap_err();
     assert!(format!("{err:#}").contains("WithdrawalsPaused"), "{err:#}");
     assert!(s.chain.sent().is_empty());
+}
+
+/// A payment mined after another sender paid the payout, which the bot read unpaid, is left as
+/// paid, not an error.
+#[tokio::test]
+async fn a_payment_another_sender_made_first_is_left() {
+    let s = Setup::start(false).await;
+    s.answer(&payouts_path(), 200, payouts(vec![payout(5, "50", Some(NOW_S + 86_400))]));
+    s.chain.with(|l| l.revert_on_chain = Some(Vault::WithdrawalAlreadyPaid {}.abi_encode()));
+    assert_eq!(within(s.lifecycle.withdraw(&s.key, None)).await.unwrap(), vec![]);
+    assert_eq!(s.chain.sent().len(), 1, "mined, and reverted");
 }
 
 /// The status reads the account on chain and in the node, and leaves out a payout the vault has
@@ -283,6 +320,19 @@ fn payout(nonce: u64, amount: &str, expires_at: Option<u64>) -> Value {
                 "siblings": [B256::repeat_byte(3)] } })
     });
     json!({ "nonce": nonce, "amount": amount, "withdrawal": withdrawal })
+}
+
+/// The node's answer that queues a request of 50 USDC as seq 12.
+fn queued_reply() -> Value {
+    json!([{ "type": "withdrawal_queued", "account": account(), "amount": "50", "requested_seq": 12 }])
+}
+
+/// The nonces of the withdrawal requests the node took, in order.
+fn request_nonces(s: &Setup) -> Vec<u64> {
+    s.posts("/v1/withdrawals")
+        .iter()
+        .map(|post| serde_json::from_value::<WithdrawalRequest>(post.clone()).unwrap().auth.unwrap().nonce)
+        .collect()
 }
 
 /// Waits until the bot has read `path` `count` times.

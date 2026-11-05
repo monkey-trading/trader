@@ -165,8 +165,8 @@ Run from the repo root:
   `SCENARIO_ARTIFACTS` keeps the logs); the strategies' scenario: `./scripts/dev-strategies.sh`
   (about twenty minutes, the same variables); with a local chain: `./scripts/dev-stack.sh --chain`
   (also needs Foundry's `anvil` and `cast`, and `forge` once per engine commit), and its scenario
-  `./scripts/dev-lifecycle.sh` (twelve minutes or more: it trades until each account has a MONKEY
-  entitlement)
+  `./scripts/dev-lifecycle.sh` (about fifteen minutes, up to forty: it trades until each account has
+  a MONKEY entitlement)
 - Many accounts: `./scripts/dev-trade-many.sh` (twenty accounts, about seventeen minutes; same
   requirements as `dev-trade-one.sh`, and `lsof`); `trader addresses --config <file>` prints the
   accounts' addresses; the hot-path benchmark: `cargo test -p trader --test hot_path -- --nocapture`

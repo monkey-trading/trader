@@ -11,7 +11,7 @@ use trader::chain::{Call, Chain, TxError};
 use trader::config::ChainSection;
 
 use common::chain::{CHAIN_ID, ChainStandIn, USDC, VAULT};
-use common::lifecycle::{Setup, config, wallet};
+use common::lifecycle::{Setup, config, until, wallet, within};
 
 /// A closed loopback port whose path carries a stand-in credential.
 const DOWN: &str = "http://127.0.0.1:9/v2/secret-key";
@@ -76,6 +76,81 @@ async fn a_transaction_taken_without_an_answer_is_followed_not_sent_again() {
     assert!(spent.sent().is_empty());
 }
 
+/// A transaction one endpoint took without answering is followed to its receipt, whatever another
+/// endpoint refused it for.
+#[tokio::test]
+async fn a_transaction_an_endpoint_did_not_answer_is_followed_whatever_another_refused() {
+    let s = Setup::start(false).await;
+    s.chain.with(|l| l.swallow = true);
+    let refusing = ChainStandIn::start().await;
+    refusing.with(|l| l.refusals.push_back("rate limited".into()));
+    let chain = Chain::connect(&section(&s, &[s.chain.url(), refusing.url()]), CHAIN_ID).await.unwrap();
+    let receipt = chain.send(&s.key, &deposit()).await.unwrap();
+    assert_eq!(s.chain.sent().iter().map(|sent| sent.hash).collect::<Vec<_>>(), vec![receipt.transaction_hash]);
+    assert!(refusing.sent().is_empty());
+}
+
+/// A transaction whose nonce is mined is not signed again while an endpoint fails to say whether it
+/// holds the receipt: it is followed until one shows it.
+#[tokio::test]
+async fn a_mined_nonce_is_not_signed_again_while_its_receipt_is_unknown() {
+    let s = Setup::start(false).await;
+    // The first endpoint mines it without answering, then fails every receipt read for a while.
+    s.chain.with(|l| {
+        l.swallow = true;
+        l.failing.insert("eth_getTransactionReceipt".into());
+    });
+    let spent = ChainStandIn::start().await;
+    spent.with(|l| l.refusals.push_back("nonce too low: next nonce 1, tx nonce 0".into()));
+    let chain = Chain::connect(&section(&s, &[s.chain.url(), spent.url()]), CHAIN_ID).await.unwrap();
+    let receipt_reads = || s.chain.with(|l| l.methods.get("eth_getTransactionReceipt").copied().unwrap_or_default());
+    let recover = async {
+        until("receipt reads", || receipt_reads() >= 10).await;
+        s.chain.with(|l| l.failing.clear());
+    };
+    let deposit = deposit();
+    let (receipt, ()) = tokio::join!(chain.send(&s.key, &deposit), recover);
+    let hashes: Vec<_> = s.chain.sent().iter().map(|sent| sent.hash).collect();
+    assert_eq!(hashes, vec![receipt.unwrap().transaction_hash], "followed, not signed again");
+    assert!(spent.sent().is_empty());
+}
+
+/// A transaction an endpoint took, whose nonce another transaction from the same key took, is
+/// estimated and signed again on the next nonce.
+#[tokio::test]
+async fn a_transaction_another_replaced_is_signed_again() {
+    let s = Setup::start(false).await;
+    s.chain.with(|l| l.replace = true);
+    let chain = Chain::connect(&section(&s, &[s.chain.url()]), CHAIN_ID).await.unwrap();
+    let receipt = within(chain.send(&s.key, &deposit())).await.unwrap();
+    let sent = s.chain.sent();
+    assert_eq!((sent.len(), sent[0].nonce, sent[0].hash), (1, 1, receipt.transaction_hash));
+    assert_eq!(s.chain.with(|l| l.methods["eth_estimateGas"]), 2, "estimated again");
+}
+
+/// A provider's error answer that is not a revert moves a read to the next endpoint; an endpoint
+/// that did not answer at the check, and then answers from another chain, gets no read.
+#[tokio::test]
+async fn reads_pass_over_error_answers_and_endpoints_on_another_chain() {
+    let s = Setup::start(false).await;
+    let first = ChainStandIn::start().await;
+    let calls = |endpoint: &ChainStandIn| endpoint.with(|l| l.methods.get("eth_call").copied().unwrap_or_default());
+    first.with(|l| l.limited.insert("eth_call".into()));
+    let chain = Chain::connect(&section(&s, &[first.url(), s.chain.url()]), CHAIN_ID).await.unwrap();
+    assert_eq!(chain.view(VAULT, Vault::usdcCall {}).await.unwrap(), USDC);
+    assert_eq!((calls(&first), calls(&s.chain)), (1, 1));
+
+    let other = ChainStandIn::start().await;
+    other.with(|l| l.down = true);
+    let chain = Chain::connect(&section(&s, &[other.url(), s.chain.url()]), CHAIN_ID).await.unwrap();
+    other.with(|l| {
+        l.down = false;
+        l.chain_id = 1;
+    });
+    assert_eq!(chain.view(VAULT, Vault::usdcCall {}).await.unwrap(), USDC);
+    assert_eq!((calls(&other), calls(&s.chain)), (0, 2), "no read goes to the endpoint on another chain");
+}
+
 /// Once a transaction has landed, reads go to an endpoint that has reached its block: one behind it
 /// is passed over.
 #[tokio::test]
@@ -110,8 +185,8 @@ async fn a_fee_over_the_cap_is_not_sent() {
     Chain::connect(&capped, CHAIN_ID).await.unwrap().send(&s.key, &deposit()).await.unwrap();
 }
 
-/// An endpoint on another chain is refused; one that never answers is named by its place, and its
-/// URL appears in no error, log of the config, or debug print.
+/// An endpoint on another chain is refused, and one that never answers appears in no error, log of
+/// the config, or debug print by its URL.
 #[tokio::test]
 async fn endpoints_are_checked_and_never_printed() {
     let s = Setup::start(false).await;

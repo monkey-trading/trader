@@ -10,7 +10,7 @@ use engine_core::types::AccountId;
 use tokio::time::{Instant, sleep};
 use tracing::{Instrument, info, info_span, warn};
 
-use crate::accounts::{Lifecycle, REQUEST_EXPIRY_MS};
+use crate::accounts::{Lifecycle, REQUEST_EXPIRY_MS, retry_later};
 use crate::keys::AccountKey;
 use crate::node::CallError;
 
@@ -74,10 +74,10 @@ impl Lifecycle {
                     Ok(answer) => return outcome(&answer.body),
                     Err(error) => error,
                 };
-                match (self.retry_later(&error), &error) {
+                match (retry_later(&error), &error) {
                     (Some(wait), _) => {
                         info!(?wait, "the node asks to declare later: {error}");
-                        sleep(wait).await;
+                        sleep(wait.min(deadline.saturating_duration_since(Instant::now()))).await;
                     }
                     (None, CallError::Refused { status: 409, .. }) => info!("the nonce moved on; signing again"),
                     (None, CallError::Refused { .. } | CallError::WrongSigner { .. }) => return Err(error.into()),

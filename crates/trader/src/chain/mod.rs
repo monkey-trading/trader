@@ -1,6 +1,8 @@
 //! The custody chain: reads of the vault and the tokens, and the transactions the bot sends them.
-//! A read tries each configured endpoint in turn, and once a transaction of the bot's has landed,
-//! only an endpoint that has reached its block: a read after a write sees the write. A transaction
+//! A read tries each configured endpoint in turn, only one that has answered that it is on the
+//! vault's chain, and once a transaction of the bot's has landed, only one that has reached its
+//! block: a read after a write sees the write. An error answer other than a revert moves on to the
+//! next endpoint, as a failure to answer does. A transaction
 //! is estimated first and not sent when it would revert; then it is signed with the key that pays its
 //! gas, sent to every endpoint, and followed to its receipt (`send`), and one that reverted is
 //! reported with the contract's reason.
@@ -31,6 +33,8 @@ use crate::config::ChainSection;
 /// The chain's endpoints and the waits around a transaction.
 pub struct Chain {
     endpoints: Vec<RootProvider>,
+    /// The chain id each endpoint answered, or 0 before it has.
+    chains: Vec<AtomicU64>,
     chain_id: u64,
     receipt_timeout: Duration,
     poll_interval: Duration,
@@ -71,9 +75,9 @@ pub enum TxError {
     /// It was not sent: the endpoints refused it, or a read it needs failed.
     #[error("{what} was not sent: {reason}")]
     NotSent { what: String, reason: String },
-    /// It was mined and reverted.
+    /// It was mined and reverted; with the revert's data when its replay gave it.
     #[error("{what} reverted in {hash}: {reason}")]
-    Reverted { what: String, hash: B256, reason: String },
+    Reverted { what: String, hash: B256, reason: String, revert: Option<Bytes> },
     /// It was sent, but no receipt came within the wait; it may still be mined.
     #[error("{what}: no receipt for {hash} within {wait:?}; it may still be mined")]
     NoReceipt { what: String, hash: B256, wait: Duration },
@@ -115,6 +119,7 @@ impl Chain {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Self {
+            chains: endpoints.iter().map(|_| AtomicU64::new(0)).collect(),
             endpoints,
             chain_id,
             receipt_timeout: section.receipt_timeout,
@@ -124,20 +129,41 @@ impl Chain {
         })
     }
 
-    /// Checks every endpoint that answers is on the vault's chain.
+    /// Checks every endpoint that answers is on the vault's chain; one that does not answer is
+    /// checked before its first read.
     /// Error cases:
     /// - an endpoint answers with another chain id, or none answers
     pub async fn check(&self) -> anyhow::Result<()> {
         let mut answered = false;
-        for (index, endpoint) in self.endpoints.iter().enumerate() {
-            match endpoint.get_chain_id().await {
+        for index in 0..self.endpoints.len() {
+            match self.chain_of(index).await {
                 Ok(id) if id == self.chain_id => answered = true,
                 Ok(id) => bail!("chain.rpc[{index}] is on chain {id}, not the vault's chain {}", self.chain_id),
-                Err(e) => warn!(endpoint = index, "the chain id was not read: {}", describe(&e)),
+                Err(e) => warn!(endpoint = index, "the chain id was not read: {e}"),
             }
         }
         ensure!(answered, "no chain.rpc endpoint answered");
         Ok(())
+    }
+
+    /// The chain endpoint `index` is on, read until it answers.
+    /// Error cases:
+    /// - the endpoint does not answer, described without its URL
+    async fn chain_of(&self, index: usize) -> Result<u64, String> {
+        let known = self.chains[index].load(Ordering::Relaxed);
+        if known != 0 {
+            return Ok(known);
+        }
+        let id = self.endpoints[index].get_chain_id().await.map_err(|e| describe(&e))?;
+        if id != self.chain_id {
+            warn!(
+                endpoint = index,
+                chain = id,
+                "the endpoint is on another chain than the vault's; no read goes to it"
+            );
+        }
+        self.chains[index].store(id, Ordering::Relaxed);
+        Ok(id)
     }
 
     /// `call`'s return from `to` at the latest block.
@@ -161,10 +187,11 @@ impl Chain {
         self.read(|endpoint| async move { endpoint.get_balance(address).await }).await
     }
 
-    /// The first answer of the endpoints, in order, to `read`, from one that has reached the
-    /// floor. An error answer is an answer, and is returned as it is; a failure to answer moves to
-    /// the next endpoint. While every endpoint that answers is behind the floor, it asks again each
-    /// `poll_interval`, until `receipt_timeout`.
+    /// The first answer of the endpoints, in order, to `read`, from one on the vault's chain that
+    /// has reached the floor. A revert is an answer, and is returned as it is; another error
+    /// answer, or a failure to answer, moves to the next endpoint, and the last error answer is
+    /// returned when none gives a value. While every endpoint that answers is behind the floor, it
+    /// asks again each `poll_interval`, until `receipt_timeout`.
     /// Error cases:
     /// - see `ReadError`
     async fn read<T, F, Fut>(&self, read: F) -> Result<T, ReadError>
@@ -175,8 +202,17 @@ impl Chain {
         let deadline = Instant::now() + self.receipt_timeout;
         loop {
             let floor = self.floor.load(Ordering::Relaxed);
-            let (mut last, mut behind) = (String::from("no endpoint"), false);
+            let (mut last, mut answer, mut behind) = (String::from("no endpoint"), None, false);
             for (index, endpoint) in self.endpoints.iter().enumerate() {
+                match self.chain_of(index).await {
+                    Ok(id) if id == self.chain_id => {}
+                    Ok(_) => continue,
+                    Err(e) => {
+                        debug!(endpoint = index, "no answer: {e}");
+                        last = e;
+                        continue;
+                    }
+                }
                 if floor > 0 {
                     match endpoint.get_block_number().await {
                         Ok(height) if height >= floor => {}
@@ -197,13 +233,22 @@ impl Chain {
                     Err(RpcError::ErrorResp(payload)) => {
                         let revert = payload.as_revert_data();
                         let message = payload.message.to_string();
-                        return Err(ReadError::Answer { code: payload.code, message, revert });
+                        let reverted = revert.is_some() || payload.code == 3 || message.contains("revert");
+                        let error = ReadError::Answer { code: payload.code, message, revert };
+                        if reverted {
+                            return Err(error);
+                        }
+                        debug!(endpoint = index, "an error answer: {error}");
+                        answer = Some(error);
                     }
                     Err(e) => {
                         last = describe(&e);
                         debug!(endpoint = index, "no answer: {last}");
                     }
                 }
+            }
+            if let Some(answer) = answer {
+                return Err(answer);
             }
             if !behind || Instant::now() >= deadline {
                 let reason = if behind { format!("every endpoint that answers is behind block {floor}") } else { last };

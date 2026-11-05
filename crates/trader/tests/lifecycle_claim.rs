@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_primitives::{B256, U256};
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolError};
 use serde_json::{Value, json};
 use trader::accounts::claim::{Claimed, watch};
 use trader::chain::contracts::Vault;
@@ -67,6 +67,25 @@ async fn nothing_is_claimed_when_nothing_is_due() {
     s.chain.with(|l| l.monkey_claimed.insert(wallet(), U256::from(2 * MONKEY)));
     assert_eq!(s.lifecycle.claim(&s.key, U256::ZERO).await.unwrap(), Claimed::Below { unclaimed: U256::ZERO });
     assert!(s.chain.sent().is_empty());
+}
+
+/// A claim mined after another sender claimed the entitlement, which the bot read unclaimed, is
+/// reported as nothing to claim; another revert fails it.
+#[tokio::test]
+async fn a_claim_another_sender_made_first_is_nothing_to_claim() {
+    let s = Setup::start(false).await;
+    s.answer(&emissions_path(), 200, proof(2 * MONKEY, 2 * MONKEY, true));
+    let claimed = Vault::NothingToClaim { entitled: U256::from(2 * MONKEY), claimed: U256::from(2 * MONKEY) };
+    s.chain.with(|l| l.revert_on_chain = Some(claimed.abi_encode()));
+    let below = within(s.lifecycle.claim(&s.key, U256::from(1))).await.unwrap();
+    assert_eq!(below, Claimed::Below { unclaimed: U256::ZERO });
+    assert_eq!(s.chain.sent().len(), 1, "mined, and reverted");
+    s.chain.with(|l| {
+        l.reverts.clear();
+        l.revert_on_chain = Some(Vault::InvalidEntitlementProof {}.abi_encode());
+    });
+    let err = within(s.lifecycle.claim(&s.key, U256::from(1))).await.unwrap_err();
+    assert!(format!("{err:#}").contains("InvalidEntitlementProof"), "{err:#}");
 }
 
 /// A proof for another account is refused, and nothing is sent.

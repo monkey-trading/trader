@@ -54,8 +54,14 @@ pub struct Ledger {
     pub refusals: VecDeque<String>,
     /// Whether the next transaction mines and reverts, though its estimate passed.
     pub revert_on_chain: Option<Vec<u8>>,
-    /// Whether every request fails as an outage.
+    /// Whether every request fails as an outage, and the methods that do.
     pub down: bool,
+    pub failing: BTreeSet<String>,
+    /// Methods answered with a provider's error that is not a revert.
+    pub limited: BTreeSet<String>,
+    /// Whether the next raw transaction is answered with its hash but never mined, as when another
+    /// transaction from its sender takes its nonce.
+    pub replace: bool,
     /// Whether a raw transaction is taken, and mined, but its answer fails as an outage.
     pub swallow: bool,
     /// How many blocks behind its own transactions the endpoint says it is.
@@ -116,8 +122,11 @@ async fn rpc(State(chain): State<Arc<ChainStandIn>>, body: axum::Json<Value>) ->
         (request["method"].as_str().unwrap_or_default(), &request["params"], request["id"].clone());
     let answer = chain.with(|ledger| {
         *ledger.methods.entry(method.to_owned()).or_default() += 1;
-        if ledger.down {
+        if ledger.down || ledger.failing.contains(method) {
             return None;
+        }
+        if ledger.limited.contains(method) {
+            return Some(Err(json!({ "code": -32005, "message": "limit exceeded" })));
         }
         let answer = ledger.answer(method, params);
         (!(ledger.swallow && method == "eth_sendRawTransaction")).then_some(answer)
@@ -161,6 +170,13 @@ impl Ledger {
             }
             "eth_sendRawTransaction" => {
                 let raw: Bytes = serde_json::from_value(params[0].clone()).unwrap();
+                if std::mem::take(&mut self.replace) {
+                    let (from, nonce) = sender(&raw);
+                    let next = self.nonces.entry(from).or_default();
+                    *next = (*next).max(nonce + 1);
+                    let envelope = TxEnvelope::decode_2718(&mut &raw[..]).expect("a signed transaction");
+                    return Ok(json!(envelope.tx_hash()));
+                }
                 if let Some(message) = self.refusals.pop_front() {
                     // A spent nonce is one another transaction from the sender took.
                     if message.contains("nonce too low") {
