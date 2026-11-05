@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use trader::accounts::withdraw::{Paid, reissue_hash};
 use trader::chain::contracts::Vault;
 
-use common::chain::VAULT;
+use common::lifecycle::chain::VAULT;
 use common::lifecycle::{Setup, account, funding_wallet, until, usdc, wallet, within};
 use common::{CHAIN_ID, VAULT as NODE_VAULT};
 

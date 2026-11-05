@@ -1,7 +1,9 @@
 //! The lifecycle against a stand-in node and a stand-in chain: its config, its keys, and the node's
 //! answers the tests script.
 
-use std::collections::{BTreeMap, BTreeSet};
+pub mod chain;
+
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,8 +23,8 @@ use trader::accounts::Lifecycle;
 use trader::config::Config;
 use trader::keys::AccountKey;
 
-use super::chain::ChainStandIn;
-use super::{ACCOUNT_SECRET, Answers, CHAIN_ID, StandIn, VAULT};
+use self::chain::ChainStandIn;
+use super::{ACCOUNT_SECRET, CHAIN_ID, StandIn, VAULT};
 
 /// The funding key's secret: obviously fake.
 pub const FUNDING_SECRET: [u8; 32] = [0x21; 32];
@@ -192,23 +194,12 @@ pub fn deposit_record(tx: B256, amount: &str, uncredited: Option<&str>) -> Value
     }], "next": null })
 }
 
-/// The stand-in node's answers to the lifecycle: to the GETs no other route takes, how many times
-/// each path was read, and the paths whose answers another key signs.
+/// The stand-in node's answers to the lifecycle: to the GETs no other route takes, by path without
+/// its query, a status and a body; and how many times each path was read.
 #[derive(Default)]
 pub struct Canned {
-    /// By path without its query: a status and a body.
     pub answers: BTreeMap<String, (u16, Value)>,
     pub reads: BTreeMap<String, usize>,
-    pub other_signer: BTreeSet<String>,
-}
-
-impl Canned {
-    /// How the answer to `target` is signed: by another key for a path in `other_signer`, else as
-    /// `answers` says.
-    pub fn signing(&self, target: &str, answers: Answers) -> Answers {
-        let path = target.split('?').next().unwrap_or_default();
-        if self.other_signer.contains(path) { Answers::OtherSigner } else { answers }
-    }
 }
 
 /// The lifecycle's routes: its POSTs, recorded and answered as orders are, and every path no other

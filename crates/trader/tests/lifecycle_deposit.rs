@@ -9,7 +9,7 @@ use serde_json::json;
 use trader::accounts::deposit::{Deposited, Source};
 use trader::chain::contracts::{ERC20, Vault};
 
-use common::chain::{USDC, VAULT};
+use common::lifecycle::chain::{USDC, VAULT};
 use common::lifecycle::{Setup, account, deposit_record, funding_wallet, until, usdc, wallet, within};
 
 /// From the account's own wallet: an approval of the vault for the amount, the vault's `deposit`,

@@ -13,7 +13,7 @@ use trader::accounts::claim::{Claimed, watch};
 use trader::chain::contracts::Vault;
 use trader::keys::AccountKey;
 
-use common::chain::VAULT;
+use common::lifecycle::chain::VAULT;
 use common::lifecycle::{Setup, account, funding_wallet, until, wallet, within};
 
 /// One MONKEY in base units.
@@ -154,7 +154,7 @@ async fn a_claims_answer_from_another_signer_halts_the_bot() {
             account().to_string(),
             common::account_view("5", json!({}), json!({ "9": common::resting_order(9) })),
         );
-        i.lifecycle.other_signer.insert(emissions_path());
+        i.other_signer_path = Some(emissions_path());
     });
     s.node.tick(common::T0 + common::MINUTE);
     let claims = "[claims]\nthreshold = \"1\"\ninterval = \"50ms\"\n";

@@ -10,7 +10,7 @@ use trader::chain::contracts::Vault;
 use trader::chain::{Call, Chain};
 use trader::logging::Secrets;
 
-use common::chain::{CHAIN_ID, VAULT};
+use common::lifecycle::chain::{CHAIN_ID, VAULT};
 use common::lifecycle::{Lines, Setup, config};
 
 /// No line the chain client's work writes, at any level and whatever the level's directives name,

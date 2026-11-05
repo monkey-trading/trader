@@ -10,7 +10,7 @@ use trader::chain::contracts::Vault;
 use trader::chain::{Call, Chain, TxError};
 use trader::config::ChainSection;
 
-use common::chain::{CHAIN_ID, ChainStandIn, USDC, VAULT};
+use common::lifecycle::chain::{CHAIN_ID, ChainStandIn, USDC, VAULT};
 use common::lifecycle::{Setup, config, until, wallet, within};
 
 /// A closed loopback port whose path carries a stand-in credential.

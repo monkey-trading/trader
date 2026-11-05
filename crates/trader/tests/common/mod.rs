@@ -9,14 +9,12 @@ mod messages;
 pub use bot::*;
 pub use controls::*;
 pub use messages::*;
-pub mod chain;
 pub mod lifecycle;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
@@ -136,7 +134,6 @@ pub struct Inner {
     /// The most units of a position one close-all takes, as the pinned engine's `Fixed::MAX_INPUT`;
     /// the rest stays open.
     pub close_cap: Option<engine_core::Fixed>,
-    /// The answers the account lifecycle reads.
     pub lifecycle: lifecycle::Canned,
 }
 
@@ -178,7 +175,7 @@ impl StandIn {
             addr,
             pin,
         });
-        let router = Router::new()
+        let router = lifecycle::routes()
             .route("/v1/markets", get(markets))
             .route("/v1/markets/{id}/marks", get(marks))
             .route("/v1/accounts/{address}", get(account_view_route))
@@ -187,7 +184,6 @@ impl StandIn {
             .route("/v1/orders/cancel-all", post(record))
             .route("/v1/positions/close-all", post(record))
             .route("/v1/stream", get(stream))
-            .merge(lifecycle::routes())
             .layer(from_fn_with_state(stand_in.clone(), sign_answers))
             .layer(from_fn_with_state(stand_in.clone(), limit_ip))
             .with_state(stand_in.clone());
@@ -299,7 +295,7 @@ async fn sign_answers(State(s): State<Arc<StandIn>>, req: Request, next: Next) -
     let (answers, time_ms, head_seq) = s.with(|i| {
         let head = i.head_seq;
         i.head_seq += i.head_step;
-        (i.lifecycle.signing(&target, i.answers.unwrap()), i.time_ms, head)
+        (i.answers.unwrap(), i.time_ms, head)
     });
     if answers != Answers::Unsigned {
         let response = engine_wire::Response {
