@@ -100,14 +100,14 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
     info!(%account, market = market_id, %position, balance = %view.balance, head_seq, "account read");
 
     let bar_ms = Millis::try_from(strategy_cfg.bar.as_millis()).context("bar length")?;
-    bar_fits(&market.spec, bar_ms)?;
     let now = Millis::try_from(now).context("node time")?;
+    bar_fits(&market.spec, bar_ms, now)?;
     let strategy = strategy_cfg.params.build()?;
     let state_file = StateFile::new(&cfg.account.state_dir, account);
     let saved = state_file.load().await?;
     let mut controls = Controls::new(cfg.risk.clone(), cfg.sizing.clone(), saved.day)?;
     controls.check_market(&market.spec).with_context(|| format!("sizing for {}", strategy_cfg.market))?;
-    // A position keeps the opening time saved for it, if it is on the side saved. One with none, as when
+    // A position keeps the opening time saved for it, if it is on the side and at the entry saved. One with none, as when
     // a crash came between its fill and the save, is held from now: the hold is the conservative guess.
     let opened = (!position.is_zero()).then(|| match saved.opened.get(&market_id) {
         Some(at) if saved.side == position.signum() && held.is_some_and(|p| p.entry == saved.entry) => *at,

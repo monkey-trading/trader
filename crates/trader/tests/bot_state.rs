@@ -122,7 +122,7 @@ async fn a_daily_bar_on_a_market_with_hours_is_refused() {
         i.head_seq = 10;
     });
     let err = run(config_with(&stand_in, dir.path(), "1d", &[]), async {}).await.unwrap_err();
-    assert!(err.to_string().contains("never hold two bars"), "{err:#}");
+    assert!(err.to_string().contains("hold no bar of 1440 minutes"), "{err:#}");
 }
 
 /// A read of the account that is not at the log values nothing: a short opened from flat, read as
@@ -286,24 +286,25 @@ async fn no_order_while_the_state_cannot_be_saved() {
 async fn a_saved_opening_time_belongs_to_one_position() {
     // Saved ten minutes before the start, with a five-minute hold: held long enough if it is kept.
     let long_ago = T0 - 10 * MINUTE;
-    let cases =
-        [("1", "102", "0.980392156", true), ("-1", "102", "0.980392156", false), ("1", "101", "0.980392156", false)];
-    for (side, entry, qty, kept) in cases {
+    let cases = [(1, "102", true), (-1, "102", false), (1, "101", false)];
+    for (side, entry, kept) in cases {
         let stand_in = StandIn::start().await;
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("state")).unwrap();
-        let saved =
-            json!({ "day": null, "opened": { "1": long_ago }, "side": side.parse::<i64>().unwrap(), "entry": entry });
+        let saved = json!({ "day": null, "opened": { "1": long_ago }, "side": side, "entry": entry });
         std::fs::write(dir.path().join("state").join(format!("{}.json", account())), saved.to_string()).unwrap();
         stand_in.with(|i| {
             i.markets = json!([btc_usd(Some("99"))]);
-            let position = json!({ "1": { "qty": qty, "entry": "102" } });
+            let position = json!({ "1": { "qty": "0.980392156", "entry": "102" } });
             i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
             i.head_seq = 10;
             i.nonce = 3;
         });
-        let (stop, bot) = start(&stand_in, dir.path(), &[("min_hold = \"0s\"", "min_hold = \"5m\"")]);
-        warm(&stand_in).await;
+        let (stop, mut bot) = start(&stand_in, dir.path(), &[("min_hold = \"0s\"", "min_hold = \"5m\"")]);
+        tokio::select! {
+            ended = &mut bot => panic!("the bot ended: {ended:?}"),
+            () = warm(&stand_in) => {}
+        }
         for (minute, mid) in [(1, "98"), (2, "97"), (3, "96")] {
             price_at(&stand_in, T0 + minute * MINUTE, mid);
         }
@@ -314,6 +315,9 @@ async fn a_saved_opening_time_belongs_to_one_position() {
             "side {side}, entry {entry}: {posts} orders with the hold {}",
             if kept { "over" } else { "running" }
         );
+        // The log passes the window of orders signed before the start, so the stop is quick.
+        let seq = next_seq(&stand_in);
+        stand_in.append((seq, 0), command(seq, T0 + 10 * MINUTE, json!({ "type": "tick" }), json!([])));
         stop.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(40), bot).await.unwrap().unwrap().unwrap();
     }
@@ -332,4 +336,43 @@ async fn a_leverage_cap_at_the_markets_own_is_refused() {
     let edits = [("max_leverage = \"50\"", "max_leverage = \"100\"")];
     let err = run(config_with(&stand_in, dir.path(), "1m", &edits), async {}).await.unwrap_err();
     assert!(format!("{err:#}").contains("not below the market's own"), "{err:#}");
+}
+
+/// A decision can change the saved state itself, as the first bar of a UTC day does by starting the day: if
+/// that cannot be saved, the order the decision called for is not signed, and once it can be, it is.
+#[tokio::test]
+async fn no_order_when_a_decision_changes_state_that_cannot_be_saved() {
+    use std::os::unix::fs::PermissionsExt;
+    let midnight = T0 + 16 * 60 * MINUTE;
+    let stand_in = StandIn::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+        i.nonce = 3;
+    });
+    // Four closes decide, so the first target is made by the tick that completes the bar before midnight.
+    let (stop, bot) = start(&stand_in, dir.path(), &[("slow = 2", "slow = 4")]);
+    warm(&stand_in).await;
+    // The prices read the account in turn, the last 58 s before midnight, so the tick reads nothing and the
+    // day is started by the decision alone.
+    for (before, mid) in [(178_000, "101"), (118_000, "102"), (58_000, "103")] {
+        price_at(&stand_in, midnight - before, mid);
+    }
+    posts_after_settling(&stand_in).await;
+    let state = dir.path().join("state");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
+    stand_in.with(|i| i.time_ms = (midnight + 1_000) as u64);
+    let seq = next_seq(&stand_in);
+    stand_in.append((seq, 0), command(seq, midnight + 1_000, json!({ "type": "tick" }), json!([])));
+    assert_eq!(posts_after_settling(&stand_in).await, 0, "the day cannot be saved");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+    price_at(&stand_in, midnight + 30_000, "104");
+    price_at(&stand_in, midnight + 61_000, "105");
+    let (_, buy) = posted(&stand_in, 1).await;
+    assert_eq!(buy["side"], "buy");
+    assert_eq!(day_file(dir.path())["day"]["day"], midnight / 86_400_000);
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(40), bot).await.unwrap().unwrap().unwrap();
 }

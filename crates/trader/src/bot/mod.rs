@@ -282,7 +282,7 @@ impl Bot {
             return Ok(());
         }
         supported(spec).map_err(Halt::Unfollowable)?;
-        bar_fits(spec, self.bar_ms).map_err(Halt::Unfollowable)?;
+        bar_fits(spec, self.bar_ms, ts).map_err(Halt::Unfollowable)?;
         self.controls.check_market(spec).map_err(|e| Halt::Unfollowable(e.into()))?;
         info!(market = self.market, rules = ?spec.price_rules, "the market's listing changed");
         self.marks.set_rules(ts, spec.price_rules);
@@ -388,15 +388,15 @@ pub(crate) fn supported(spec: &MarketSpec) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks a bar length can trade in the market's hours: some bar and the one before it lie inside a
-/// session, so a bar of that length is no gap and is decided while the market is open. A bar of a day,
-/// or any other that always spans a closure, would be refused for ever.
+/// Checks a bar length can trade in the market's hours from `from` on: some bar is decided while the
+/// market is open and is no gap. A bar of a day, or any other that always spans a closure, would be
+/// refused for ever.
 /// Error cases:
-/// - a market with trading hours whose sessions hold no two bars of this length
-pub(crate) fn bar_fits(spec: &MarketSpec, bar_ms: Millis) -> anyhow::Result<()> {
+/// - a market with trading hours that hold no such bar of this length
+pub(crate) fn bar_fits(spec: &MarketSpec, bar_ms: Millis, from: Millis) -> anyhow::Result<()> {
     anyhow::ensure!(
-        bar_can_trade(&spec.schedule, bar_ms),
-        "{} has trading hours that never hold two bars of {} minutes, so the bot would never trade it",
+        bar_can_trade(&spec.schedule, bar_ms, from),
+        "{} has trading hours that hold no bar of {} minutes, so the bot would never trade it",
         spec.symbol,
         bar_ms / 60_000
     );
