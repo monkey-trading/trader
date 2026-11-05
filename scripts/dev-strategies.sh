@@ -266,7 +266,7 @@ step "the account with the tiny daily limit is flattened, then places nothing"
 log="$work/bot-tiny.log"
 trip="$(grep -n 'alert="daily_loss_limit"' "$log" | head -n 1 | cut -d: -f1 || true)"
 [[ -n "$trip" ]] || fail "tiny: the daily loss limit was never reached"
-grep -q 'closing the position' <(tail -n +"$trip" "$log") || fail "tiny: the position was not closed when the limit was reached"
+grep -q "closing the account's positions" <(tail -n +"$trip" "$log") || fail "tiny: the position was not closed when the limit was reached"
 # The close came from the limit, not from the stop: a fill that leaves it flat before the bots were stopped.
 python3 -I - "$work/tiny-fills.jsonl" "$stop_ms" <<'PY' || fail "tiny: the limit did not flatten the account before the stop"
 import json, sys
