@@ -110,9 +110,12 @@ pub struct Account {
     pub save_retry_at: Option<Instant>,
     /// Whether a read of the account is wanted: a decision, a fill, or the time to read again.
     pub read_wanted: bool,
-    /// Whether a read is out, and whether a decision came after it was started.
+    /// Whether a read is out, until its answer is taken, and whether a decision, a fill or a cash event
+    /// came after it was started: its answer is then not used.
     pub reading: bool,
     pub read_stale: bool,
+    /// Moves on at each fill and cash event of the account: an order decided before one is not sent after it.
+    pub epoch: u64,
     /// Whether the account is waiting in `Fleet::flattens`.
     pub flatten_queued: bool,
     /// Whether the last read was not of the log (or failed): nothing is valued or ordered from the
@@ -171,6 +174,8 @@ pub struct Pending {
     pub intent: OrderIntent,
     pub bar_start: Millis,
     pub ts: Millis,
+    /// The account's `epoch` when the order was decided.
+    pub epoch: u64,
 }
 
 /// Where a series stands in its warm-up from the node's marks history.
@@ -368,6 +373,7 @@ impl Fleet {
                 read_wanted: false,
                 reading: false,
                 read_stale: false,
+                epoch: 0,
                 flatten_queued: false,
                 behind: false,
                 read_after: Millis::MIN,

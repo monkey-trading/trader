@@ -1,5 +1,0 @@
-error: unexpected argument 'build' found
-
-Usage: cargo build [OPTIONS]
-
-For more information, try '--help'.

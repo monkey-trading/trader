@@ -93,7 +93,7 @@ impl Runner {
         }
         // The decision was taken from a read of the log, for an account that was trading; a fill or the
         // daily limit since changes what it should be, and the next bar decides again.
-        if account.behind || account.controls.is_stopped() || account.flatten_queued {
+        if account.behind || account.epoch != pending.epoch || account.controls.is_stopped() || account.flatten_queued {
             info!(account = %account.address, market = asg.market, "the account changed since the order was decided: no order");
             fleet.drop_pending(a);
             return false;
@@ -251,7 +251,9 @@ impl Runner {
                 )
             })
             .collect();
-        if held.is_empty() || held.iter().any(|&a| fleet.order_in_flight(a, fleet.log_ts).is_some()) {
+        // A market whose last close may still enter the log waits; the others are closed meanwhile.
+        let held: Vec<u32> = held.into_iter().filter(|&a| fleet.order_in_flight(a, fleet.log_ts).is_none()).collect();
+        if held.is_empty() {
             return None;
         }
         // The close is quoted at marks of the log, which must be current as an order's bar must be.
@@ -360,6 +362,10 @@ impl Runner {
                     matches!(event, Event::OrderRejected { reason: Reject::CloseSpreadCeiling { .. }, .. })
                 });
                 self.fleet.assignments[assignment as usize].close_first = close_first;
+                if rejected {
+                    // The command is in the log and moved nothing: no fill is to come from it.
+                    self.fleet.assignments[assignment as usize].expires_at = None;
+                }
                 if rejected { Nonce::Unknown } else { Nonce::Synced(nonce + 1) }
             }
             Err(e @ CallError::Refused { status: 401 | 403, .. }) => {

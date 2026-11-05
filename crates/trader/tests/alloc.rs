@@ -17,8 +17,9 @@ use log::*;
 
 /// The allocations a message may cost: the envelope and the command's type.
 const PER_MESSAGE: u64 = 2;
-/// The allocations taking an account's read and deciding what it wants may cost for each decision to trade.
-const PER_DECISION: u64 = 1;
+/// The allocations taking one account's read and deciding what it wants may cost: one, for the one
+/// decision to trade an account's markets take at a time.
+const PER_READ: u64 = 1;
 
 /// After a warm-up of two minutes of log, applying any message allocates at most `PER_MESSAGE` times,
 /// though bars complete, decisions queue and are taken off the queue, and strangers' orders fill.
@@ -48,7 +49,7 @@ fn reading_the_log_allocates_a_fixed_few_times_once_warm() {
         let info = allocation_counter::measure(|| {
             fleet.apply(&e.msg, at(e.seq), u64::try_from(e.ts + 20).unwrap()).unwrap();
         });
-        deciding += drain(&mut fleet);
+        deciding = deciding.max(drain(&mut fleet));
         total += info.count_total;
         if info.count_total > worst {
             (worst, worst_at) = (info.count_total, e.seq);
@@ -58,9 +59,9 @@ fn reading_the_log_allocates_a_fixed_few_times_once_warm() {
     assert!(taken > 0, "the measured minutes include decisions to trade");
     println!(
         "{total} allocations over {} messages and {taken} decisions; at most {worst}, at seq {worst_at}; \
-         {deciding} allocations taking the reads and deciding",
+         at most {deciding} taking one read and deciding",
         measured.len()
     );
     assert!(worst <= PER_MESSAGE, "a message at seq {worst_at} allocated {worst} times, over {PER_MESSAGE}");
-    assert!(deciding <= PER_DECISION * taken, "{taken} decisions allocated {deciding} times, over {PER_DECISION} each");
+    assert!(deciding <= PER_READ, "a read and its decisions allocated {deciding} times, over {PER_READ}");
 }

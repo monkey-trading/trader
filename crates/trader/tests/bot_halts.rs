@@ -315,10 +315,10 @@ async fn order_then_stop(stand_in: &Arc<StandIn>) -> (JoinHandle<anyhow::Result<
     (bot, dir)
 }
 
-/// A relisting that leaves the market's own leverage at or below the cap halts the bot: the cap was
-/// chosen below the old market's.
+/// A relisting that leaves the market's own leverage at or below the cap stops the account, and with it
+/// the run: the cap was chosen below the old market's.
 #[tokio::test]
-async fn a_relisting_that_lowers_the_markets_leverage_halts() {
+async fn a_relisting_that_lowers_the_markets_leverage_stops_the_account() {
     let stand_in = StandIn::start().await;
     stand_in.with(|i| {
         i.markets = json!([btc_usd(Some("99"))]);

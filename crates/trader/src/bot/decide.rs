@@ -235,8 +235,9 @@ impl Fleet {
                     info!(%address, market, target = ?w.target, "{reason}: no order");
                     return;
                 }
+                let epoch = self.accounts[idx as usize].epoch;
                 let asg = &mut self.assignments[a as usize];
-                asg.pending = Some(Pending { intent, bar_start: w.bar_start, ts: w.ts });
+                asg.pending = Some(Pending { intent, bar_start: w.bar_start, ts: w.ts, epoch });
                 self.decisions += 1;
                 if !asg.queued {
                     asg.queued = true;
@@ -329,7 +330,7 @@ impl Fleet {
                     warn!(alert = "daily_loss_limit", account = %acc.address, ?state, "the daily loss limit is reached: flattening and stopping until the next UTC day");
                 }
                 acc.loss_alert = true;
-                // The close is asked for by `retry_flattens` on the same command, behind the replay lag.
+                // The close is asked for by `retry_flattens`, at the next command, behind the replay lag.
                 if !self.stopped.contains(&account) {
                     self.stopped.push(account);
                 }

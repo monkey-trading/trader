@@ -63,7 +63,13 @@ pub fn strategy(market: u32, bar_ms: Millis) -> StrategyIn {
 
 /// Controls that size every new position at 100 USD and hold no account back.
 pub fn controls() -> Controls {
-    let sizing = serde_json::from_value(json!({ "by": "fixed_notional", "notional": "100", "max_leverage": "50" }));
+    controls_with("50")
+}
+
+/// `controls` with this cap on leverage.
+pub fn controls_with(max_leverage: &str) -> Controls {
+    let sizing =
+        serde_json::from_value(json!({ "by": "fixed_notional", "notional": "100", "max_leverage": max_leverage }));
     let risk = serde_json::from_value(json!({
         "max_open_positions": 16, "max_total_notional": "1000000", "daily_loss": { "usd": "100000" },
         "margin_buffer_bps": 0, "min_hold": "0s"
@@ -92,8 +98,8 @@ pub fn settle(fleet: &mut Fleet) -> usize {
     settle_with(fleet, false).0
 }
 
-/// `settle`, also returning the allocations of taking the reads and deciding: the views the node would
-/// answer with are built outside the count.
+/// `settle`, also returning the most allocations any one read cost to take and decide from: the views
+/// the node would answer with are built outside the count.
 pub fn settle_counting(fleet: &mut Fleet) -> (usize, u64) {
     settle_with(fleet, true)
 }
@@ -119,7 +125,7 @@ fn settle_with(fleet: &mut Fleet, counting: bool) -> (usize, u64) {
             }
         };
         if counting {
-            allocations += allocation_counter::measure(|| take(fleet)).count_total;
+            allocations = allocations.max(allocation_counter::measure(|| take(fleet)).count_total);
         } else {
             take(fleet);
         }

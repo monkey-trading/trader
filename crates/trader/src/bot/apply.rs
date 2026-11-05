@@ -25,7 +25,8 @@ impl Fleet {
     /// Applies one message of the log, sent by the node at `node_time` as `at`.
     /// Error cases:
     /// - a command or its events the pinned engine cannot read
-    /// - a new listing makes a market one the bot does not trade, or one an account cannot size for
+    /// - a new listing makes a market one the bot does not trade,
+    ///   (an account it cannot size for, or a bar length it no longer fits, stops only that account)
     /// - a corporate action that changes a traded market's units or fails
     pub fn apply(&mut self, msg: &str, at: Offset, node_time: u64) -> Result<(), Halt> {
         let unreadable = |e: anyhow::Error| Halt::Unfollowable(e.context(format!("the log message at {at}")));

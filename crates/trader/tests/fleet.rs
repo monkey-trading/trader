@@ -314,3 +314,27 @@ fn a_cash_event_marks_the_balance_behind_until_a_read() {
     settle(&mut fleet);
     assert!(!fleet.accounts[1].behind, "a read of the log ends it");
 }
+
+/// A relisting an account's sizing cannot follow stops that account; the other, whose cap fits, goes on
+/// and the market takes the new rules.
+#[test]
+fn a_relisting_stops_only_the_accounts_it_concerns() {
+    let mut accounts: Vec<AccountIn> = (0..2).map(|i| account(i, vec![strategy(1, MINUTE)])).collect();
+    accounts[1].controls = controls_with("5");
+    let mut fleet = Fleet::new(&markets(1), accounts, T0).unwrap();
+    let seq = warm(&mut fleet, &[1], "100");
+    // The market's own leverage falls to 10: a cap of 50 is above it, a cap of 5 below.
+    let tiers = vec![engine_core::market::Tier { up_to: None, bps: 1000 }];
+    let spec = engine_core::market::MarketSpec { margin_tiers: tiers, ..spec(1) };
+    let cmd = serde_json::to_string(&engine_core::command::Command::Admin(
+        engine_core::command::AdminCommand::UpsertMarket(spec),
+    ))
+    .unwrap();
+    let ts = T0 + 1_000;
+    fleet
+        .apply(&command(seq, ts, &cmd, r#"[{"type":"admin_applied"}]"#), at(seq), u64::try_from(ts + 50).unwrap())
+        .unwrap();
+    assert!(fleet.accounts[0].failed.is_some(), "the cap above the market's own stops its account");
+    assert!(fleet.accounts[1].failed.is_none(), "the other account goes on");
+    assert_eq!(fleet.markets[0].spec.margin_tiers[0].bps, 1000, "the market takes its new listing");
+}

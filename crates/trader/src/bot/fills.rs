@@ -93,6 +93,7 @@ impl Fleet {
             // it, until a read agrees.
             if let Some(account) = self.account_of(address) {
                 let (log_ts, entry) = (self.log_ts, &mut self.accounts[account as usize]);
+                entry.epoch += 1;
                 entry.behind = true;
                 entry.read_after = log_ts;
                 self.want_read(account);
@@ -124,6 +125,7 @@ impl Fleet {
         // is not of the position the log gives: nothing is valued or ordered from it until a read agrees.
         let log_ts = self.log_ts;
         let entry = &mut self.accounts[account as usize];
+        entry.epoch += 1;
         entry.behind = true;
         entry.read_after = log_ts;
         self.want_read(account);
@@ -141,23 +143,21 @@ impl Fleet {
             position = %fill.position,
             "fill"
         );
-        if !fill.liquidation
-            && message.ts > self.trading_from
-            && self.accounts[account as usize].failed.is_none()
-            && !self.signed_here(account, message)
-        {
-            let reason = format!("a fill at seq {} is from an order this process did not sign", message.seq);
-            error!(
-                alert = "account_shared",
-                seq = message.seq,
-                account = fill.account,
-                "{reason}: another process or person trades the account"
-            );
-            self.fail(account, reason);
-        } else if !fill.liquidation && self.signed_here(account, message) {
-            // The order has entered the log and filled: it can no longer move the position later.
-            if let Some(a) = self.assignment_of(account, fill.market) {
-                self.assignments[a as usize].expires_at = None;
+        if !fill.liquidation {
+            if self.signed_here(account, message) {
+                // The order has entered the log and filled: it can no longer move the position later.
+                if let Some(a) = self.assignment_of(account, fill.market) {
+                    self.assignments[a as usize].expires_at = None;
+                }
+            } else if message.ts > self.trading_from && self.accounts[account as usize].failed.is_none() {
+                let reason = format!("a fill at seq {} is from an order this process did not sign", message.seq);
+                error!(
+                    alert = "account_shared",
+                    seq = message.seq,
+                    account = fill.account,
+                    "{reason}: another process or person trades the account"
+                );
+                self.fail(account, reason);
             }
         }
         Ok(())

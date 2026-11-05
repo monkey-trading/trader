@@ -54,6 +54,14 @@ impl Saved {
         if side == 0 && split_at.is_none() {
             return Ok(());
         }
+        // The file names its market by the position's opening time, when it holds one: it belongs to that
+        // market only, and an account moved to another market does not inherit its split.
+        let mut named = self.opened.keys();
+        if let (Some(&only), None) = (named.next(), named.next())
+            && markets != [only]
+        {
+            return Ok(());
+        }
         let [market] = markets else {
             anyhow::bail!(
                 "the saved state was written for one market, and this account trades {}: move the file aside to start it afresh",

@@ -30,6 +30,8 @@ use crate::stream::{Stream, StreamError};
 
 /// The longest the stop goes on closing a position that one close did not take whole.
 const MAX_CLOSE_WAIT: Duration = Duration::from_secs(60);
+/// The longest a request of the stop waits for the node's limits and a connection.
+const ADMIT_WAIT: Duration = Duration::from_secs(60);
 
 /// The longest the stop waits for the log to pass the last order's expiry.
 const MAX_EXPIRY_WAIT: Duration = Duration::from_millis(EXPIRES_IN_MS as u64 + 5_000);
@@ -296,14 +298,14 @@ impl Stop {
         Ok(())
     }
 
-    /// Waits for the node's limits and a connection, for no longer than `MAX_CLOSE_WAIT`: a node that has
+    /// Waits for the node's limits and a connection, for no longer than `ADMIT_WAIT`: a node that has
     /// become unreachable ends the account's stop as incomplete and does not hold the others' up.
     /// Error cases:
     /// - the limits and a connection were not there in time
     async fn admit(&self, account: AccountId) -> Result<Admission, Failed> {
-        tokio::time::timeout(MAX_CLOSE_WAIT, self.node.admit(Some(account)))
+        tokio::time::timeout(ADMIT_WAIT, self.node.admit(Some(account)))
             .await
-            .map_err(|_| Failed::Incomplete(format!("no connection to the node within {MAX_CLOSE_WAIT:?}")))
+            .map_err(|_| Failed::Incomplete(format!("no connection to the node within {ADMIT_WAIT:?}")))
     }
 
     /// Signs and sends a cancel of every resting order, on the account's next nonce, once the node's

@@ -108,7 +108,6 @@ impl Runner {
     pub(super) fn view_done(&mut self, account: u32, outcome: ViewOutcome) -> Result<(), Halt> {
         signer_ok(&outcome)?;
         self.view_reads -= 1;
-        self.fleet.accounts[account as usize].reading = false;
         // The reads are taken in the order they were started, which is the order the bars wanted them,
         // so the decisions queue in bar order whichever answer comes first.
         if let Some(slot) = self.view_order.iter_mut().find(|(a, answer)| *a == account && answer.is_none()) {
@@ -125,6 +124,8 @@ impl Runner {
     /// Takes one read of an account, in its turn.
     fn take_view(&mut self, account: u32, outcome: ViewOutcome) {
         let entry = &mut self.fleet.accounts[account as usize];
+        // Until it is taken, a read is still out: an event that comes meanwhile makes it stale.
+        entry.reading = false;
         match outcome {
             Ok(answer) => {
                 // A decision, a fill or a cash event that came after the read was started is not in it:
