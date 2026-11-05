@@ -149,6 +149,13 @@ impl Node {
         self.timeout
     }
 
+    /// Waits for a declaration's turn under the node's fresh-account budget for this client.
+    pub async fn setup_turn(&self) {
+        while let Err(wait) = self.pacer.try_reserve_setup(Instant::now()) {
+            sleep(wait).await;
+        }
+    }
+
     /// How many requests were sent, and how many of them the node asked the bot to retry later.
     pub fn counts(&self) -> (u64, u64) {
         (self.requests.load(Ordering::Relaxed), self.retry_later.load(Ordering::Relaxed))

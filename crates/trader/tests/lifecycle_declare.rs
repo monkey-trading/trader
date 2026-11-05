@@ -7,11 +7,15 @@ use engine_core::access::EligibilityClass::{EligibleClient, Professional};
 use engine_core::access::EligibilityRequest;
 use engine_core::eip712::{self, eligibility_hash, recover};
 use engine_core::types::AccountId;
+use std::time::Duration;
+
 use serde_json::{Value, json};
+use tokio::time::Instant;
+use trader::accounts::Lifecycle;
 use trader::accounts::cli::{self, Action, Class};
 use trader::accounts::declare::{Confirmed, Declared};
 
-use common::lifecycle::{Setup, account, until};
+use common::lifecycle::{Setup, account, until, within};
 use common::{CHAIN_ID, VAULT};
 
 /// An account that declared is not asked to again.
@@ -61,6 +65,26 @@ async fn retry_later_and_stale_nonce_answers_ask_again() {
         // The stand-in moves the nonce on every request it takes.
         assert_eq!(signed_declaration(&posts[1]).auth.nonce, 1, "after {status}");
     }
+}
+
+/// Each declaration waits its turn under the node's fresh-account budget for this client: at one a
+/// second with nothing in hand, the second request, after a stale nonce, goes a second after the first.
+#[tokio::test]
+async fn declarations_wait_their_turn_under_the_fresh_account_budget() {
+    let s = Setup::start(false).await;
+    let budget = "[node.limits]\nfresh_accounts = { per_minute = 60, burst = 1 }\n";
+    let cfg = common::lifecycle::config(&s.node, &[s.chain.url()], s.dir.path(), false, budget);
+    let lifecycle = Lifecycle::connect(&cfg, |_| None).await.unwrap();
+    s.answer(&eligibility_path(), 200, declared_none());
+    s.node.with(|i| {
+        i.statuses.push_back(409);
+        i.replies.push_back(attested("professional"));
+    });
+    let started = Instant::now();
+    let declared = within(lifecycle.declare(&s.key, Confirmed { account: account(), class: Professional })).await;
+    assert_eq!(declared.unwrap(), Declared::Recorded(Professional));
+    assert_eq!(s.posts("/v1/eligibility").len(), 2);
+    assert!(started.elapsed() >= Duration::from_millis(950), "took {:?}", started.elapsed());
 }
 
 /// A refusal in the log is the outcome; the bot does not ask again.

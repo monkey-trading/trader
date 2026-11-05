@@ -108,8 +108,9 @@ MONKEY, and withdraws, every payout going to the account's own address.
   reason. No fee over the configured cap is offered, so an
   endpoint that misquotes the price cannot spend the payer's ether. An endpoint's URL is never
   printed
-- A retry-later answer from the node, as its fresh-account budgets give, and a stale nonce are
-  followed by the request again; an answer that never came is checked against the node's record
+- Declarations keep to the node's fresh-account budget for one client (`node.limits.fresh_accounts`,
+  from its `api.fresh_accounts.per_client`), and a retry-later answer from the node, as those
+  budgets give, and a stale nonce are followed by the request again; an answer that never came is checked against the node's record
   before anything is asked again
 - The account keys from an encrypted Web3 Secret Storage keystore, or, in a dev build, a hex file;
   held only as a signing key that zeroes its secret on drop, and never printed. A release build
@@ -216,7 +217,9 @@ know, and relative paths are read from the file's directory:
   node's TLS key hash to pin; without it the certificate must chain to a public root),
   `request_timeout` and `stream_timeout`
 - `[node.limits]`: `per_ip` and `per_account` (`per_second` and `burst`, as the node's `[api]` sets
-  them; the defaults are the engine's development config) and `connections` (HTTP connections
+  them), `fresh_accounts` (`per_minute` and `burst`, as its `api.fresh_accounts.per_client`, at
+  most 12 a minute with a burst of 6 on a production node), all defaulting to the engine's
+  development config, and `connections` (HTTP connections
   kept open, besides the stream's; the node caps connections per address)
 - `[sizing]` and `[risk]`: for every account that does not set its own `sizing` and `risk` tables
   (`[account.sizing]`, `[account.risk]`): sizing `by` (`fixed_notional` with `notional`, or

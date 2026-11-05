@@ -20,13 +20,15 @@ request_timeout = "10s"
 stream_timeout = "30s"
 
 # The node's limits on this bot, which it paces its requests under so that a burst of orders queues
-# in bar order instead of failing with 429. Set them to the node's api.per_ip and api.per_account;
-# these are the engine's development config. `connections` is how many HTTP connections to the node
-# the bot keeps open, besides the one stream; the node caps connections per address
-# (api.max_connections_per_ip).
+# in bar order instead of failing with 429. Set them to the node's api.per_ip, api.per_account and
+# api.fresh_accounts.per_client, which declarations keep to (a production node allows at most 12 a
+# minute with a burst of 6); these are the engine's development config. `connections` is how many
+# HTTP connections to the node the bot keeps open, besides the one stream; the node caps
+# connections per address (api.max_connections_per_ip).
 [node.limits]
 per_ip = { per_second = 50, burst = 100 }
 per_account = { per_second = 10, burst = 20 }
+fresh_accounts = { per_minute = 600, burst = 20 }
 connections = 4
 
 # Where the bot keeps what it must not lose across a restart: the day's loss, so a restart does not

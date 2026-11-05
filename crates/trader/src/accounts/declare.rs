@@ -35,7 +35,8 @@ pub enum Declared {
 
 impl Lifecycle {
     /// Records `confirmed`'s declaration, signed by `key`, unless the account has declared already.
-    /// A retry-later answer, as the node's fresh-account budgets give, is waited out and the
+    /// Each request waits its turn under the node's fresh-account budget for this client
+    /// (`node.limits.fresh_accounts`); a retry-later answer, as those budgets give, is waited out and the
     /// declaration asked again, as is a stale nonce; an answer that never came is checked against
     /// the account's recorded declaration before asking again.
     /// Error cases:
@@ -60,6 +61,8 @@ impl Lifecycle {
                 if Instant::now() >= deadline {
                     bail!("{account}'s declaration was not recorded within {:?}", self.settle_timeout);
                 }
+                // Its turn comes before it is signed, so the wait never runs into its expiry.
+                self.node.setup_turn().await;
                 let (nonce, now) = self.next_nonce(account).await?;
                 let expires_at = now.saturating_add(REQUEST_EXPIRY_MS);
                 let hash = eligibility_hash(&self.domain, account, confirmed.class, nonce, expires_at);

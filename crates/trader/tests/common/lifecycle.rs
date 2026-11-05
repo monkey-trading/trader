@@ -1,14 +1,17 @@
 //! The lifecycle against a stand-in node and a stand-in chain: its config, its keys, and the node's
 //! answers the tests script.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
+use axum::Router;
 use axum::extract::State;
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 use engine_core::eip712::{self, B256};
 use engine_core::types::AccountId;
 use k256::ecdsa::SigningKey;
@@ -19,7 +22,7 @@ use trader::config::Config;
 use trader::keys::AccountKey;
 
 use super::chain::ChainStandIn;
-use super::{ACCOUNT_SECRET, CHAIN_ID, StandIn, VAULT};
+use super::{ACCOUNT_SECRET, Answers, CHAIN_ID, StandIn, VAULT};
 
 /// The funding key's secret: obviously fake.
 pub const FUNDING_SECRET: [u8; 32] = [0x21; 32];
@@ -48,7 +51,7 @@ impl Setup {
 
     /// Sets the node's answer to a GET of `path` to `body`, with `status`.
     pub fn answer(&self, path: &str, status: u16, body: Value) {
-        self.node.with(|i| i.canned.insert(path.to_owned(), (status, body)));
+        self.node.with(|i| i.lifecycle.answers.insert(path.to_owned(), (status, body)));
     }
 
     /// The POSTs the node took to `path`.
@@ -189,11 +192,40 @@ pub fn deposit_record(tx: B256, amount: &str, uncredited: Option<&str>) -> Value
     }], "next": null })
 }
 
+/// The stand-in node's answers to the lifecycle: to the GETs no other route takes, how many times
+/// each path was read, and the paths whose answers another key signs.
+#[derive(Default)]
+pub struct Canned {
+    /// By path without its query: a status and a body.
+    pub answers: BTreeMap<String, (u16, Value)>,
+    pub reads: BTreeMap<String, usize>,
+    pub other_signer: BTreeSet<String>,
+}
+
+impl Canned {
+    /// How the answer to `target` is signed: by another key for a path in `other_signer`, else as
+    /// `answers` says.
+    pub fn signing(&self, target: &str, answers: Answers) -> Answers {
+        let path = target.split('?').next().unwrap_or_default();
+        if self.other_signer.contains(path) { Answers::OtherSigner } else { answers }
+    }
+}
+
+/// The lifecycle's routes: its POSTs, recorded and answered as orders are, and every path no other
+/// route takes, answered from `Canned`.
+pub fn routes() -> Router<Arc<StandIn>> {
+    Router::new()
+        .route("/v1/eligibility", post(super::record))
+        .route("/v1/withdrawals", post(super::record))
+        .route("/v1/accounts/{address}/withdrawals/{nonce}/reissue", post(super::record))
+        .fallback(canned)
+}
+
 /// The canned answer to a GET of the path, or 404.
-pub async fn canned(State(s): State<Arc<StandIn>>, uri: Uri) -> Response {
+async fn canned(State(s): State<Arc<StandIn>>, uri: Uri) -> Response {
     let answer = s.with(|i| {
-        *i.reads.entry(uri.path().to_owned()).or_default() += 1;
-        i.canned.get(uri.path()).cloned()
+        *i.lifecycle.reads.entry(uri.path().to_owned()).or_default() += 1;
+        i.lifecycle.answers.get(uri.path()).cloned()
     });
     match answer {
         Some((status, body)) => (StatusCode::from_u16(status).unwrap(), axum::Json(body)).into_response(),

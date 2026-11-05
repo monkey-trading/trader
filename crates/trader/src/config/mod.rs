@@ -88,8 +88,18 @@ pub struct RateSection {
     pub burst: u32,
 }
 
+/// A token bucket counted by the minute, as the node's `[api.fresh_accounts]` sets it: `burst`
+/// requests at once, refilled at `per_minute`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MinuteRateSection {
+    pub per_minute: u32,
+    pub burst: u32,
+}
+
 /// The node's limits on this bot, which the bot paces its requests under. Set them to the node's
-/// `api.per_ip` and `api.per_account`; the defaults are the engine's development config.
+/// `api.per_ip`, `api.per_account` and `api.fresh_accounts.per_client`; the defaults are the
+/// engine's development config.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsSection {
@@ -99,6 +109,10 @@ pub struct LimitsSection {
     /// Orders and cancels count against their account's bucket.
     #[serde(default = "default_per_account")]
     pub per_account: RateSection,
+    /// Declarations count against this bucket as well: the node's budget for one client's setup
+    /// requests, which holds every declaration it takes from the bot's address.
+    #[serde(default = "default_fresh_accounts")]
+    pub fresh_accounts: MinuteRateSection,
     /// The most HTTP connections open at once, the stream's not counted. The node caps connections
     /// per address (`api.max_connections_per_ip`), the stream's included.
     #[serde(default = "default_connections")]
@@ -108,7 +122,12 @@ pub struct LimitsSection {
 impl Default for LimitsSection {
     /// The engine's development limits.
     fn default() -> Self {
-        Self { per_ip: default_per_ip(), per_account: default_per_account(), connections: default_connections() }
+        Self {
+            per_ip: default_per_ip(),
+            per_account: default_per_account(),
+            fresh_accounts: default_fresh_accounts(),
+            connections: default_connections(),
+        }
     }
 }
 
@@ -336,6 +355,11 @@ fn default_per_ip() -> RateSection {
 /// The engine's development `api.per_account`, for serde.
 fn default_per_account() -> RateSection {
     RateSection { per_second: 10, burst: 20 }
+}
+
+/// The engine's development `api.fresh_accounts.per_client`, for serde.
+fn default_fresh_accounts() -> MinuteRateSection {
+    MinuteRateSection { per_minute: 600, burst: 20 }
 }
 
 /// Four connections, for serde.
