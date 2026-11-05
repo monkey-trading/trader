@@ -8,6 +8,9 @@ process over one stream connection. `trader addresses --config <file>` prints th
 addresses, for funding and declaring them. Every answer the node signs and every frame of its
 public log stream is checked against the configured enclave signer before the bot acts on it; an
 answer that fails the check is an error, never data, and one signed by another key stops the bot.
+`trader accounts <action> --config <file>` takes each configured account from an empty wallet to
+trading and back: it records the account's declaration, deposits USDC into the vault, claims its
+MONKEY, and withdraws, every payout going to the account's own address.
 
 ## Features
 
@@ -78,6 +81,36 @@ answer that fails the check is an error, never data, and one signed by another k
   both times in `serde_json` reading the message's nesting (`tests/alloc.rs` holds every message of
   a synthetic log to it, and the decision an account's read leads to, once, apart; the stream's frame verification is `engine-wire`'s), and `tests/hot_path.rs` replays an hour of a synthetic log through 1,000
   accounts and holds the time per message and the memory per account to budgets
+- `trader accounts declare --class <professional|eligible-client>` shows the class's statement
+  and records it, signed by the account, only for an account the user confirms, in the terminal or
+  with `--confirm <address>`; it needs the node alone
+- `trader accounts deposit --amount <USDC>` approves the vault for the amount and deposits it from
+  the account's wallet (`Vault.deposit`), or with `--from-funding` from the funding key's
+  (`Vault.depositFor`), then waits for the node's credit; one the node holds until the account
+  declares is reported as such
+- `trader accounts claim` claims each account's MONKEY with the node's proof (`Vault.claimEmissions`);
+  with `[claims]`, `trader run` claims once the unclaimed amount reaches a threshold
+- `trader accounts withdraw [--amount <USDC>]` requests a signed withdrawal, waits for the FIFO
+  queue to approve it and for each payout's authorization, asks for a new one when it expired
+  unpaid (again after a while if none comes), and pays it with `Vault.withdraw`; without an amount
+  it pays what is already approved
+- `trader accounts status` shows each account's declaration, wallet, balance, unclaimed MONKEY and
+  withdrawals
+- Every payout goes to the account's own address: the vault pays a claim or withdrawal to the
+  account it names, the bot names only the account whose key it holds, it checks each payout's
+  authorization names that account, and its token binding has no transfer. The optional funding key
+  pays gas for claims and withdrawals and funds deposits with `depositFor`, and receives nothing
+- Chain access over one or more JSON-RPC endpoints, on ring TLS, connected on first use: reads move
+  past an endpoint that fails, and after a transaction of the bot's lands, past one behind its
+  block; every transaction is estimated first and not sent when it would revert, is sent to every
+  endpoint and followed to its receipt even when no endpoint answered, is signed again only once
+  another transaction has spent its nonce, and one that reverts is reported with the contract's
+  reason. No fee over the configured cap is offered, so an
+  endpoint that misquotes the price cannot spend the payer's ether. An endpoint's URL is never
+  printed
+- A retry-later answer from the node, as its fresh-account budgets give, and a stale nonce are
+  followed by the request again; an answer that never came is checked against the node's record
+  before anything is asked again
 - The account keys from an encrypted Web3 Secret Storage keystore, or, in a dev build, a hex file;
   held only as a signing key that zeroes its secret on drop, and never printed. A release build
   refuses the keys whose private halves this repository publishes
@@ -89,13 +122,25 @@ answer that fails the check is an error, never data, and one signed by another k
 - `src/config/mod.rs`: the config file's sections and loading
 - `src/config/validation.rs`: parsing of the node URL and TLS key hash, and the config's checks
 - `src/config/tests.rs`: the config tests, against `config/example.toml`
+- `src/config/chain.rs`: the `[chain]`, `[funding]` and `[claims]` sections and their checks
 - `src/keys.rs`: `AccountKey`: unlocking a keystore or a dev hex file, and signing
 - `src/keys/tests.rs`: the key tests
 - `src/node/mod.rs`: `Node`, the signed and verified REST calls, paced and over pooled connections
 - `src/node/pool.rs`: the pool of kept-open HTTP/1.1 connections
 - `src/node/pace.rs`: the request pacer, and the node's time counted on from its answers
 - `src/node/api.rs`: the routes the bot uses and their answers
+- `src/node/accounts.rs`: the account lifecycle's routes: the declaration, deposits' custody
+  records, the MONKEY entitlement, withdrawals, payouts and their reissue
 - `src/node/tls.rs`: the pinned or publicly rooted TLS connections
+- `src/chain/mod.rs`: `Chain`, its endpoints and reads
+- `src/chain/send.rs`: the transactions the bot sends, followed to their receipts
+- `src/chain/contracts.rs`: the vault's and the token's bindings, and revert reasons
+- `abi/`: the entries of the vault's and OpenZeppelin `ERC20`'s ABIs the bot uses, generated from
+  the pinned engine commit's build; `scripts/dev-stack.sh --chain` checks they still match it
+- `src/accounts/mod.rs`: `Lifecycle`, what the actions share, and an account's status
+- `src/accounts/declare.rs`, `src/accounts/deposit.rs`, `src/accounts/claim.rs`,
+  `src/accounts/withdraw.rs`: the actions, each for one account whose key the caller holds
+- `src/accounts/cli.rs`: `trader accounts`, the actions for the config's accounts
 - `src/stream/mod.rs`: `Stream`, the verified, gap-free, resuming log
 - `src/stream/message.rs`: the stream's messages, read as borrowed views
 - `src/bot/mod.rs`: `run`: startup, the run, the stop, and the exit status
@@ -137,16 +182,29 @@ answer that fails the check is an error, never data, and one signed by another k
   engine refuses whole, and when someone else trades the account
 - `tests/bot_warm_up.rs`: the warm-up from the marks history, which moves of the mark make bars,
   and where the stream starts
+- `tests/common/chain.rs`: a local stand-in chain that decodes each signed transaction and applies
+  the token's and the vault's calls the bot makes, with their events
+- `tests/common/lifecycle.rs`: the lifecycle's config and the node's answers the tests script
+- `tests/chain.rs`: the chain client's endpoints, broadcast and refusals
+- `tests/lifecycle_declare.rs`, `tests/lifecycle_deposit.rs`, `tests/lifecycle_claim.rs`,
+  `tests/lifecycle_withdraw.rs`: each action against the stand-in node and chain
 
 ## Usage
 
 ```bash
 cargo run -p trader -- run --config config/example.toml
+cargo run -p trader -- accounts --config config/example.toml status
+cargo run -p trader -- accounts --config config/example.toml declare --class professional
+cargo run -p trader -- accounts --config config/example.toml deposit --amount 100
+cargo run -p trader -- accounts --config config/example.toml claim
+cargo run -p trader -- accounts --config config/example.toml --account 0x… withdraw --amount 50
 ```
 
 `scripts/dev-stack.sh` runs a local node and prints its `[node]` section; `scripts/dev-trade-one.sh`
 runs the bot against it end to end, `scripts/dev-strategies.sh` runs each strategy on its own account, and
-`scripts/dev-trade-many.sh` runs twenty accounts in one process.
+`scripts/dev-trade-many.sh` runs twenty accounts in one process. `scripts/dev-stack.sh --chain` adds a
+local chain with the vault and prints the `[chain]` section too; `scripts/dev-lifecycle.sh` runs the
+account lifecycle on it.
 
 ## Configuration
 
@@ -171,10 +229,15 @@ know, and relative paths are read from the file's directory:
   strategy by `kind` with its parameters (see `trader-core`)
 - `[[account_dir]]`: `path` of a directory whose `.json` keystores are each an account, with one
   `password` source for all, `close_on_stop`, and `[[account_dir.strategy]]` tables as above
+- `[chain]` (optional): `rpc` (one or more JSON-RPC URLs), `rpc_timeout`, `receipt_timeout`,
+  `settle_timeout` (how long the bot waits on the node to credit, approve or authorize),
+  `poll_interval`, `max_fee_gwei` (the highest fee per gas a transaction may offer)
+- `[funding]` (optional): `key`, as an `[[account]]`'s
+- `[claims]` (optional, needs `[chain]`): `threshold` (MONKEY), `interval`
 - `[logging]`: `level`, a tracing filter directive
 
 `CONFIG_PATH`: the config file, when `--config` is not given. The keystore password variable is the
-one the config names.
+one the config names, and so is the funding key's.
 
 ## Testing
 
@@ -184,6 +247,7 @@ cargo test -p trader --test hot_path -- --nocapture   # the benchmark's measurem
 ./scripts/dev-trade-one.sh    # a dev scenario, about seventeen minutes
 ./scripts/dev-trade-many.sh   # twenty accounts, about seventeen minutes
 ./scripts/dev-strategies.sh   # another, about twenty minutes
+./scripts/dev-lifecycle.sh    # the account lifecycle on a local chain, about fifteen minutes
 ```
 
 ## Authors

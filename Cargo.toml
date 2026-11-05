@@ -16,6 +16,16 @@ trader-core = { path = "crates/trader-core", version = "0.1.0" }
 engine-core = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721b0062e48ee944ab063205f3dbccb01ae6", version = "0.1.0" }
 engine-wire = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721b0062e48ee944ab063205f3dbccb01ae6", version = "0.1.0" }
 
+# The custody chain: transactions, their signing hashes and encoding, and JSON-RPC over reqwest,
+# whose TLS is configured here on ring alone.
+alloy-consensus = { version = "2.5", default-features = false, features = ["std"] }
+alloy-eips = { version = "2.5", default-features = false, features = ["std"] }
+alloy-primitives = { version = "1.7", default-features = false, features = ["std"] }
+alloy-provider = { version = "2.5", default-features = false, features = ["reqwest"] }
+alloy-rpc-client = { version = "2.5", default-features = false, features = ["reqwest"] }
+alloy-rpc-types-eth = { version = "2.5", default-features = false, features = ["std", "serde"] }
+# The vault's and the token's bindings, generated from their ABIs at the pinned engine commit.
+alloy-sol-types = { version = "1.7", default-features = false, features = ["std", "json"] }
 anyhow = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
@@ -30,6 +40,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 # The same curve crate engine-core signs with, so a key loads straight into its signing type.
 k256 = { version = "0.14.0", default-features = false, features = ["ecdsa"] }
 rand = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 # TLS on ring alone, as the node uses, so no OpenSSL or aws-lc build.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["alloc"] }

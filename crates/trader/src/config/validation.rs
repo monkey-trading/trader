@@ -31,6 +31,7 @@ impl Config {
     /// - a strategy that `validate_strategies` refuses
     /// - a limit of zero, or connections outside 1 to `MAX_CONNECTIONS`
     /// - a log level that is not a tracing filter directive, or a zero timeout
+    /// - a chain section that fails its checks (see `validate_chain`)
     pub(super) fn validate(&self, dev_build: bool) -> anyhow::Result<()> {
         ensure!(!self.account.is_empty() || !self.account_dir.is_empty(), "no [[account]] or [[account_dir]]");
         check_limits(&self.sizing, &self.risk)?;
@@ -56,7 +57,7 @@ impl Config {
         EnvFilter::try_new(&self.logging.level).map_err(|e| anyhow!("logging.level: {e}"))?;
         ensure!(!self.node.request_timeout.is_zero(), "node.request_timeout: above zero");
         ensure!(!self.node.stream_timeout.is_zero(), "node.stream_timeout: above zero");
-        Ok(())
+        self.validate_chain(dev_build)
     }
 }
 

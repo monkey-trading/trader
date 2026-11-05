@@ -2,12 +2,15 @@
 //! it does not know, so a typo fails the load instead of leaving a default in place. Relative paths
 //! in it are read from the config file's directory.
 
+mod chain;
+pub use chain::*;
 mod validation;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
+use engine_core::Fixed;
 use engine_core::types::AccountId;
 use serde::Deserialize;
 use trader_core::risk::RiskParams;
@@ -37,6 +40,13 @@ pub struct Config {
     /// Directories of keystores, one account per keystore.
     #[serde(default)]
     pub account_dir: Vec<AccountDirSection>,
+    /// The custody chain, for deposits, MONKEY claims and withdrawals.
+    #[serde(default)]
+    pub chain: Option<ChainSection>,
+    #[serde(default)]
+    pub funding: Option<FundingSection>,
+    #[serde(default)]
+    pub claims: Option<ClaimsSection>,
     #[serde(default)]
     pub logging: LoggingSection,
     /// Every account the config names, directories expanded; filled by `load`.
@@ -239,7 +249,7 @@ impl Config {
     /// - a value fails its check (see `validate`)
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let mut cfg = parse(&text).with_context(|| format!("parsing {}", path.display()))?;
         cfg.validate(cfg!(debug_assertions)).with_context(|| format!("checking {}", path.display()))?;
         cfg.resolve_paths(path.parent().unwrap_or(Path::new(".")));
         cfg.plans = cfg.expand().with_context(|| format!("reading the accounts of {}", path.display()))?;
@@ -261,8 +271,9 @@ impl Config {
                 resolve(file);
             }
         };
-        for account in &mut self.account {
-            match &mut account.key {
+        let funding = self.funding.as_mut().map(|funding| &mut funding.key);
+        for key in self.account.iter_mut().map(|account| &mut account.key).chain(funding) {
+            match key {
                 KeySource::Keystore { path, password } => {
                     resolve(path);
                     resolve_password(password);
@@ -330,6 +341,17 @@ fn default_per_account() -> RateSection {
 /// Four connections, for serde.
 fn default_connections() -> usize {
     4
+}
+
+/// The config in `text`. A parse error names its line and what is wrong there, but never quotes
+/// the text, which may hold an RPC endpoint's credential.
+/// Error cases:
+/// - `text` is not valid TOML of the config's shape, with no unknown key
+fn parse(text: &str) -> anyhow::Result<Config> {
+    toml::from_str(text).map_err(|e| {
+        let line = e.span().map_or(0, |span| text[..span.start.min(text.len())].matches('\n').count() + 1);
+        anyhow!("line {line}: {}", e.message())
+    })
 }
 
 /// `DEFAULT_REQUEST_TIMEOUT`, for serde.

@@ -16,8 +16,9 @@ use crate::config::{KeySource, PasswordSource};
 
 /// The accounts whose private keys this repository publishes, for its dev scenario and its tests.
 /// Anyone can sign for them, so only a dev build takes them.
-const PUBLISHED_ACCOUNTS: [&str; 14] = [
-    // scripts/dev-trade-one.sh: Anvil's account 1, and scripts/dev-strategies.sh: Anvil's accounts 1 to 7.
+const PUBLISHED_ACCOUNTS: [&str; 16] = [
+    // scripts/dev-trade-one.sh: Anvil's account 1, and scripts/dev-strategies.sh: Anvil's accounts 1 to 7;
+    // scripts/dev-lifecycle.sh: Anvil's accounts 2, 3 and 4, and 5, its funding key.
     "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
     "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
     "0x90f79bf6eb2c4f870365e785982e1f101e93b906",
@@ -25,11 +26,14 @@ const PUBLISHED_ACCOUNTS: [&str; 14] = [
     "0x9965507d1a55bcc2695c58ba16fb37d819b0a4dc",
     "0x976ea74026e726554db657fa54763abd0c3a0aa9",
     "0x14dc79964da2c08b23698b3d3cc7ca32193d9955",
+    // scripts/dev-stack.sh --chain: Anvil's account 0, which deploys the contracts.
+    "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
     // scripts/dev-stack.sh: the engine's dev operator key, 32 bytes of 0x42.
     "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
-    // The tests' keys: 32 bytes of 0x11, 0x51 and 0x52, the secrets 1 and 0x123456789abc, and the
-    // Web3 Secret Storage test vectors' key.
+    // The tests' keys: 32 bytes of 0x11, 0x21, 0x51 and 0x52, the secrets 1 and 0x123456789abc, and
+    // the Web3 Secret Storage test vectors' key.
     "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+    "0x2bd0c9fe079c8fca0e3352eb3d02839c371e5c41",
     "0xfa17c5b66a985f44bc249c8e8fabd64767f414b1",
     "0x83279fae0994aa1a563377e889cc2a1d96adb3b1",
     "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
