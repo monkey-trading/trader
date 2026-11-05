@@ -1,13 +1,19 @@
 /** The console's only door to the bot: every route, request and response check lives here. */
-import { parseWith, readAccount, readErrorMessage, readFills, type Parsed } from "./parsers";
+import { parseWith, readAccount, readError, readFills, type Parsed } from "./parsers";
 import type { AccountView, Fill } from "./types";
 
 /** What a call came to. A refusal or an outage is a value the control shows, not an exception. */
 export type Outcome<T> =
   | { readonly status: "ok"; readonly value: T }
   | { readonly status: "unauthenticated" }
-  | { readonly status: "refused"; readonly message: string; readonly retryAfterSeconds: number | null }
-  | { readonly status: "unavailable"; readonly message: string };
+  | {
+      readonly status: "refused";
+      readonly message: string;
+      /** The bot's code for the refusal, when its body has one. */
+      readonly code?: string | null;
+      readonly retryAfterSeconds: number | null;
+    }
+  | { readonly status: "unavailable"; readonly message: string; readonly code?: string | null };
 
 /** A control that did its work but says something the user should read: the flatten whose stop was not saved. */
 export interface Warned {
@@ -15,10 +21,10 @@ export interface Warned {
 }
 
 /**
- * How the bot's 500 answer to a flatten begins when the account is flattened but its stop was not saved
- * ("the account is flattened; the stop holds, but was not saved…"). The flatten ran, so it is not a failure.
+ * The code of the bot's 500 answer to a flatten that ran but whose stop was not saved. The flatten ran, so it is
+ * not a failure; the answer's message is shown as a warning.
  */
-const FLATTENED_WITH_WARNING = "the account is flattened";
+const FLATTENED_STOP_UNSAVED = "flattened_stop_unsaved";
 
 /** The calls the stores and pages make. A control answers `null`, or a warning about what it did. */
 export interface Api {
@@ -104,10 +110,12 @@ async function call<T>(
   if (response.ok) {
     return checked(parseWith(read, json));
   }
-  const message = readErrorMessage(json) ?? fallbackMessage(response.status);
+  const error = readError(json);
+  const message = error?.message ?? fallbackMessage(response.status);
+  const code = error?.code ?? null;
   return response.status >= 500
-    ? { status: "unavailable", message }
-    : { status: "refused", message, retryAfterSeconds: retryAfter(response) };
+    ? { status: "unavailable", message, code }
+    : { status: "refused", message, code, retryAfterSeconds: retryAfter(response) };
 }
 
 /** Reads no body: the session, login, logout and control answers are 204s with nothing the console uses. */
@@ -115,7 +123,7 @@ const nothing = (): null => null;
 
 /** A flatten that ran but answered 500 with the bot's warning is a success that carries the warning. */
 function flattenOutcome(outcome: Outcome<Warned | null>): Outcome<Warned | null> {
-  return outcome.status === "unavailable" && outcome.message.startsWith(FLATTENED_WITH_WARNING)
+  return outcome.status === "unavailable" && outcome.code === FLATTENED_STOP_UNSAVED
     ? { status: "ok", value: { warning: outcome.message } }
     : outcome;
 }

@@ -205,8 +205,18 @@ export function readLiveMessage(body: unknown): LiveMessage {
   }
 }
 
-/** Parses an error body, `{ "error": text }`; any other body reads as no message. */
-export function readErrorMessage(body: unknown): string | null {
-  const parsed = parseWith((value) => text(object(value, "error body"), "error"), body);
+/** The bot's answer to a refusal: a message to show, and a code to act on. */
+export interface ErrorBody {
+  readonly message: string;
+  /** What kind of refusal it is, such as `flattened_stop_unsaved`; absent when the body has none. */
+  readonly code: string | null;
+}
+
+/** Parses an error body, `{ "error": text, "code": text }`; any other body reads as `null`. */
+export function readError(body: unknown): ErrorBody | null {
+  const parsed = parseWith((value) => {
+    const fields = object(value, "error body");
+    return { message: text(fields, "error"), code: fields["code"] === undefined ? null : nullableText(fields, "code") };
+  }, body);
   return parsed.status === "ok" ? parsed.value : null;
 }

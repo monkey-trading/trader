@@ -1,6 +1,6 @@
 /** Tests of the parsers at the API boundary. */
 import { fillBody, figuresBody, overviewBody, totalsBody, viewBody } from "./fixtures";
-import { parseWith, readAccount, readErrorMessage, readFills, readLiveMessage, readOverview } from "./parsers";
+import { parseWith, readAccount, readError, readFills, readLiveMessage, readOverview } from "./parsers";
 
 describe("readOverview", () => {
   it("reads accounts and totals whole", () => {
@@ -142,11 +142,16 @@ describe("readLiveMessage", () => {
   });
 });
 
-describe("readErrorMessage", () => {
-  it("takes the error text and ignores any other body", () => {
-    expect(readErrorMessage({ error: "no" })).toBe("no");
-    expect(readErrorMessage({ message: "no" })).toBeNull();
-    expect(readErrorMessage(null)).toBeNull();
+describe("readError", () => {
+  it("takes the error text and its code, and reads a body without a code as code null", () => {
+    expect(readError({ error: "no", code: "out_of_bounds" })).toEqual({ message: "no", code: "out_of_bounds" });
+    expect(readError({ error: "no" })).toEqual({ message: "no", code: null });
+  });
+
+  it("ignores any other body, and one whose code is not text", () => {
+    expect(readError({ message: "no" })).toBeNull();
+    expect(readError({ error: "no", code: 7 })).toBeNull();
+    expect(readError(null)).toBeNull();
   });
 });
 

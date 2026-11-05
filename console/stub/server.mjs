@@ -51,7 +51,7 @@ function signedIn(request) {
 
 async function login(request, response) {
   if (failedLogins >= 5) {
-    return send(response, 429, { error: "Too many login attempts." }, { "Retry-After": "30" });
+    return send(response, 429, { error: "too many attempts; try again later", code: "rate_limited" }, { "Retry-After": "30" });
   }
   const body = await readJson(request);
   if (body?.password !== PASSWORD) {
@@ -117,12 +117,15 @@ async function control(request, response, parts) {
     if (request.method === "POST") {
       item.strategy.running = action === "start";
     } else {
+      if (body?.kind !== item.strategy.kind) {
+        return send(response, 422, { error: "the parameters are for another kind of strategy", code: "kind_mismatch" });
+      }
       const bounds = item.strategy.bounds;
       const names = Object.keys(item.strategy.params).filter((name) => name !== "kind");
       for (const name of names) {
         const value = Number(body?.[name]);
         if (bounds === null || Number.isNaN(value) || value < Number(bounds[name][0]) || value > Number(bounds[name][1])) {
-          return send(response, 422, { error: `${name} is outside its bounds` });
+          return send(response, 422, { error: `${name} is outside its bounds`, code: "out_of_bounds" });
         }
       }
       if (body.fast >= body.slow) {
@@ -141,13 +144,13 @@ async function control(request, response, parts) {
 
 async function api(request, response, url) {
   if (request.method !== "GET" && request.headers.origin !== `http://${request.headers.host}`) {
-    return send(response, 403, { error: "foreign origin" });
+    return send(response, 403, { error: "foreign origin", code: "foreign_origin" });
   }
   if (url.pathname === "/api/login" && request.method === "POST") {
     return login(request, response);
   }
   if (!signedIn(request)) {
-    return send(response, 401, { error: "log in first" });
+    return send(response, 401, { error: "log in first", code: "session_required" });
   }
   const parts = url.pathname.split("/").slice(2).map(decodeURIComponent);
   if (parts[0] === "session") {
