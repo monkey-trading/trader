@@ -29,6 +29,7 @@ impl Bot {
         if fill.market == self.market {
             let before = std::mem::replace(&mut self.position, fill.position);
             self.controls.on_fill(ts, fill.market, before, fill.position);
+            self.metrics.fills.inc();
         }
         info!(
             seq,

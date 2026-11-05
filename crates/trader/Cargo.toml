@@ -6,11 +6,19 @@ license.workspace = true
 repository.workspace = true
 description = "The monkeytrading bot: runs strategies against the engine's node and serves its console"
 
+[features]
+# Refuses a mock attestation, an extra attestation root, a plain hex key, a node pinned by its TLS
+# key rather than a public certificate, and the keys this repository publishes, at config load.
+# Release binaries and images build with it.
+production = []
+
 [dependencies]
 anyhow = { workspace = true }
+axum = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
 engine-core = { workspace = true }
+engine-verify = { workspace = true }
 engine-wire = { workspace = true }
 eth-keystore = { workspace = true }
 futures-util = { workspace = true }
@@ -20,6 +28,7 @@ humantime-serde = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 k256 = { workspace = true }
+prometheus-client = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }
 rustls-webpki = { workspace = true }
@@ -38,7 +47,8 @@ webpki-roots = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-axum = { workspace = true }
+# The stand-in vendor chain and forged reports the attestation tests verify.
+engine-verify = { workspace = true, features = ["test-fixtures"] }
 hyper = { workspace = true, features = ["server"] }
 hyper-util = { workspace = true, features = ["server", "service"] }
 rcgen = { workspace = true }

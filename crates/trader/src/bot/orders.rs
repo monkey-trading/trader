@@ -60,16 +60,23 @@ impl Bot {
             self.remember_signature(signature);
             self.close_first = false;
             info!(side = ?intent.side, qty = %intent.qty, %quoted, reduce_only = intent.reduce_only, nonce, expires_at, "placing a market order");
+            self.metrics.orders_placed.inc();
             match self.node.place_order(&request).await {
                 Ok(answer) => {
                     log_order_events(&answer.body);
+                    if answer.body.iter().any(|event| matches!(event, Event::OrderRejected { .. })) {
+                        self.metrics.orders_declined.inc();
+                    }
                     // The pure close passes where a reversal's blended spread does not.
                     self.close_first = answer.body.iter().any(|event| {
                         matches!(event, Event::OrderRejected { reason: Reject::CloseSpreadCeiling { .. }, .. })
                     });
                 }
                 Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-                Err(e @ CallError::Refused { .. }) => warn!("order declined: {e}"),
+                Err(e @ CallError::Refused { .. }) => {
+                    self.metrics.orders_declined.inc();
+                    warn!("order declined: {e}");
+                }
                 Err(e) => warn!("no answer to the order, which may still enter the log until it expires: {e}"),
             }
             Ok(())

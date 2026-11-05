@@ -3,14 +3,23 @@
 ## Overview
 
 The monkeytrading bot's binary. `trader run --config <file>` trades one account in one market with
-one of six strategies against a monkeytrading node. Every answer the node signs and every frame of its
-public log stream is checked against the configured enclave signer before the bot acts on it; an
-answer that fails the check is an error, never data, and one signed by another key stops the bot.
+one of six strategies against a monkeytrading node. It first verifies the node's attestation: the
+enclave address the attestation names is the signer, never a config value. Every answer the node
+signs and every frame of its public log stream is checked against that signer before the bot acts
+on it; an answer that fails the check is an error, never data, and one signed by another key stops
+the bot.
 
 ## Features
 
-- Signed REST calls to the node over TLS 1.3, pinned to the node's TLS key hash or checked against
-  the public roots, each under a fresh challenge and verified with `engine-wire`
+- The node's attestation, checked before any other call: an SEV-SNP quote verified with
+  `engine-verify` at the pinned engine commit, its chain ending at a vendor root and its launch
+  matching one of the release manifests the config names, with the chain the node relays; or, in
+  a dev build, a dev node's mock. The enclave address it names is the signer, and every connection
+  from then on must present the TLS key it names. One that does not verify stops the bot before
+  it reads anything else, with a Critical alert
+- Signed REST calls to the node over TLS 1.3, pinned to the node's TLS key hash in a dev build or
+  checked against the public roots, and holding the attested key, each under a fresh challenge and
+  verified with `engine-wire`
 - One signed stream connection that reads the public log, verifies each frame with
   `FrameVerifier`, refuses gaps, and resumes after the last message it read when a connection
   fails or falls silent; a frame or message it cannot read stops the bot
@@ -51,21 +60,31 @@ answer that fails the check is an error, never data, and one signed by another k
   a few calls of `request_timeout`, and a further close's, and
   a second signal does not cut it short, so a supervisor's grace period should be longer
 - The account key from an encrypted Web3 Secret Storage keystore, or, in a dev build, a hex file;
-  held only as a signing key that zeroes its secret on drop, and never printed. A release build
+  held only as a signing key that zeroes its secret on drop, and never printed. A production build
   refuses the keys whose private halves this repository publishes
+- A `production` cargo feature, which release binaries and images build with, that refuses at
+  config load a mock attestation, an extra attestation root, a pinned TLS key, and a hex key
+- Prometheus metrics on a loopback listener: orders placed and declined and fills per account and
+  market, each account's equity and margin level, and the stream's lag; the listener failing stops
+  the bot as a signal does
 
 ## Repository Structure
 
 - `src/main.rs`: the entry point
-- `src/lib.rs`: the command line and the runtime
+- `src/lib.rs`: the command line, the runtime, and the metrics listener's supervision
 - `src/config/mod.rs`: the config file's sections and loading
-- `src/config/validation.rs`: parsing of the node URL and TLS key hash, and the config's checks
+- `src/config/validation.rs`: parsing of the node URL and TLS key hash, and the config's checks,
+  with what only a dev build takes
 - `src/config/tests.rs`: the config tests, against `config/example.toml`
 - `src/keys.rs`: `AccountKey`: unlocking a keystore or a dev hex file, and signing
 - `src/keys/tests.rs`: the key tests
 - `src/node/mod.rs`: `Node`, the signed and verified REST calls
 - `src/node/api.rs`: the routes the bot uses and their answers
-- `src/node/tls.rs`: the pinned or publicly rooted TLS connections
+- `src/node/tls.rs`: the pinned or publicly rooted TLS connections, and the attested key they
+  require
+- `src/node/attestation.rs`: the node's attestation, verified or read as a dev node's mock
+- `src/metrics.rs`: the metrics registry, each account's series, and the listener
+- `src/metrics/tests.rs`: the metrics tests
 - `src/stream/mod.rs`: `Stream`, the verified, gap-free, resuming log
 - `src/stream/message.rs`: the stream's messages, read as borrowed views
 - `src/bot/mod.rs`: the bot: applying the log, bars, and decisions
@@ -79,6 +98,10 @@ answer that fails the check is an error, never data, and one signed by another k
   faults, and pings after each frame, so a test can wait until the bot has applied it
 - `tests/common/bot.rs`: the bot's config, run, the log and account the tests script, and the
   orders they check
+- `tests/common/attestation.rs`: the stand-in's attestations: a mock, and a quote the engine's
+  stand-in vendor chain signs, with its release manifest and root
+- `tests/attestation.rs`: the bot against an attested stand-in, and the attestations that stop it
+- `tests/metrics.rs`: the bot's orders, fills and lag in its metrics
 - `tests/node_answers.rs`, `tests/stream.rs`, `tests/bot.rs`: the binary against the stand-in
 - `tests/bot_halts.rs`: the bot against the stand-in when its market is relisted, the log cannot be
   read, the node changes signer, or a stop cannot leave the account as it should
@@ -98,17 +121,21 @@ cargo run -p trader -- run --config config/example.toml
 ```
 
 `scripts/dev-stack.sh` runs a local node and prints its `[node]` section; `scripts/dev-trade-one.sh`
-runs the bot against it end to end, and `scripts/dev-strategies.sh` runs each strategy on its own account.
+runs the bot against it end to end, `scripts/dev-strategies.sh` runs each strategy on its own account,
+and `scripts/dev-attestation.sh` checks that a production build refuses its config and that a
+test-signed attestation names the signer the bot trades against.
 
 ## Configuration
 
-One TOML file, `config/example.toml` documents every key; each section refuses keys it does not
-know, and relative paths are read from the file's directory:
+One TOML file; `config/README.md` documents every key and `config/example.toml` is a complete
+example. Each section refuses keys it does not know, and relative paths are read from the file's
+directory:
 
 - `[node]`: `url` (`https://host:port`), `chain_id` and `vault` (the custody deployment every
-  signature names), `signer` (the enclave address that signs answers), `tls_key_sha256` (the
-  node's TLS key hash to pin; without it the certificate must chain to a public root),
-  `request_timeout` and `stream_timeout`
+  signature names), `tls_key_sha256` (in a dev build, the node's TLS key hash to pin; without it
+  the certificate must chain to a public root), `request_timeout` and `stream_timeout`
+- `[node.attestation]`: `type = "sev_snp"` with `releases` (release manifest files) and, in a dev
+  build, `root` (an extra PEM root); or, in a dev build, `type = "mock"`
 - `[account]`: `key`, a keystore with its password from a file or an environment variable, or in a
   dev build a hex key file; `close_on_stop`; `state_dir`, where the day's loss is kept
 - `[strategy]`: `market` (a symbol), `bar` (whole minutes, 1m to 1d), `max_slippage_bps`, and the
@@ -118,6 +145,7 @@ know, and relative paths are read from the file's directory:
 - `[risk]`: `max_open_positions`, `max_total_notional`, `daily_loss`, `margin_buffer_bps` and
   `min_hold`
 - `[logging]`: `level`, a tracing filter directive
+- `[metrics]`: `listen`, a loopback address for the Prometheus listener
 
 `CONFIG_PATH`: the config file, when `--config` is not given. The keystore password variable is the
 one the config names.
@@ -126,8 +154,10 @@ one the config names.
 
 ```bash
 cargo test -p trader
-./scripts/dev-trade-one.sh   # a dev scenario, about seventeen minutes
-./scripts/dev-strategies.sh  # another, about twenty minutes
+cargo test -p trader --features production --lib production_build   # the production build's refusals
+./scripts/dev-trade-one.sh     # a dev scenario, about seventeen minutes
+./scripts/dev-strategies.sh    # another, about twenty minutes
+./scripts/dev-attestation.sh   # the production build and the attestation, about two minutes
 ```
 
 ## Authors

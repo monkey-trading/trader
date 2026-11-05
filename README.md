@@ -14,23 +14,28 @@ host's address.
 The bot is built against the engine at commit
 [`ed8f721`](https://github.com/monkey-trading/engine/commit/ed8f721b0062e48ee944ab063205f3dbccb01ae6)
 (`main` on 2026-11-04, protocol version V49), the latest when it was pinned, and supports nodes
-running that commit. The engine has no tagged releases yet. The bot signs its requests with that
-commit's `engine-core` and checks every answer with its `engine-wire`, so a node whose request
-types, signed answers, or stream messages differ refuses the bot's requests or fails its checks,
-and the bot stops rather than act on them.
+running that commit. The engine has no tagged releases yet. The bot verifies the node's attestation
+with that commit's `engine-verify`, signs its requests with its `engine-core`, and checks every
+answer with its `engine-wire`, so a node whose request types, signed answers, or stream messages
+differ refuses the bot's requests or fails its checks, and the bot stops rather than act on them.
 
 ## How it is built
 
 - `crates/trader-core` is a library with no IO: indicators, strategies, sizing and risk limits. Time
   and prices arrive as arguments, so strategies are tested and benchmarked without a network.
-- `crates/trader` is the binary. It does the IO: it reads the node's API and the public log over
-  one signed stream, checks every answer and stream frame against the node's enclave signer,
-  unlocks the account key, and signs orders. Chain calls and the console server are to come.
+- `crates/trader` is the binary. It does the IO: it verifies the node's attestation, reads the
+  node's API and the public log over one signed stream, checks every answer and stream frame
+  against the enclave signer the attestation names, unlocks the account key, signs orders, and
+  serves Prometheus metrics on a loopback address. Chain calls and the console server are to come.
 - `console/` is the web console, a Vite, React and TypeScript app built to static files that the
   binary will embed.
-- The engine's own crates, `engine-core` and `engine-wire`, are Cargo git dependencies on
-  `https://github.com/monkey-trading/engine`, pinned by one `rev`, so the bot signs exactly what the
-  node checks. The repository has no git submodules.
+- The engine's own crates, `engine-core`, `engine-wire` and `engine-verify`, are Cargo git
+  dependencies on `https://github.com/monkey-trading/engine`, pinned by one `rev`, so the bot signs
+  exactly what the node checks and verifies its attestation as the engine does. The repository has
+  no git submodules.
+- The `Dockerfile` builds the bot as one static binary with the console embedded, on an empty base
+  image, for linux/amd64 and linux/arm64, with every input pinned. A version tag publishes the
+  binaries, their SHA-256 checksums and the image.
 
 ## Building
 
@@ -41,11 +46,93 @@ cargo build --workspace
 cargo run -p trader -- --version
 ```
 
+A build for real funds uses the `production` feature, as the published binaries and image do. It
+refuses at startup a config that only suits a development node: a mock attestation, an extra
+attestation root, a pinned TLS key, or a plain hex key. The image builds the same way:
+
+```bash
+cargo build --release --locked -p trader --features production
+docker buildx build --platform linux/amd64 -t trader .   # VARIANT=dev builds without the feature
+```
+
+## Quick start
+
+A version tag publishes the bot for Linux on x86-64 and arm64: static binaries,
+`trader-linux-amd64` and `trader-linux-arm64`, with a `SHA256SUMS` file on the tag's GitHub
+release, and the image `ghcr.io/monkey-trading/trader:<tag>` for both. All are production builds.
+No version has been tagged yet; until one is, build the binary or the image as
+[Building](#building) shows.
+
+### The config directory
+
+Make a directory, `/etc/trader` below, that only the user the bot runs as can read, and put in it:
+
+- `trader.toml`, from [`config/example.toml`](config/example.toml), with the node's `url`,
+  `chain_id` and `vault`. [`config/README.md`](config/README.md) documents every key.
+- The release manifest of the engine release the node runs, as that release publishes it, named in
+  `[node.attestation] releases`. The bot verifies the node's attestation against it before
+  anything else, and trusts no other signer.
+- The account's keystore, the encrypted file a wallet exports, and a file holding its password:
+
+```toml
+[account]
+key = { type = "keystore", path = "keys/account.json", password = { file = "keys/account.password" } }
+close_on_stop = true
+```
+
+On SIGINT or SIGTERM the bot cancels the account's resting orders and, with `close_on_stop`,
+closes its position, which can take a minute or two, so give it that long to stop. It exits
+non-zero when it halts, such as when an answer fails its signature check or someone else trades the
+account, and leaves the account as it is for you to look at; a supervisor that restarts it on
+failure resumes trading without that look.
+
+### Docker
+
+```bash
+docker run --name trader --network host --user "$(id -u):$(id -g)" --stop-timeout 120 \
+  --volume /etc/trader:/config:ro ghcr.io/monkey-trading/trader:<tag>
+```
+
+The image runs `trader run --config /config/trader.toml`. Host networking keeps the metrics
+listener on the host's loopback address.
+
+### systemd
+
+Check the binary against `SHA256SUMS` and install it:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+sudo install -m 755 trader-linux-amd64 /usr/local/bin/trader
+```
+
+Then run it as its own user with a unit such as `/etc/systemd/system/trader.service`, and
+`sudo systemctl enable --now trader`:
+
+```ini
+[Unit]
+Description=trader, a monkeytrading bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=trader
+ExecStart=/usr/local/bin/trader run --config /etc/trader/trader.toml
+TimeoutStopSec=120
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ## Running against a dev node
 
 `scripts/dev-stack.sh` fetches the pinned engine commit into a cache outside the repository
 (`TRADER_ENGINE_CACHE`), builds its node once, and runs it with mock custody and price feeds on
-free local ports. It prints the `[node]` section of a bot config. Fund and declare an account as the
+free local ports. It prints the `[node]` section of a bot config, which takes the node's mock
+attestation, so only a development build runs with it. Fund and declare an account as the
 script's `dev_stack_fund` and `dev_stack_declare` functions do, then run the bot on a config such as
 [`config/example.toml`](config/example.toml):
 

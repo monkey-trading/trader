@@ -140,7 +140,7 @@ async fn startup_refusals() {
         i.answers = Some(common::Answers::OtherSigner);
     });
     let err = run(config(&stand_in, dir.path(), "1m"), async {}).await.unwrap_err();
-    assert!(format!("{err:#}").contains("not signed by the configured signer"), "{err:#}");
+    assert!(format!("{err:#}").contains("not signed by the attested signer"), "{err:#}");
     assert!(stand_in.with(|i| i.posts.is_empty()));
 }
 

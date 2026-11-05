@@ -1,7 +1,9 @@
-//! What the bot reads before it follows the log: the market, the account, and the market's recent
-//! marks, each a verified answer; and the stop signals it listens for.
+//! What the bot reads before it follows the log: the node's attestation, then the market, the
+//! account, and the market's recent marks, each a verified answer; and the stop signals it listens
+//! for.
 
 use std::collections::VecDeque;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
 use engine_core::Fixed;
@@ -9,7 +11,7 @@ use engine_core::eip712;
 use engine_core::types::Millis;
 use engine_wire::Deployment;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use trader_core::bars::BarBuilder;
 use trader_core::controls::{Account, Controls};
 use trader_core::hours::GapTracker;
@@ -21,7 +23,9 @@ use crate::bot::fills::other_market;
 use crate::bot::{Bot, Halt, bar_fits, orders, supported};
 use crate::config::Config;
 use crate::keys::AccountKey;
+use crate::metrics::Metrics;
 use crate::node::api::MarkBucket;
+use crate::node::attestation::attest;
 use crate::node::{CallError, Node, Tls};
 use crate::stream::Stream;
 
@@ -55,16 +59,22 @@ pub fn stop_signal() -> anyhow::Result<impl Future<Output = ()>> {
 }
 
 /// The bot for `cfg`'s account, with its position and balance, and the log from the seq after the
-/// head before the reads.
+/// head before the reads, from the node whose attestation verified; it records into `metrics`.
 /// Error cases:
+/// - the system clock is before 1970
+/// - the node's attestation does not verify (see `attest`)
 /// - the node cannot be reached, or an answer does not verify, or is refused
 /// - the market is not listed, or is one the bot does not trade
 /// - the account has never been credited
-pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot, Stream)> {
+pub(super) async fn start(cfg: &Config, key: AccountKey, metrics: &Metrics) -> anyhow::Result<(Bot, Stream)> {
     let node_cfg = &cfg.node;
+    let clock = SystemTime::now().duration_since(UNIX_EPOCH).context("the system clock is before 1970")?;
     let tls = Tls::new(node_cfg.url.clone(), node_cfg.tls_key_sha256)?;
+    let attested = attest(&tls, &node_cfg.attestation, node_cfg.request_timeout, clock.as_secs().cast_signed())
+        .await
+        .inspect_err(|e| error!(alert = "node_attestation_failed", "{e:#}"))?;
     let deployment = Deployment { chain_id: node_cfg.chain_id, vault: node_cfg.vault.0 };
-    let node = Node::new(tls.clone(), node_cfg.signer.0, deployment, node_cfg.request_timeout);
+    let node = Node::new(attested.tls.clone(), attested.signer, deployment, node_cfg.request_timeout);
     let strategy_cfg = &cfg.strategy;
     let account = key.address();
 
@@ -168,8 +178,10 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         // An order an earlier process signed before this start expires by now plus its window.
         trading_from: now.saturating_add(orders::EXPIRES_IN_MS),
         log_ts: Millis::MIN,
+        metrics: metrics.account(account, &strategy_cfg.market),
+        stream_lag: metrics.stream_lag(),
     };
-    let stream = Stream::new(tls, node_cfg.signer.0, deployment, node_cfg.stream_timeout, head_seq + 1);
+    let stream = Stream::new(attested.tls, attested.signer, deployment, node_cfg.stream_timeout, head_seq + 1);
     Ok((bot, stream))
 }
 

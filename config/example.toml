@@ -1,22 +1,31 @@
 # An example config for `trader run --config <file>`: one account trading one market with a strategy,
-# sized and held to risk limits. Every section refuses keys it does not know. Relative paths are read from this file's
-# directory. `scripts/dev-stack.sh` prints the [node] values of a local dev node.
+# sized and held to risk limits. Every section refuses keys it does not know. Relative paths are read
+# from this file's directory. `scripts/dev-stack.sh` prints the [node] section of a local dev node
+# instead.
 
 [node]
-# The node's API, https://host:port.
-url = "https://127.0.0.1:18610"
+# The node's API, https://host:port. OWNER: the production node's address, set at launch.
+url = "https://node.monkeytrading.example:443"
 # The custody chain and vault every signature names: the node's [custody] chain_id and vault.
-chain_id = 31337
+# OWNER: the production vault's address, set at launch.
+chain_id = 42161
 vault = "0x0000000000000000000000000000000000000000"
-# The enclave key's address, from the node's attestation (`enclave_address`). Every answer and
-# stream frame must carry its signature.
-signer = "0x0000000000000000000000000000000000000000"
-# The SHA-256 of the node's TLS key, from its attestation (`tls_public_key_sha256`), for a node
-# whose certificate no public CA signs, as a dev node's. Leave it out to require a public CA.
-tls_key_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 # How long one call may take, and the longest silence on the stream before it reconnects.
 request_timeout = "10s"
 stream_timeout = "30s"
+# A dev build also takes tls_key_sha256 = "<64 hex>", the node's TLS key hash, for a node whose
+# certificate no public CA signs, as a dev node's. Without it the certificate must chain to a public
+# root.
+
+# What the node's attestation must prove before the bot trusts it. The enclave address it names
+# signs every answer and stream frame, and the TLS key it names is the only one the bot accepts.
+[node.attestation]
+# An SEV-SNP quote whose certificate chain ends at the vendor's root and which matches one of these
+# release manifests, as each engine release publishes them. OWNER: the launch release's manifest.
+type = "sev_snp"
+releases = ["engine-release.toml"]
+# A dev build also takes root = "<file>", a PEM root certificate for a test chain, and
+# type = "mock" alone for a dev node's mock attestation, which proves nothing.
 
 [account]
 # An encrypted Web3 Secret Storage keystore, as wallets export it, with its password from a file
@@ -84,3 +93,9 @@ min_hold = "1h"
 
 [logging]
 level = "info"
+
+# Prometheus metrics at http://<listen>/metrics: orders placed and declined, fills, each account's
+# equity and margin level, and the stream's lag. The address must be a loopback one. Leave the
+# section out to serve none.
+[metrics]
+listen = "127.0.0.1:9466"

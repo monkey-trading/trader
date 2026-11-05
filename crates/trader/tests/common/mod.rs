@@ -1,8 +1,12 @@
 //! A local stand-in for the node: its API over TLS with a self-signed certificate, signing every
-//! answer and stream frame as the node does (`engine_wire`), with the faults a test injects.
+//! answer and stream frame as the node does (`engine_wire`), with the faults a test injects. It
+//! serves a mock attestation of its signer and TLS key unless a test serves another.
 
 #![allow(dead_code)]
 
+mod attestation;
+#[allow(unused_imports)]
+pub use attestation::*;
 mod bot;
 mod controls;
 #[allow(unused_imports)]
@@ -76,6 +80,10 @@ pub enum Fault {
 /// What the stand-in holds and has seen.
 #[derive(Default)]
 pub struct Inner {
+    /// What `/v1/attestation` and `/v1/attestation/collateral` serve, unsigned as the node serves
+    /// them; no collateral answers 404, as a mock node's does.
+    pub attestation: Value,
+    pub collateral: Option<Vec<u8>>,
     pub answers: Option<Answers>,
     pub time_ms: u64,
     /// How far the log head moves after each answer.
@@ -149,8 +157,10 @@ impl StandIn {
             .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let signer = SigningKey::from_slice(&SIGNER_SECRET).unwrap();
         let stand_in = Arc::new(StandIn {
             inner: Mutex::new(Inner {
+                attestation: mock_attestation(eip712::address(signer.verifying_key()).0, pin),
                 answers: Some(Answers::Signed),
                 time_ms: 1_800_000_000_000,
                 settle: true,
@@ -158,12 +168,14 @@ impl StandIn {
                 ..Inner::default()
             }),
             appended: Notify::new(),
-            signer: SigningKey::from_slice(&SIGNER_SECRET).unwrap(),
+            signer,
             other: SigningKey::from_slice(&OTHER_SECRET).unwrap(),
             addr,
             pin,
         });
         let router = Router::new()
+            .route("/v1/attestation", get(attestation_route))
+            .route("/v1/attestation/collateral", get(collateral_route))
             .route("/v1/markets", get(markets))
             .route("/v1/markets/{id}/marks", get(marks))
             .route("/v1/accounts/{address}", get(account_view_route))
@@ -195,6 +207,11 @@ impl StandIn {
     /// The enclave key's address.
     pub fn signer(&self) -> [u8; 20] {
         eip712::address(self.signer.verifying_key()).0
+    }
+
+    /// The other key's address, which signs what `Answers::OtherSigner` and `Fault::OtherSigner` do.
+    pub fn other_signer(&self) -> [u8; 20] {
+        eip712::address(self.other.verifying_key()).0
     }
 
     /// The deployment the stand-in signs for.
@@ -263,10 +280,10 @@ pub fn btc_usd(mark: Option<&str>) -> Value {
     })
 }
 
-/// Signs each answer as the node does, or answers as `Inner::answers` says. The stream answers
-/// unsigned, as the node's upgrade does.
+/// Signs each answer as the node does, or answers as `Inner::answers` says. The stream and the
+/// attestation answer unsigned, as the node's do.
 async fn sign_answers(State(s): State<Arc<StandIn>>, req: Request, next: Next) -> Response {
-    if req.uri().path() == "/v1/stream" {
+    if ["/v1/stream", "/v1/attestation", "/v1/attestation/collateral"].contains(&req.uri().path()) {
         return next.run(req).await;
     }
     let challenge = req.headers().get("x-engine-challenge").and_then(|v| v.to_str().ok()).and_then(parse_challenge);
