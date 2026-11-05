@@ -5,6 +5,8 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use engine_core::Fixed;
@@ -32,18 +34,55 @@ pub struct Saved {
     /// When each market split, if the bot halted at one: prices before it are in other units.
     #[serde(default)]
     pub splits: BTreeMap<MarketId, Millis>,
+    /// The fields of a file written for one market, before accounts traded several: read, never written.
+    #[serde(default, skip_serializing)]
+    pub side: i64,
+    #[serde(default, skip_serializing)]
+    pub entry: Fixed,
+    #[serde(default, skip_serializing)]
+    pub split_at: Option<Millis>,
+}
+
+impl Saved {
+    /// Moves a file written for one market to the per-market maps, for an account that trades `markets`.
+    /// Error cases:
+    /// - the file holds a position or a split of one market and the account trades several: which
+    ///   market they belong to is not known, so the file is left for someone to remove
+    pub fn migrate(&mut self, markets: &[MarketId]) -> anyhow::Result<()> {
+        let (side, entry, split_at) =
+            (std::mem::take(&mut self.side), std::mem::take(&mut self.entry), self.split_at.take());
+        if side == 0 && split_at.is_none() {
+            return Ok(());
+        }
+        let [market] = markets else {
+            anyhow::bail!(
+                "the saved state was written for one market, and this account trades {}: move the file aside to start it afresh",
+                markets.len()
+            );
+        };
+        if side != 0 {
+            self.positions.entry(*market).or_insert(SavedPosition { side, entry });
+        }
+        if let Some(at) = split_at {
+            self.splits.entry(*market).or_insert(at);
+        }
+        Ok(())
+    }
 }
 
 /// The file holding one account's saved state.
 #[derive(Clone, Debug)]
 pub struct StateFile {
     path: PathBuf,
+    /// Writes are numbered as they are asked for, and a write that an older one overtakes is skipped, so
+    /// the file holds the newest snapshot asked for whatever order the writes run in.
+    writes: Arc<(AtomicU64, Mutex<u64>)>,
 }
 
 impl StateFile {
     /// The file for `account` in `dir`.
     pub fn new(dir: &Path, account: AccountId) -> Self {
-        Self { path: dir.join(format!("{account}.json")) }
+        Self { path: dir.join(format!("{account}.json")), writes: Arc::default() }
     }
 
     /// The saved state, or the empty one when no file exists.
@@ -65,7 +104,12 @@ impl StateFile {
     /// - the directory or file cannot be written
     pub async fn save(&self, saved: Saved) -> anyhow::Result<()> {
         let path = self.path.clone();
+        let (writes, number) = (Arc::clone(&self.writes), self.writes.0.fetch_add(1, Ordering::SeqCst) + 1);
         tokio::task::spawn_blocking(move || {
+            let mut newest = writes.1.lock().unwrap_or_else(|e| e.into_inner());
+            if *newest > number {
+                return anyhow::Ok(());
+            }
             let dir = path.parent().context("the state file has a directory")?;
             std::fs::create_dir_all(dir)?;
             let temporary = path.with_extension("json.tmp");
@@ -75,6 +119,7 @@ impl StateFile {
             std::fs::rename(&temporary, &path)?;
             // The rename is in the directory, which is synced too, or a crash can bring the old file back.
             std::fs::File::open(dir)?.sync_all()?;
+            *newest = number;
             anyhow::Ok(())
         })
         .await?

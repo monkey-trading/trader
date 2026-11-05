@@ -5,11 +5,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use engine_core::Fixed;
 use engine_core::auth::RequestAuth;
 use engine_core::command::{CloseAllRequest, CloseEntry, OrderKind, OrderRequest};
 use engine_core::eip712::{close_all_hash, order_hash};
 use engine_core::event::{Event, Reject};
-use engine_core::types::{AccountId, Millis};
+use engine_core::types::{AccountId, MarketId, Millis};
 use futures_util::FutureExt;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
@@ -85,13 +86,17 @@ impl Runner {
         if self.out >= self.cap || account.busy {
             return true;
         }
-        let drop_with = |asg: &mut crate::bot::fleet::Assignment| {
-            (asg.pending, asg.queued) = (None, false);
-            false
-        };
         if node_ms.saturating_sub(pending.ts) > REPLAY_LAG_MS {
             self.stale_dropped += 1;
-            return drop_with(asg);
+            fleet.drop_pending(a);
+            return false;
+        }
+        // The decision was taken from a read of the log, for an account that was trading; a fill or the
+        // daily limit since changes what it should be, and the next bar decides again.
+        if account.behind || account.controls.is_stopped() || account.flatten_queued {
+            info!(account = %account.address, market = asg.market, "the account changed since the order was decided: no order");
+            fleet.drop_pending(a);
+            return false;
         }
         // The decision was taken against the state saved with it, and waits until that is kept.
         if account.state_dirty || account.state_saving || account.state_unsaved {
@@ -100,7 +105,8 @@ impl Runner {
         let intent = pending.intent;
         let Some(quoted) = fleet.markets[asg.market_slot as usize].mark else {
             warn!(account = %account.address, market = asg.market, "no mark to quote the order at");
-            return drop_with(asg);
+            fleet.drop_pending(a);
+            return false;
         };
         let nonce = match account.nonce {
             Nonce::Synced(nonce) => nonce,
@@ -194,6 +200,7 @@ impl Runner {
         let (node, address) = (Arc::clone(&self.node), account.address);
         self.in_flight.push(async move { Done::Clock(node.nonce(address).await) }.boxed());
     }
+
     /// Closes the positions of accounts the daily loss limit has stopped (or flattens), one close for
     /// each account at a time, signed once the limits let it go like an order, unless the market is
     /// shut or an order signed earlier may still enter the log and move a position.
@@ -247,6 +254,10 @@ impl Runner {
         if held.is_empty() || held.iter().any(|&a| fleet.order_in_flight(a, fleet.log_ts).is_some()) {
             return None;
         }
+        // The close is quoted at marks of the log, which must be current as an order's bar must be.
+        if node_ms.saturating_sub(fleet.log_ts) > REPLAY_LAG_MS {
+            return Some(true);
+        }
         if account.busy || account.state_dirty || account.state_saving || account.state_unsaved {
             return Some(true);
         }
@@ -268,17 +279,19 @@ impl Runner {
                 return Some(true);
             }
         };
-        let mut closes = Vec::with_capacity(held.len());
-        let mut slippage = 0;
-        for &a in &held {
-            let asg = &fleet.assignments[a as usize];
-            let Some(quoted) = fleet.markets[asg.market_slot as usize].mark else { continue };
-            closes.push(CloseEntry { market: asg.market, quoted });
-            slippage = slippage.max(asg.max_slippage_bps);
-        }
-        if closes.is_empty() {
-            return None;
-        }
+        // One request closes the markets that share a slippage bound, the tightest first: no market
+        // closes under another's looser bound. The others follow on the next try.
+        let quoted_held: Vec<Held> = held
+            .iter()
+            .filter_map(|&a| {
+                let asg = &fleet.assignments[a as usize];
+                let quoted = fleet.markets[asg.market_slot as usize].mark?;
+                Some((a, asg.market, quoted, asg.max_slippage_bps))
+            })
+            .collect();
+        let (slippage, group) = tightest_group(quoted_held)?;
+        let held: Vec<u32> = group.iter().map(|&(a, ..)| a).collect();
+        let closes: Vec<_> = group.iter().map(|&(_, market, quoted, _)| CloseEntry { market, quoted }).collect();
         let expires_at = node_ms.saturating_add(EXPIRES_IN_MS);
         let mut request =
             CloseAllRequest { account: account.address, closes, max_slippage_bps: Some(slippage), auth: None };
@@ -367,6 +380,8 @@ impl Runner {
         if let Some(reason) = failure {
             self.fleet.fail(account, reason);
         }
+        // A target of another market was waiting for this order.
+        self.fleet.read_if_waiting(account);
         Ok(())
     }
 
@@ -443,5 +458,29 @@ pub(super) fn log_order_events(account: AccountId, events: &[Event]) {
     }
     if events.is_empty() {
         info!(%account, "the request changed nothing");
+    }
+}
+
+/// A held position to close: its assignment, market, quote and slippage bound.
+type Held = (u32, MarketId, Fixed, i64);
+
+/// The markets that share the tightest slippage bound among `held` (assignment, market, quote, bound),
+/// with that bound.
+fn tightest_group(held: Vec<Held>) -> Option<(i64, Vec<Held>)> {
+    let bound = held.iter().map(|&(.., bound)| bound).min()?;
+    Some((bound, held.into_iter().filter(|&(.., b)| b == bound).collect()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_close_goes_under_the_tightest_bound_of_its_markets_alone() {
+        let quote: Fixed = "100".parse().unwrap();
+        let held = vec![(0, 1, quote, 100), (1, 2, quote, 10), (2, 3, quote, 10)];
+        let (bound, group) = tightest_group(held).unwrap();
+        assert_eq!((bound, group.iter().map(|g| g.1).collect::<Vec<_>>()), (10, vec![2, 3]));
+        assert!(tightest_group(Vec::new()).is_none());
     }
 }

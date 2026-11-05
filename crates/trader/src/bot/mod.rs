@@ -20,10 +20,11 @@ mod stop;
 mod warm;
 
 use engine_core::market::{MarketSpec, QuoteCurrency};
-use engine_core::types::Millis;
+use engine_core::types::{AccountId, Millis};
 use tracing::{error, info};
 
 use crate::config::Config;
+use crate::keys::AccountKey;
 use crate::node::CallError;
 
 pub use run::Runner;
@@ -51,13 +52,10 @@ pub enum Halt {
 /// The address of every account the config names, in config order.
 /// Error cases:
 /// - a key cannot be unlocked
-pub async fn addresses(
-    cfg: &Config,
-    env: impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<Vec<engine_core::types::AccountId>> {
+pub async fn addresses(cfg: &Config, env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Vec<AccountId>> {
     let mut addresses = Vec::with_capacity(cfg.plans.len());
     for plan in &cfg.plans {
-        addresses.push(crate::keys::AccountKey::load(&plan.key, &env).await?.address());
+        addresses.push(AccountKey::load(&plan.key, &env).await?.address());
     }
     Ok(addresses)
 }

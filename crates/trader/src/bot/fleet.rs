@@ -34,8 +34,8 @@ pub const REPLAY_LAG_MS: Millis = 30_000;
 pub const EXPIRES_IN_MS: Millis = 30_000;
 /// How long, in sequenced time, between reads of an account whose last read was not at the log.
 pub const READ_RETRY_MS: Millis = 5_000;
-/// How long, in sequenced time, between reads of an account that holds a position and whose last read
-/// was at the log, so a balance moved by a withdrawal or financing is found.
+/// How long, in sequenced time, between reads of an account whose last read was at the log, whether or
+/// not it holds a position, so a balance moved by a withdrawal or financing is found.
 pub const READ_EVERY_MS: Millis = 60_000;
 /// How long, in sequenced time, after a try at closing the positions of a stopped account the daily
 /// loss limit tries again.

@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use tokio::time::{Instant, sleep_until};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::bot::Halt;
 use crate::bot::day::Saved;
@@ -20,6 +20,9 @@ use crate::bot::fleet::Fleet;
 use crate::node::api::{AccountView, MarkBucket, NonceView};
 use crate::node::{CallError, Node, Verified};
 use crate::stream::{Stream, StreamError};
+
+/// How long after a failed read of the node's time it is tried again.
+const CLOCK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// What a started request answered.
 pub(super) enum Done {
@@ -167,8 +170,8 @@ impl Runner {
                 match outcome {
                     Err(CallError::WrongSigner { .. }) => Err(Halt::WrongSigner),
                     Err(e) => {
-                        tracing::warn!("the node's time was not read: {e}");
-                        self.clock_retry_at = Some(Instant::now() + std::time::Duration::from_secs(1));
+                        warn!("the node's time was not read: {e}");
+                        self.clock_retry_at = Some(Instant::now() + CLOCK_RETRY);
                         Ok(())
                     }
                     Ok(_) => Ok(()),

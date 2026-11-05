@@ -89,7 +89,17 @@ pub fn account(n: u64, strategies: Vec<StrategyIn>) -> AccountIn {
 /// Reads every account the fleet wants read as the node would answer: with the positions the log
 /// gives, entered at 100, and a balance of 1,000; then decides what each wanted. Returns how many.
 pub fn settle(fleet: &mut Fleet) -> usize {
-    let mut settled = 0;
+    settle_with(fleet, false).0
+}
+
+/// `settle`, also returning the allocations of taking the reads and deciding: the views the node would
+/// answer with are built outside the count.
+pub fn settle_counting(fleet: &mut Fleet) -> (usize, u64) {
+    settle_with(fleet, true)
+}
+
+fn settle_with(fleet: &mut Fleet, counting: bool) -> (usize, u64) {
+    let (mut settled, mut allocations) = (0, 0);
     while let Some(account) = fleet.reads.pop_front() {
         let entry = &mut fleet.accounts[account as usize];
         entry.read_wanted = false;
@@ -103,12 +113,19 @@ pub fn settle(fleet: &mut Fleet) -> usize {
             })
             .collect();
         let view = AccountView { balance: "1000".parse().unwrap(), positions, orders: BTreeMap::new() };
-        if fleet.apply_view(account, &view) {
-            fleet.decide_account(account);
+        let take = |fleet: &mut Fleet| {
+            if fleet.apply_view(account, &view) {
+                fleet.decide_account(account);
+            }
+        };
+        if counting {
+            allocations += allocation_counter::measure(|| take(fleet)).count_total;
+        } else {
+            take(fleet);
         }
         settled += 1;
     }
-    settled
+    (settled, allocations)
 }
 
 /// The offset of seq `seq`'s command.

@@ -89,8 +89,12 @@ impl Fleet {
             return self.corporate_action(message, event);
         }
         if let ("corporate_dividend" | "corporate_cash_in_lieu", Some(address)) = (head.kind, head.account) {
-            // Cash moves without a fill: the balance is read again.
+            // Cash moves without a fill: the balance held is not the account's, and nothing is valued from
+            // it, until a read agrees.
             if let Some(account) = self.account_of(address) {
+                let (log_ts, entry) = (self.log_ts, &mut self.accounts[account as usize]);
+                entry.behind = true;
+                entry.read_after = log_ts;
                 self.want_read(account);
             }
             return Ok(());
@@ -150,6 +154,11 @@ impl Fleet {
                 "{reason}: another process or person trades the account"
             );
             self.fail(account, reason);
+        } else if !fill.liquidation && self.signed_here(account, message) {
+            // The order has entered the log and filled: it can no longer move the position later.
+            if let Some(a) = self.assignment_of(account, fill.market) {
+                self.assignments[a as usize].expires_at = None;
+            }
         }
         Ok(())
     }

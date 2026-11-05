@@ -127,16 +127,19 @@ impl Runner {
         let entry = &mut self.fleet.accounts[account as usize];
         match outcome {
             Ok(answer) => {
+                // A decision, a fill or a cash event that came after the read was started is not in it:
+                // its balance is not published, and the account is read again.
+                if std::mem::take(&mut entry.read_stale) {
+                    self.fleet.want_read(account);
+                    return;
+                }
                 let at_log = self.fleet.apply_view(account, &answer.body);
                 let entry = &mut self.fleet.accounts[account as usize];
                 if entry.failed.is_some() {
                     return;
                 }
                 info!(account = %entry.address, balance = %entry.balance, head_seq = answer.head_seq, at_log, "account read");
-                // A decision, or a fill, that came after the read was started is not in it.
-                if std::mem::take(&mut entry.read_stale) {
-                    self.fleet.want_read(account);
-                } else if at_log {
+                if at_log {
                     self.fleet.decide_account(account);
                     self.fleet.observe_account(account, self.fleet.log_ts);
                 }

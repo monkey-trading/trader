@@ -8,7 +8,6 @@ mod log;
 use engine_core::eip712::Signature;
 use trader::bot::fleet::{AccountIn, StrategyIn};
 use trader::bot::fleet::{Fleet, Warm};
-use trader_core::strategies::StrategyParams;
 
 use log::*;
 
@@ -55,7 +54,6 @@ fn strategies_on_one_market_and_bar_length_share_a_series() {
     assert_eq!(params, [sma(1, 2), sma(2, 5)], "one run for each distinct set of parameters, not each account");
     assert_eq!(fleet.series[1].strategies.len(), 1);
     assert_eq!(fleet.assignments.len(), 300);
-    let _ = StrategyParams::SmaCrossover { fast: 1, slow: 2 };
 }
 
 /// A bar that completes queues every account whose position is not at the target, in the order
@@ -74,8 +72,9 @@ fn a_completed_bar_queues_the_accounts_that_are_not_at_their_target() {
 /// one-minute bar completes two minutes before another's two-minute bar.
 #[test]
 fn decisions_queue_in_bar_order_across_markets() {
-    let two = vec![strategy(2, 2 * MINUTE), strategy(1, MINUTE)];
-    let mut fleet = Fleet::new(&markets(2), vec![account(0, two.clone()), account(1, two)], T0).unwrap();
+    let accounts =
+        (0..4).map(|i| account(i, vec![if i < 2 { strategy(1, MINUTE) } else { strategy(2, 2 * MINUTE) }])).collect();
+    let mut fleet = Fleet::new(&markets(2), accounts, T0).unwrap();
     let mut seq = warm(&mut fleet, &[1, 2], "100");
     for minute in 1..=4 {
         for market in [2, 1] {
@@ -94,7 +93,7 @@ fn decisions_queue_in_bar_order_across_markets() {
         .iter()
         .map(|&a| (fleet.assignments[a as usize].account, fleet.assignments[a as usize].market))
         .collect();
-    assert_eq!(queued, [(0, 1), (1, 1), (0, 2), (1, 2)]);
+    assert_eq!(queued, [(0, 1), (1, 1), (2, 2), (3, 2)]);
 }
 
 /// A decision taken while an earlier one for the same assignment waits replaces it, keeping its place.
@@ -262,4 +261,56 @@ fn the_first_mark_after_a_warm_up_with_no_history_is_a_move() {
     }
     settle(&mut fleet);
     assert_eq!(fleet.queue.len(), 1, "minutes 1 and 2 made bars, so the crossover is long at minute 3");
+}
+
+/// An account's markets are decided one at a time: while an order of one is queued or may not be in the
+/// log yet, a target of another waits, so the account's limits see the positions the log gives; its fill
+/// ends its fence, and the target is decided when the account is read again.
+#[test]
+fn an_account_decides_its_second_market_after_the_first_order_is_out() {
+    let two = vec![strategy(1, MINUTE), strategy(2, MINUTE)];
+    let mut fleet = Fleet::new(&markets(2), vec![account(0, two)], T0).unwrap();
+    let mut seq = warm(&mut fleet, &[1, 2], "100");
+    for minute in 1..=2 {
+        for market in [1, 2] {
+            let ts = T0 + minute * MINUTE;
+            apply(&mut fleet, seq, ts, &prices(seq, ts, market, &(100 + minute).to_string()));
+            seq += 1;
+        }
+    }
+    settle(&mut fleet);
+    assert_eq!(fleet.queue.iter().copied().collect::<Vec<_>>(), [0], "one order for the account");
+    assert!(fleet.assignments[1].wanted.is_some(), "the other market's target waits");
+    // The order is signed and its fill is in the log: the fence ends, and a read decides the target.
+    fleet.assignments[0].expires_at = Some(T0 + 10 * MINUTE);
+    fleet.assignments[0].pending = None;
+    fleet.queue.clear();
+    fleet.assignments[0].queued = false;
+    fleet.accounts[0].signed.push_back(signature("44").parse().unwrap());
+    let address = fleet.accounts[0].address.to_string();
+    let ts = T0 + 2 * MINUTE + 1_000;
+    apply(&mut fleet, seq, ts, &order_fill(seq, ts, &address, &signature("44"), 1, "1"));
+    assert!(fleet.assignments[0].expires_at.is_none(), "an order that filled is no longer out");
+    settle(&mut fleet);
+    assert_eq!(fleet.queue.iter().copied().collect::<Vec<_>>(), [1], "the second market is decided");
+}
+
+/// Cash that moves without a fill makes the balance held the account's no longer: nothing is valued
+/// from it until the account is read again.
+#[test]
+fn a_cash_event_marks_the_balance_behind_until_a_read() {
+    let (mut fleet, seq) = warmed(2);
+    settle(&mut fleet);
+    let address = fleet.accounts[1].address.to_string();
+    let event = format!(
+        r#"{{"type":"corporate_dividend","id":"d","market":1,"account":"{address}","quantity":"1","amount":"5","fx_mark":null}}"#
+    );
+    let ts = T0 + MINUTE;
+    fleet
+        .apply(&command(seq, ts, r#"{"type":"tick"}"#, &format!("[{event}]")), at(seq), u64::try_from(ts + 50).unwrap())
+        .unwrap();
+    assert_eq!((fleet.accounts[0].behind, fleet.accounts[1].behind), (false, true));
+    assert_eq!(fleet.reads.iter().copied().collect::<Vec<_>>(), [1]);
+    settle(&mut fleet);
+    assert!(!fleet.accounts[1].behind, "a read of the log ends it");
 }

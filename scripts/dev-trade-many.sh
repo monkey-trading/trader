@@ -62,9 +62,11 @@ step "write the bot's config: $accounts accounts, keys 0x1001 to 0x$(printf '%x'
     printf '%064x\n' $((0x1001 + i)) > "$work/account$i.hex"
     chmod 600 "$work/account$i.hex"
     market="BTC-USD"; (( i >= 10 )) && market="ETH-USD"
-    periods="fast = 1
+    periods="kind = \"sma_crossover\"
+fast = 1
 slow = 2"
-    (( i % 10 >= 5 )) && periods="fast = 2
+    (( i % 10 >= 5 )) && periods="kind = \"ema_crossover\"
+fast = 2
 slow = 3"
     cat <<CONFIG
 
@@ -76,7 +78,6 @@ close_on_stop = true
 market = "$market"
 bar = "1m"
 $periods
-qty = "0.5"
 max_slippage_bps = 25
 CONFIG
     if (( i == 0 )); then
@@ -85,14 +86,33 @@ CONFIG
 [[account.strategy]]
 market = "ETH-USD"
 bar = "1m"
+kind = "sma_crossover"
 fast = 2
 slow = 3
-qty = "1"
 max_slippage_bps = 25
 CONFIG
     fi
   done
-  printf '\n[logging]\nlevel = "info"\n'
+  cat <<CONFIG
+
+[state]
+dir = "state"
+
+[sizing]
+by = "fixed_notional"
+notional = "20000"
+max_leverage = "5"
+
+[risk]
+max_open_positions = 2
+max_total_notional = "100000"
+daily_loss = { usd = "1000000" }
+margin_buffer_bps = 10000
+min_hold = "0s"
+
+[logging]
+level = "info"
+CONFIG
 } > "$work/bot.toml"
 addresses=()
 while IFS= read -r line; do addresses+=("$line"); done < <("$trader" addresses --config "$work/bot.toml")

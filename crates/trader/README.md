@@ -26,7 +26,7 @@ answer that fails the check is an error, never data, and one signed by another k
   it. A bar that completes gives each account that reads it a target, which its controls turn into
   an order or none
 - Startup reads of the markets and each account's positions and balance; from then on each
-  position follows its account's fills in the log, and the account is read again after fills, at each decision to trade, and every minute while it holds a position. A
+  position follows its account's fills in the log, and the account is read again after fills, at each decision to trade, and every minute. A
   fill from an order this process did not sign, once orders signed before it started have
   expired, means someone else trades the account, and stops that account (`account_shared`),
   not the others. A fill is the bot's when the command that made it carries one of the signatures
@@ -76,7 +76,7 @@ answer that fails the check is an error, never data, and one signed by another k
   grace period should be longer, the more so with many accounts
 - After warm-up, `Fleet::apply` allocates at most twice per log message, for any number of accounts,
   both times in `serde_json` reading the message's nesting (`tests/alloc.rs` holds every message of
-  a synthetic log to it; the stream's frame verification is `engine-wire`'s), and `tests/hot_path.rs` replays an hour of a synthetic log through 1,000
+  a synthetic log to it, and the decision an account's read leads to, once, apart; the stream's frame verification is `engine-wire`'s), and `tests/hot_path.rs` replays an hour of a synthetic log through 1,000
   accounts and holds the time per message and the memory per account to budgets
 - The account keys from an encrypted Web3 Secret Storage keystore, or, in a dev build, a hex file;
   held only as a signing key that zeroes its secret on drop, and never printed. A release build

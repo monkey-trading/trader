@@ -30,7 +30,7 @@ use crate::stream::Stream;
 const READ_TRIES: u32 = 3;
 const READ_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 /// How many keystores are decrypted at once: key derivation is slow by design.
-const UNLOCKS_AT_ONCE: usize = 8;
+const UNLOCKS_AT_ONCE: usize = 4;
 
 /// A future that completes on SIGINT or SIGTERM.
 /// Error cases:
@@ -213,7 +213,8 @@ async fn account_in(
         bail!("{address} holds a position in market {other}: close it first, as this bot does not trade or limit it");
     }
     let state_file = StateFile::new(state_dir, address);
-    let saved = state_file.load().await?;
+    let mut saved = state_file.load().await?;
+    saved.migrate(&traded.iter().copied().collect::<Vec<_>>())?;
     let mut controls = Controls::new(plan.risk.clone(), plan.sizing.clone(), saved.day)?;
     let mut strategies = Vec::with_capacity(plan.strategies.len());
     for s in &plan.strategies {
@@ -274,6 +275,7 @@ async fn account_in(
             .map(|s| (s.market, SavedPosition { side: s.position.signum(), entry: s.entry }))
             .collect(),
         splits: saved.splits,
+        ..Saved::default()
     };
     state_file.save(kept.clone()).await.context("keeping the saved state")?;
     Ok(AccountIn {

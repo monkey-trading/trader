@@ -172,6 +172,13 @@ impl Fleet {
         if acc.failed.is_some() {
             return;
         }
+        // The account's limits are checked against the positions the log gives, so an order of another
+        // of its markets that is queued, or may not be in the log yet, is waited for: the target is
+        // decided again when that order is answered or its fill is read.
+        if self.other_order_out(a, w.ts) {
+            self.assignments[a as usize].wanted = Some(w);
+            return;
+        }
         if acc.behind || acc.state_unsaved {
             info!(account = %acc.address, market, target = ?w.target, behind = acc.behind, "the account read is not at the log, or the saved state is not written: no order");
             if acc.state_unsaved {
@@ -253,6 +260,31 @@ impl Fleet {
         }
     }
 
+    /// Whether an order of another market of assignment `a`'s account is queued or may still enter the log.
+    fn other_order_out(&self, a: u32, ts: Millis) -> bool {
+        let account = &self.accounts[self.assignments[a as usize].account as usize];
+        account.assignments.clone().filter(|&b| b != a).any(|b| {
+            let other = &self.assignments[b as usize];
+            other.pending.is_some() || other.expires_at.is_some_and(|expires_at| ts <= expires_at)
+        })
+    }
+
+    /// Drops the order assignment `a` has queued, and asks for a read if a target of its account waits.
+    pub(super) fn drop_pending(&mut self, a: u32) {
+        let asg = &mut self.assignments[a as usize];
+        (asg.pending, asg.queued) = (None, false);
+        let account = asg.account;
+        self.read_if_waiting(account);
+    }
+
+    /// Asks for a read of `account` if one of its assignments has a target waiting to be decided.
+    pub(super) fn read_if_waiting(&mut self, account: u32) {
+        let range = self.accounts[account as usize].assignments.clone();
+        if range.into_iter().any(|b| self.assignments[b as usize].wanted.is_some()) {
+            self.want_read(account);
+        }
+    }
+
     /// Why no order is signed for assignment `a` at the command at `ts`, if an earlier one may still
     /// enter the log and move its position: the last this process signed for it, or one an earlier
     /// process signed before this start.
@@ -297,11 +329,9 @@ impl Fleet {
                     warn!(alert = "daily_loss_limit", account = %acc.address, ?state, "the daily loss limit is reached: flattening and stopping until the next UTC day");
                 }
                 acc.loss_alert = true;
+                // The close is asked for by `retry_flattens` on the same command, behind the replay lag.
                 if !self.stopped.contains(&account) {
                     self.stopped.push(account);
-                }
-                if n > 0 {
-                    self.request_flatten(account);
                 }
             }
             DayStatus::Trading if acc.loss_alert => {
@@ -374,7 +404,13 @@ impl Fleet {
                 splits.insert(asg.market, at);
             }
         }
-        Saved { day: acc.controls.day_state(), opened: acc.controls.opened().clone(), positions, splits }
+        Saved {
+            day: acc.controls.day_state(),
+            opened: acc.controls.opened().clone(),
+            positions,
+            splits,
+            ..Saved::default()
+        }
     }
 
     /// Notes that `account`'s state file is out of date, if it is. Nothing is ordered for the account

@@ -12,8 +12,13 @@ use hyper::header::{CONTENT_TYPE, HOST};
 use hyper::{HeaderMap, Method, Request};
 use hyper_util::rt::TokioIo;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::timeout;
 
 use crate::node::Tls;
+
+/// The longest a connection made in the background may take; a request's own time is the config's
+/// `request_timeout`.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The largest answer body the bot reads: a page of marks history is a few hundred kilobytes.
 const MAX_ANSWER_BYTES: usize = 4 << 20;
@@ -78,15 +83,12 @@ impl Pool {
     /// is ready a connection is made in the background for the next ask.
     pub fn try_checkout(self: &Arc<Self>) -> Option<Checkout> {
         let conn = Arc::clone(&self.permits).try_acquire_owned().ok()?;
-        let sender = self.pop_ready();
-        if sender.is_none() {
-            self.fill();
-        }
-        sender.map(|sender| Checkout {
-            _slot: Slot { _read: None, _conn: conn },
-            sender: Some(sender),
-            pool: Arc::clone(self),
-        })
+        let Some(sender) = self.pop_ready() else {
+            // The slot is held while the connection is made, so no read connects beside it past the limit.
+            self.fill(conn);
+            return None;
+        };
+        Some(Checkout { _slot: Slot { _read: None, _conn: conn }, sender: Some(sender), pool: Arc::clone(self) })
     }
 
     /// The room for a read, once there is one.
@@ -167,13 +169,14 @@ impl Pool {
     }
 
     /// Makes one connection for the idle set in the background, unless one is being made.
-    fn fill(self: &Arc<Self>) {
+    fn fill(self: &Arc<Self>, conn: OwnedSemaphorePermit) {
         if self.filling.swap(true, Ordering::AcqRel) {
             return;
         }
         let pool = Arc::clone(self);
         tokio::spawn(async move {
-            if let Ok(sender) = pool.connect().await {
+            let _conn = conn;
+            if let Ok(Ok(sender)) = timeout(CONNECT_TIMEOUT, pool.connect()).await {
                 pool.give_back(sender);
             }
             pool.filling.store(false, Ordering::Release);

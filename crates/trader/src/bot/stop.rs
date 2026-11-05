@@ -24,7 +24,7 @@ use crate::bot::fleet::EXPIRES_IN_MS;
 use crate::bot::orders::log_order_events;
 use crate::bot::run::Runner;
 use crate::keys::AccountKey;
-use crate::node::{CallError, Node};
+use crate::node::{Admission, CallError, Node};
 use crate::stream::message::{CommandMessage, Head};
 use crate::stream::{Stream, StreamError};
 
@@ -296,11 +296,21 @@ impl Stop {
         Ok(())
     }
 
+    /// Waits for the node's limits and a connection, for no longer than `MAX_CLOSE_WAIT`: a node that has
+    /// become unreachable ends the account's stop as incomplete and does not hold the others' up.
+    /// Error cases:
+    /// - the limits and a connection were not there in time
+    async fn admit(&self, account: AccountId) -> Result<Admission, Failed> {
+        tokio::time::timeout(MAX_CLOSE_WAIT, self.node.admit(Some(account)))
+            .await
+            .map_err(|_| Failed::Incomplete(format!("no connection to the node within {MAX_CLOSE_WAIT:?}")))
+    }
+
     /// Signs and sends a cancel of every resting order, on the account's next nonce, once the node's
     /// limits let it go. A failed cancel is logged: the account read that follows shows what it did.
     async fn cancel(&self, account: AccountId) -> Result<(), Failed> {
         let Some(nonce) = self.nonce(account).await? else { return Ok(()) };
-        let admission = self.node.admit(Some(account)).await;
+        let admission = self.admit(account).await?;
         let Some(expires_at) = self.expiry() else { return Ok(()) };
         let hash = cancel_all_hash(&self.domain, account, nonce, expires_at);
         let auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
@@ -328,7 +338,7 @@ impl Stop {
                 let mut attempt = 0;
                 loop {
                     let (marks, read_at) = self.quotes.get(&self.node).await?;
-                    let admission = self.node.admit(Some(account)).await;
+                    let admission = self.admit(account).await?;
                     attempt += 1;
                     if read_at.elapsed() < QUOTE_AGE {
                         break (marks, admission);

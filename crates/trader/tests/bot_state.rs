@@ -377,3 +377,29 @@ async fn no_order_when_a_decision_changes_state_that_cannot_be_saved() {
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(40), bot).await.unwrap().unwrap().unwrap();
 }
+
+/// A state file written for one market, before accounts traded several, keeps its split for the market the
+/// account trades, and is rewritten in the current shape.
+#[tokio::test]
+async fn a_file_from_the_one_market_bot_keeps_its_split() {
+    let stand_in = StandIn::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    std::fs::create_dir_all(dir.path().join("state")).unwrap();
+    let old = json!({ "day": null, "opened": {}, "side": 0, "entry": "0", "split_at": T0 - 5_000 });
+    std::fs::write(dir.path().join("state").join(format!("{}.json", account())), old.to_string()).unwrap();
+    let (stop, bot) = start(&stand_in, dir.path(), &[]);
+    warm(&stand_in).await;
+    let saved = day_file(dir.path());
+    assert_eq!(saved["splits"]["1"], T0 - 5_000);
+    assert!(saved.get("split_at").is_none(), "{saved}");
+    // The log passes the window orders signed before the start could enter it in, so the stop is quick.
+    let seq = next_seq(&stand_in);
+    stand_in.append((seq, 0), command(seq, T0 + 40_000, json!({ "type": "tick" }), json!([])));
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+}
