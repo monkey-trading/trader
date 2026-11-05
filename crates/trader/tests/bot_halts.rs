@@ -312,3 +312,22 @@ async fn order_then_stop(stand_in: &Arc<StandIn>) -> (JoinHandle<anyhow::Result<
     stop.send(()).unwrap();
     (bot, dir)
 }
+
+/// A relisting that leaves the market's own leverage at or below the cap halts the bot: the cap was
+/// chosen below the old market's.
+#[tokio::test]
+async fn a_relisting_that_lowers_the_markets_leverage_halts() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), std::future::pending()));
+    let tiers = vec![engine_core::market::Tier { up_to: None, bps: 1000 }];
+    stand_in.append((11, 0), relisting(11, T0 + 1, MarketSpec { margin_tiers: tiers, ..btc_spec() }, true));
+    stand_in.tick(T0 + 40_000);
+    let err = tokio::time::timeout(Duration::from_secs(40), bot).await.unwrap().unwrap().unwrap_err();
+    assert!(format!("{err:#}").contains("not below the market's own"), "{err:#}");
+}

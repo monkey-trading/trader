@@ -20,8 +20,8 @@ use crate::bot::{Bot, Halt, REPLAY_LAG_MS};
 /// How long, in sequenced time, after a try at closing the position the daily loss limit tries again.
 const FLATTEN_RETRY_MS: Millis = 5_000;
 
-/// What the bot keeps across a restart: the day's loss, when its position opened and on which side, and
-/// when a split halted it.
+/// What the bot keeps across a restart: the day's loss, when its position opened and on which side and
+/// at what entry price, and when a split halted it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Saved {
     pub(super) day: Option<DayState>,
@@ -76,6 +76,8 @@ impl StateFile {
             file.write_all(serde_json::to_string(&saved)?.as_bytes())?;
             file.sync_all()?;
             std::fs::rename(&temporary, &path)?;
+            // The rename is in the directory, which is synced too, or a crash can bring the old file back.
+            std::fs::File::open(dir)?.sync_all()?;
             anyhow::Ok(())
         })
         .await?
@@ -137,7 +139,7 @@ impl Bot {
         let (day, side) = (self.controls.day_state(), self.position.signum());
         let saved = &self.saved_state;
         if day == saved.day
-            && side == saved.side
+            && (side, self.entry) == (saved.side, saved.entry)
             && self.split_at == saved.split_at
             && self.controls.opened() == &saved.opened
         {

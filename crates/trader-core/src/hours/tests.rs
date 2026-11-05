@@ -83,3 +83,21 @@ fn a_long_silence_is_a_gap_without_a_scan() {
     assert!(!tracker.on_bar(&Schedule::AlwaysOpen, MONDAY + MAX_SCAN_MS, HOUR));
     assert!(tracker.on_bar(&Schedule::AlwaysOpen, MONDAY + 2 * MAX_SCAN_MS + 1, HOUR));
 }
+
+/// Which bar lengths the exchange's 14:30 to 21:00 session can hold: an hour or half hour, and fifteen
+/// minutes, can; a bar needs itself and the one before it inside the session, so three hours cannot
+/// (the aligned ones end at 21:00, or start at 12:00), nor can six, twelve or twenty-four. An
+/// always-open market holds any.
+#[test]
+fn bar_lengths_a_session_can_hold() {
+    let schedule = exchange();
+    let minutes = |n: Millis| n * 60_000;
+    for fits in [1, 5, 15, 30, 60] {
+        assert!(bar_can_trade(&schedule, minutes(fits)), "{fits} minutes");
+    }
+    for never in [180, 240, 360, 720, 1440] {
+        assert!(!bar_can_trade(&schedule, minutes(never)), "{never} minutes");
+    }
+    assert!(bar_can_trade(&Schedule::AlwaysOpen, minutes(1440)));
+    assert!(!bar_can_trade(&schedule, 0));
+}

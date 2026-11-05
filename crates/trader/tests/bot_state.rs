@@ -122,7 +122,7 @@ async fn a_daily_bar_on_a_market_with_hours_is_refused() {
         i.head_seq = 10;
     });
     let err = run(config_with(&stand_in, dir.path(), "1d", &[]), async {}).await.unwrap_err();
-    assert!(err.to_string().contains("always spans a closure"), "{err:#}");
+    assert!(err.to_string().contains("never hold two bars"), "{err:#}");
 }
 
 /// A read of the account that is not at the log values nothing: a short opened from flat, read as
@@ -181,15 +181,21 @@ async fn the_hold_survives_a_restart() {
     price_at(&stand_in, T0 + MINUTE, "101");
     price_at(&stand_in, T0 + 2 * MINUTE, "102");
     let (_, buy) = posted(&stand_in, 1).await;
-    stand_in.with(|i| {
-        let position = json!({ "1": { "qty": "0.980392156", "entry": "102" } });
-        i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
-    });
+    // The buy fills while the account still reads flat, so the saved entry is not the position's yet.
     let seq = next_seq(&stand_in);
     stand_in.append((seq, 0), own_fill(seq, T0 + 2 * MINUTE + 100, &buy, "0.980392156"));
     price_at(&stand_in, T0 + 2 * MINUTE + 1_000, "102.5");
     posts_after_settling(&stand_in).await;
     assert_eq!(day_file(dir.path())["opened"], json!({ "1": T0 + 2 * MINUTE + 100 }));
+    assert_eq!(day_file(dir.path())["entry"], "0");
+    // A later read agrees, and the entry is kept too.
+    stand_in.with(|i| {
+        let position = json!({ "1": { "qty": "0.980392156", "entry": "102" } });
+        i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
+    });
+    price_at(&stand_in, T0 + 2 * MINUTE + 7_000, "102.5");
+    posts_after_settling(&stand_in).await;
+    assert_eq!(day_file(dir.path())["entry"], "102");
     // A crash: the bot ends with the position open.
     drop(stop);
     bot.abort();
@@ -272,4 +278,58 @@ async fn no_order_while_the_state_cannot_be_saved() {
     assert_eq!(sell["side"], "sell");
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+}
+
+/// A saved opening time is kept for the same position only: one on the other side, or at another entry,
+/// is a new position, held from the restart; the same position is held from the time saved, long past.
+#[tokio::test]
+async fn a_saved_opening_time_belongs_to_one_position() {
+    // Saved ten minutes before the start, with a five-minute hold: held long enough if it is kept.
+    let long_ago = T0 - 10 * MINUTE;
+    let cases =
+        [("1", "102", "0.980392156", true), ("-1", "102", "0.980392156", false), ("1", "101", "0.980392156", false)];
+    for (side, entry, qty, kept) in cases {
+        let stand_in = StandIn::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("state")).unwrap();
+        let saved =
+            json!({ "day": null, "opened": { "1": long_ago }, "side": side.parse::<i64>().unwrap(), "entry": entry });
+        std::fs::write(dir.path().join("state").join(format!("{}.json", account())), saved.to_string()).unwrap();
+        stand_in.with(|i| {
+            i.markets = json!([btc_usd(Some("99"))]);
+            let position = json!({ "1": { "qty": qty, "entry": "102" } });
+            i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
+            i.head_seq = 10;
+            i.nonce = 3;
+        });
+        let (stop, bot) = start(&stand_in, dir.path(), &[("min_hold = \"0s\"", "min_hold = \"5m\"")]);
+        warm(&stand_in).await;
+        for (minute, mid) in [(1, "98"), (2, "97"), (3, "96")] {
+            price_at(&stand_in, T0 + minute * MINUTE, mid);
+        }
+        let posts = posts_after_settling(&stand_in).await;
+        // The stand-in fills nothing, so a bar free to reverse may reverse again at the next one.
+        assert!(
+            (posts > 0) == kept,
+            "side {side}, entry {entry}: {posts} orders with the hold {}",
+            if kept { "over" } else { "running" }
+        );
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(40), bot).await.unwrap().unwrap().unwrap();
+    }
+}
+
+/// A sizing whose leverage cap is not below the market's own is refused at the start.
+#[tokio::test]
+async fn a_leverage_cap_at_the_markets_own_is_refused() {
+    let stand_in = StandIn::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    let edits = [("max_leverage = \"50\"", "max_leverage = \"100\"")];
+    let err = run(config_with(&stand_in, dir.path(), "1m", &edits), async {}).await.unwrap_err();
+    assert!(format!("{err:#}").contains("not below the market's own"), "{err:#}");
 }

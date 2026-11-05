@@ -24,7 +24,7 @@ use engine_core::types::{MarketId, Millis};
 use tracing::{debug, error, info, warn};
 use trader_core::bars::{Bar, BarBuilder};
 use trader_core::controls::{Account, BarTarget, Controls, Decision, Refusal};
-use trader_core::hours::GapTracker;
+use trader_core::hours::{GapTracker, bar_can_trade};
 use trader_core::marks::IndexMarks;
 use trader_core::strategies::{Strategy, is_valid_close};
 
@@ -44,9 +44,6 @@ pub(super) const READ_RETRY_MS: Millis = 5_000;
 
 /// How long, in sequenced time, between reads of the account that was at the log.
 pub(super) const READ_EVERY_MS: Millis = 60_000;
-
-/// A day.
-const DAY_MS: Millis = 86_400_000;
 
 /// Why the bot stopped on its own.
 #[derive(Debug, thiserror::Error)]
@@ -350,6 +347,10 @@ impl Bot {
                 return Ok(());
             }
             Decision::Flatten => return self.flatten(ts).await,
+            Decision::Order(_) if self.state_unsaved => {
+                info!(?target, "the saved state is not written: no order");
+                return Ok(());
+            }
             Decision::Order(intent) => intent,
         };
         if let Some(reason) = self.order_in_flight(ts) {
@@ -387,15 +388,17 @@ pub(crate) fn supported(spec: &MarketSpec) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks a bar fits the market's hours: a daily bar of a market with hours always spans a closure, so
-/// every one would be a gap or end while the market is shut, and the bot would never trade.
+/// Checks a bar length can trade in the market's hours: some bar and the one before it lie inside a
+/// session, so a bar of that length is no gap and is decided while the market is open. A bar of a day,
+/// or any other that always spans a closure, would be refused for ever.
 /// Error cases:
-/// - a market with trading hours and a bar of a day
+/// - a market with trading hours whose sessions hold no two bars of this length
 pub(crate) fn bar_fits(spec: &MarketSpec, bar_ms: Millis) -> anyhow::Result<()> {
     anyhow::ensure!(
-        matches!(spec.schedule, engine_core::session::Schedule::AlwaysOpen) || bar_ms < DAY_MS,
-        "{} has trading hours, so a bar of a day always spans a closure and would never trade",
-        spec.symbol
+        bar_can_trade(&spec.schedule, bar_ms),
+        "{} has trading hours that never hold two bars of {} minutes, so the bot would never trade it",
+        spec.symbol,
+        bar_ms / 60_000
     );
     Ok(())
 }
