@@ -62,11 +62,21 @@ list.
   `tests/` runs it against a local stand-in node (`tests/common/`) that signs its answers and
   frames and injects faults. Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, which the config tests load.
-- **console/** — the Vite, React and TypeScript app (`src/` with `main.tsx`, `App.tsx`,
-  `styles.css`, and its tests; `index.html`, the page that mounts `src/main.tsx`;
-  `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`,
-  `tsconfig.json`; Node.js from `.nvmrc`, exact versions pinned by `.npmrc` and
-  `package-lock.json`). `npm run build` writes the gitignored `dist/`.
+- **console/** — the Vite, React and TypeScript app. `src/main.tsx` mounts `App.tsx` (the page frame,
+  login or the signed-in pages) over the stores it creates; `src/api/` holds the client with every
+  route (`client.ts`), the parsers that check each body and feed message (`parsers.ts`,
+  `types.ts`), the book of accounts and its pure steps (`live-state.ts`), the live store that owns the
+  one WebSocket, opens on the bot's snapshot and reads fills, the whole equity curve and a control's
+  result from REST (`live-store.ts`, its types in `live-types.ts`, `feed.ts`), and the session
+  (`session-store.ts`); `src/lib/` holds pure helpers (exact decimals, formatting, market names,
+  routes, curve layout, parameter checks, reconnect delay); `src/pages/` has the login, overview and
+  account pages; `src/components/` the shared components and the app context; `src/test-harness.tsx`
+  mounts the app over stand-in calls for the component tests (`App.test.tsx`, `controls.test.tsx`).
+  `stub/` is a stand-in console API with three accounts (`npm run stub`), and `browser-test/run.mjs`
+  the Playwright test run against it or a bot's console from outside the repository. Config:
+  `index.html`, `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`, `tsconfig.json`;
+  Node.js from `.nvmrc`, exact versions pinned by `.npmrc` and `package-lock.json`. `npm run build`
+  writes the gitignored `dist/`.
 - **Cargo.toml** — workspace manifest, shared dependencies, and the Cargo profiles (release keeps
   overflow checks on); `Cargo.lock` is committed.
 - **rust-toolchain.toml** — the one stable toolchain for local builds and CI.
@@ -143,7 +153,8 @@ Run from the repo root:
 - Supply chain: `cargo deny check` (CI runs it; install `cargo-deny` to run it locally)
 - Console, from `console/` (Node.js from `.nvmrc`): `npm ci`, then `npm run lint`,
   `npm run typecheck`, `npm test`, `npm run build`; `npm audit --audit-level=high`; `npm run dev`
-  serves it on loopback
+  serves it on loopback, `npm run stub` runs the stand-in API; the browser test:
+  `CONSOLE_URL=… CONSOLE_PASSWORD=… PLAYWRIGHT_DIR=<scratch dir with playwright 1.64.0> node browser-test/run.mjs`
 - CI scripts test: `./scripts/ci-test.sh` (needs `jq` and `yq`); the dev stack's: `./scripts/dev-stack-test.sh`
   (needs `git`)
 - Merge approval gate tests: `scripts/check-merge-approved-test.sh` (stubs the GitHub API; needs
