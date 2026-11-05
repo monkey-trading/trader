@@ -5,18 +5,23 @@
 mod saved;
 pub use saved::{Saved, SavedStrategy};
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use engine_core::Fixed;
 use engine_core::command::CloseEntry;
-use engine_core::types::{AccountId, Millis};
+use engine_core::types::{AccountId, MarketId, Millis};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::Instant;
 use tracing::{Instrument, error, info, info_span, warn};
 use trader_core::strategy::{SmaCrossover, Target};
 
+use crate::bot::stop::MAX_CLOSE_WAIT;
 use crate::bot::{Bot, Halt};
 use crate::config::{Config, SmaBounds, SmaParams};
+use crate::node::api::AccountView;
 
 /// The most requests waiting for an account; the console refuses more until it takes them.
 pub const REQUESTS: usize = 8;
@@ -398,13 +403,15 @@ impl Bot {
     }
 
     /// Cancels the account's resting orders and closes each of its positions at the node's mark,
-    /// then reads the account to confirm nothing is left.
+    /// then reads the account to confirm nothing is left. One close takes at most
+    /// `Fixed::MAX_INPUT` units of a position, so while a close shrinks a position without taking it
+    /// whole, another follows, for up to `MAX_CLOSE_WAIT`; one that changed nothing is not repeated.
     /// Error cases:
     /// - an answer signed by another key than the signer
     async fn flatten(&mut self) -> Result<Result<(), Refusal>, Halt> {
         info!("flattening the account");
         let unread = |e: Halt| Refusal::Failed(format!("the account cannot be read: {e}"));
-        let view = match self.read_account().await {
+        let mut view = match self.read_account().await {
             Ok(view) => view,
             Err(Halt::WrongSigner) => return Err(Halt::WrongSigner),
             Err(e) => return Ok(Err(unread(e))),
@@ -412,30 +419,43 @@ impl Bot {
         if !view.orders.is_empty() {
             self.cancel_resting().await?;
         }
-        let held: Vec<_> = view.positions.iter().filter(|(_, p)| !p.qty.is_zero()).map(|(m, _)| *m).collect();
-        if !held.is_empty() {
-            let marks = self.node_marks().await?;
-            let quoted = |market| marks.get(&market).copied().or(self.mark.filter(|_| market == self.market));
-            let closes: Vec<_> =
-                held.iter().filter_map(|&market| Some(CloseEntry { market, quoted: quoted(market)? })).collect();
-            if !closes.is_empty() {
-                self.close_positions(closes).await?;
+        let deadline = Instant::now() + MAX_CLOSE_WAIT;
+        loop {
+            let before = held(&view);
+            if !before.is_empty() {
+                let marks = self.node_marks().await?;
+                let quoted = |market| marks.get(&market).copied().or(self.mark.filter(|_| market == self.market));
+                let closes: Vec<_> =
+                    before.keys().filter_map(|&market| Some(CloseEntry { market, quoted: quoted(market)? })).collect();
+                if !closes.is_empty() {
+                    self.close_positions(closes).await?;
+                }
+            }
+            view = match self.read_account().await {
+                Ok(view) => view,
+                Err(Halt::WrongSigner) => return Err(Halt::WrongSigner),
+                Err(e) => return Ok(Err(unread(e))),
+            };
+            let left = held(&view);
+            let shrank = left.iter().any(|(market, qty)| before.get(market).is_some_and(|was| qty.abs() < was.abs()));
+            if left.is_empty() || !shrank || Instant::now() >= deadline {
+                break;
             }
         }
-        let left = match self.read_account().await {
-            Ok(view) => view,
-            Err(Halt::WrongSigner) => return Err(Halt::WrongSigner),
-            Err(e) => return Ok(Err(unread(e))),
-        };
-        let positions = left.positions.values().filter(|p| !p.qty.is_zero()).count();
-        if left.orders.is_empty() && positions == 0 {
+        let positions = held(&view).len();
+        if view.orders.is_empty() && positions == 0 {
             info!("flattened");
             return Ok(Ok(()));
         }
-        let reason = format!("{} resting orders and positions in {positions} markets are left", left.orders.len());
+        let reason = format!("{} resting orders and positions in {positions} markets are left", view.orders.len());
         warn!(alert = "flatten_incomplete", "{reason}");
         Ok(Err(Refusal::Failed(reason)))
     }
+}
+
+/// The account's positions that are not flat, by market.
+fn held(view: &AccountView) -> BTreeMap<MarketId, Fixed> {
+    view.positions.iter().filter(|(_, p)| !p.qty.is_zero()).map(|(market, p)| (*market, p.qty)).collect()
 }
 
 /// Answers a request; a console that stopped waiting has nothing to hear it.

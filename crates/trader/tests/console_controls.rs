@@ -190,7 +190,8 @@ async fn a_restart_keeps_the_controls() {
 
 /// A flatten stops the account and waits for the log to pass any order it may have signed, then
 /// cancels its resting orders and closes its position in every market at the node's mark, signed
-/// by the account; it fails, saying what is left, when the node leaves something open.
+/// by the account, closing again while a close shrinks a position it did not take whole; it fails,
+/// saying what is left, when the node leaves something open.
 #[tokio::test]
 async fn flatten_closes_every_position() {
     let stand_in = StandIn::start().await;
@@ -237,9 +238,16 @@ async fn flatten_closes_every_position() {
     let answer = running.post(&format!("/api/accounts/{a}/flatten"), &cookie).await;
     assert_eq!(answer.status, 500, "{answer:?}");
     assert_eq!(answer.body["error"], "0 resting orders and positions in 2 markets are left");
+
+    // A position larger than one close takes is closed again while each close shrinks it.
     stand_in.with(|i| {
         i.settle = true;
-        i.accounts.get_mut(&a).unwrap()["positions"] = json!({});
+        i.close_cap = Some("1".parse().unwrap());
+        i.accounts.get_mut(&a).unwrap()["positions"] = json!({ "1": { "qty": "-2.5", "entry": "100" } });
     });
+    let closes = posted(&stand_in).len();
+    let answer = running.post(&format!("/api/accounts/{a}/flatten"), &cookie).await;
+    assert_eq!(answer.status, 204, "{answer:?}");
+    assert_eq!(posted(&stand_in)[closes..], ["/v1/positions/close-all"; 3]);
     running.stop_after(&stand_in).await.unwrap();
 }
