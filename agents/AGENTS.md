@@ -156,8 +156,8 @@ Run from the repo root:
   (about seventeen minutes; `TRADE_SECONDS` shortens the run, `TRADER_BIN` uses a built bot,
   `SCENARIO_ARTIFACTS` keeps the logs); with a local chain: `./scripts/dev-stack.sh --chain` (also
   needs Foundry's `anvil` and `cast`, and `forge` once per engine commit), and its scenario
-  `./scripts/dev-lifecycle.sh` (twelve minutes or more: it trades until each account has a MONKEY
-  entitlement)
+  `./scripts/dev-lifecycle.sh` (about fifteen minutes, up to forty: it trades until each account has
+  a MONKEY entitlement)
 - Test one crate: `cargo test -p trader-core` or `cargo test -p trader`; the workspace:
   `cargo test --workspace --locked`
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`

@@ -6,14 +6,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_primitives::{Address, B256, U256};
-use alloy_sol_types::{SolCall, SolEvent};
+use alloy_sol_types::{SolCall, SolEvent, SolInterface};
 use anyhow::{bail, ensure};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::accounts::Lifecycle;
-use crate::chain::Call;
 use crate::chain::contracts::Vault;
+use crate::chain::{Call, TxError};
 use crate::keys::AccountKey;
 use crate::node::CallError;
 
@@ -70,7 +70,17 @@ impl Lifecycle {
             };
             let what = format!("claiming {unclaimed} MONKEY base units");
             let call = Call { to: self.vault, data: call.abi_encode().into(), what };
-            let receipt = self.chain.send(self.payer(key), &call).await?;
+            let receipt = match self.chain.send(self.payer(key), &call).await {
+                Ok(receipt) => receipt,
+                // Claimed by another sender since the bot read it unclaimed, perhaps on an endpoint behind.
+                Err(TxError::WouldRevert { revert: Some(data), .. } | TxError::Reverted { revert: Some(data), .. })
+                    if claimed_already(&data) =>
+                {
+                    info!("the entitlement is claimed already");
+                    return Ok(Claimed::Below { unclaimed: U256::ZERO });
+                }
+                Err(e) => return Err(e.into()),
+            };
             let amount = receipt
                 .logs()
                 .iter()
@@ -87,6 +97,11 @@ impl Lifecycle {
         .instrument(span)
         .await
     }
+}
+
+/// Whether revert data is the vault's refusal of a claim with nothing left to claim.
+fn claimed_already(data: &[u8]) -> bool {
+    matches!(Vault::VaultErrors::abi_decode(data), Ok(Vault::VaultErrors::NothingToClaim(_)))
 }
 
 /// Every `every`, claims each of `accounts`' MONKEY once `threshold` base units are unclaimed. A

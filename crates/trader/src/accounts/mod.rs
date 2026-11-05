@@ -211,21 +211,21 @@ impl Lifecycle {
         self.funding.as_ref().unwrap_or(key)
     }
 
-    /// How long to wait before asking the node again, when its answer asks the bot to try again
-    /// later, as the fresh-account budgets' 429 and a full screening's 503 do: the delay it names.
-    fn retry_later(&self, error: &CallError) -> Option<Duration> {
-        match error {
-            CallError::RetryLater { wait, .. } => Some(*wait),
-            _ => None,
-        }
-    }
-
     /// `account`'s next request nonce, and the node's time when it gave it.
     /// Error cases:
     /// - the read does not verify or is refused, or the node's time is out of range
     async fn next_nonce(&self, account: AccountId) -> anyhow::Result<(u64, Millis)> {
         let answer = self.node.nonce(account).await?;
         Ok((answer.body.next_nonce, Millis::try_from(answer.time_ms).context("the node's time")?))
+    }
+}
+
+/// How long to wait before asking the node again, when its answer asks the bot to try again later,
+/// as the fresh-account budgets' 429 and a full screening's 503 do: the delay it names.
+fn retry_later(error: &CallError) -> Option<Duration> {
+    match error {
+        CallError::RetryLater { wait, .. } => Some(*wait),
+        _ => None,
     }
 }
 
