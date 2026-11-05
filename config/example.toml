@@ -71,5 +71,35 @@ max_slippage_bps = 25
 # qty = "0.1"
 # max_slippage_bps = 25
 
+# The custody chain, for `trader accounts` (declare, deposit, claim, withdraw) and [claims]: Arbitrum
+# in production. Leave the section out to only trade.
+[chain]
+# JSON-RPC endpoints, tried in order: a read moves to the next when one fails, and every transaction
+# is sent to each. https://, or http:// on this machine. A provider's API key in a URL is never
+# printed: logs name an endpoint by its place here.
+rpc = ["https://arbitrum.example/rpc"]
+# How long one RPC request may take; how long a sent transaction may take to be mined; how long the
+# bot waits on the node for a deposit's credit, a withdrawal's approval and its authorization (run
+# the command again to carry on); and how often it polls meanwhile.
+rpc_timeout = "10s"
+receipt_timeout = "5m"
+settle_timeout = "30m"
+poll_interval = "2s"
+# The highest fee per gas a transaction may offer, in gwei; one the chain's price would need higher
+# is not sent, so an endpoint that misquotes the price cannot spend the payer's ether.
+max_fee_gwei = "1"
+
+# A key that pays the gas of every account's MONKEY claims and withdrawals, and that
+# `trader accounts deposit --from-funding` deposits USDC from into each account. It never receives a
+# payout: the vault pays the account. Without it, each account pays its own gas.
+# [funding]
+# key = { type = "keystore", path = "keys/funding.json", password = { env = "TRADER_FUNDING_PASSWORD" } }
+
+# Claims each account's MONKEY while the bot runs, once its unclaimed amount reaches the threshold.
+# Needs [chain].
+# [claims]
+# threshold = "100"
+# interval = "10m"
+
 [logging]
 level = "info"

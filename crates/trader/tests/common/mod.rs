@@ -8,8 +8,10 @@ mod messages;
 #[allow(unused_imports)]
 pub use bot::*;
 pub use messages::*;
+pub mod chain;
+pub mod lifecycle;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -131,6 +133,12 @@ pub struct Inner {
     /// The most units of a position one close-all takes, as the pinned engine's `Fixed::MAX_INPUT`;
     /// the rest stays open.
     pub close_cap: Option<engine_core::Fixed>,
+    /// Answers to every other GET, by path without its query: a status and a body; and how many
+    /// times each path was read.
+    pub canned: BTreeMap<String, (u16, Value)>,
+    pub reads: BTreeMap<String, usize>,
+    /// Paths whose answers another key signs, whatever `answers` says.
+    pub other_signer_paths: BTreeSet<String>,
 }
 
 /// A running stand-in.
@@ -179,7 +187,11 @@ impl StandIn {
             .route("/v1/orders", post(record))
             .route("/v1/orders/cancel-all", post(record))
             .route("/v1/positions/close-all", post(record))
+            .route("/v1/eligibility", post(record))
+            .route("/v1/withdrawals", post(record))
+            .route("/v1/accounts/{address}/withdrawals/{nonce}/reissue", post(record))
             .route("/v1/stream", get(stream))
+            .fallback(lifecycle::canned)
             .layer(from_fn_with_state(stand_in.clone(), sign_answers))
             .layer(from_fn_with_state(stand_in.clone(), limit_ip))
             .with_state(stand_in.clone());
@@ -291,7 +303,12 @@ async fn sign_answers(State(s): State<Arc<StandIn>>, req: Request, next: Next) -
     let (answers, time_ms, head_seq) = s.with(|i| {
         let head = i.head_seq;
         i.head_seq += i.head_step;
-        (i.answers.unwrap(), i.time_ms, head)
+        let answers = if i.other_signer_paths.contains(target.split('?').next().unwrap_or_default()) {
+            Answers::OtherSigner
+        } else {
+            i.answers.unwrap()
+        };
+        (answers, i.time_ms, head)
     });
     if answers != Answers::Unsigned {
         let response = engine_wire::Response {

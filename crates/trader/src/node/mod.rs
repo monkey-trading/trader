@@ -3,6 +3,7 @@
 //! answer that does not verify is an error, never data. Calls share a small pool of connections and
 //! are paced under the node's limits (`pace`).
 
+pub mod accounts;
 pub mod api;
 mod pace;
 mod pool;

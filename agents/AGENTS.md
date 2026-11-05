@@ -55,9 +55,21 @@ list.
   cancels resting orders and optionally closes positions account by account, exiting non-zero when
   it leaves either behind or cannot confirm it did not (`stop.rs`). A halt (an answer or frame signed
   by another key, a log it cannot follow) stops the bot and leaves the accounts as they are; an
-  account that cannot start or that fails stops alone. `tests/` runs it against a local stand-in node
+  account that cannot start or that fails stops alone.
+  `trader accounts --config` takes each account from an empty wallet to trading and back: `accounts/`
+  records a declaration only for an account the user confirms, deposits USDC (`Vault.deposit` from
+  the account's wallet, or `depositFor` from the optional funding key's) and waits for the credit,
+  claims MONKEY with the node's proof (on demand, or in `trader run` past a `[claims]` threshold),
+  and withdraws through the FIFO queue, paying each authorization (reissued when it expired) with
+  `Vault.withdraw`; every payout goes to the account's own address, and the funding key only pays
+  gas and funds `depositFor`. `chain/` reads the chain over one or more JSON-RPC endpoints (after a
+  transaction lands, only from one that has reached its block) and sends each transaction to all of
+  them, estimated first, followed to its receipt, signed again only once another transaction has
+  spent its nonce, a revert reported with its reason; its bindings come from `abi/`, the entries of the pinned engine's vault and
+  `ERC20` ABIs the bot uses. `tests/` runs it against a local stand-in node
   (`tests/common/`) that signs its answers and frames, enforces a per-address limit and injects
-  faults, drives the fleet directly (`tests/fleet.rs`), checks that the hot path allocates nothing
+  faults, and a stand-in chain (`tests/common/chain.rs`) that applies the bot's transactions,
+  drives the fleet directly (`tests/fleet.rs`), checks that the hot path allocates nothing
   (`tests/alloc.rs`), and holds an hour of a synthetic log through 1,000 accounts to time and memory
   budgets (`tests/hot_path.rs`). Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, which the config tests load.
@@ -76,7 +88,9 @@ list.
   private reporting address, response times, disclosure, safe harbour, scope), and Apache License
   2.0.
 - **.github/workflows/** — `ci.yaml`: fmt, the file line cap, clippy, tests, `cargo-deny`, the dev
-  scenarios (`dev-scenarios`: `dev-trade-one` and `dev-trade-many`, which cache the engine's built binaries by the pinned commit), the
+  scenarios (`dev-scenarios`: `dev-trade-one` and `dev-trade-many`, which cache the engine's built
+  binaries by the pinned commit; and `dev-lifecycle`, which installs Foundry and caches them with the
+  commit's contracts), the
   console's audit, lint, type check, tests and build, the agent docs' links, the review-delta
   helper's test, the merge approval gate's test, and the CI scripts' test, on every push to `main`, every PR, and every
   merge group of the merge queue. On a PR, the first job, `changes`, sorts the changed files into
@@ -104,11 +118,18 @@ list.
   such as a build lock), and runs the
   engine's `config/dev.toml` on free ports and private temporary data with its synthetic access
   source, printing the bot's `[node]` config; sourced, it gives scenarios functions to start and
-  stop it, fund and declare an account, and sign admin commands. `dev-trade-one.sh`, the dev
+  stop it, fund and declare an account, and sign admin commands. With `--chain` it also builds the
+  commit's contracts into the cache (checking `crates/trader/abi/` against them), starts Anvil on a
+  free port, deploys a mock USDC, a timelock and the vault, and runs the node on the commit's
+  `config/anvil.toml` with EVM custody and checkpoint posting, printing the bot's `[chain]` config
+  too and giving scenarios a function to fund a wallet. `dev-trade-one.sh`, the dev
   scenario on it: one account trading BTC-USD for fifteen minutes, checked against its history and
   emissions; `dev-trade-many.sh`: twenty accounts in one process across BTC-USD and ETH-USD, checked
   for one stream connection, no request refused for rate, and each account's fills against its
-  history; `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
+  history; `dev-lifecycle.sh`, the account lifecycle on the chain stack: three accounts declared,
+  funded from their wallets, trading until each has a MONKEY entitlement, claiming it through a
+  funding key, and one withdrawing to its own wallet, every balance checked on chain and in the
+  node; `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
   `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
@@ -128,11 +149,15 @@ list.
 Run from the repo root:
 
 - Build and run: `cargo build --workspace`, `cargo run -p trader -- run --config <file>` (see
-  `config/example.toml`)
+  `config/example.toml`); the account lifecycle: `cargo run -p trader -- accounts --config <file>
+  [--account <address>]... <status|declare|deposit|claim|withdraw>`
 - Dev node: `./scripts/dev-stack.sh` (needs git, cargo, python3, curl and jq, and the public
   Roughtime servers the engine's dev config names); dev scenario: `./scripts/dev-trade-one.sh`
   (about seventeen minutes; `TRADE_SECONDS` shortens the run, `TRADER_BIN` uses a built bot,
-  `SCENARIO_ARTIFACTS` keeps the logs)
+  `SCENARIO_ARTIFACTS` keeps the logs); with a local chain: `./scripts/dev-stack.sh --chain` (also
+  needs Foundry's `anvil` and `cast`, and `forge` once per engine commit), and its scenario
+  `./scripts/dev-lifecycle.sh` (twelve minutes or more: it trades until each account has a MONKEY
+  entitlement)
 - Test one crate: `cargo test -p trader-core` or `cargo test -p trader`; the workspace:
   `cargo test --workspace --locked`
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`

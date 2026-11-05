@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use alloy_primitives::U256;
+
 use super::*;
 
 /// The committed example, which the README and the dev stack point to.
@@ -24,6 +26,76 @@ fn the_example_loads() {
     };
     assert_eq!(path, &Path::new(EXAMPLE).parent().unwrap().join("keys/account.json"));
     assert_eq!(name, "TRADER_KEY_PASSWORD");
+    let chain = cfg.chain.as_ref().expect("the example names a chain");
+    assert_eq!((chain.rpc.len(), chain.settle_timeout), (1, Duration::from_secs(1800)));
+    assert!(cfg.funding.is_none() && cfg.claims.is_none());
+}
+
+/// The funding key and the claims load as the example's comments show them, the funding key's path
+/// resolved like the account's; claims need a chain, and a hex funding key a dev build.
+#[test]
+fn funding_and_claims_load_and_are_checked() {
+    let text = uncomment(
+        &example(),
+        &["[funding]", "key = { type = \"keystore\", path = \"keys/funding", "[claims]", "threshold", "interval"],
+    );
+    let mut cfg = parse(&text).unwrap();
+    cfg.resolve_paths(Path::new("/etc/trader"));
+    let KeySource::Keystore { path, .. } = &cfg.funding.as_ref().unwrap().key else { panic!("a keystore") };
+    assert_eq!(path, Path::new("/etc/trader/keys/funding.json"));
+    let claims = cfg.claims.as_ref().unwrap();
+    assert_eq!(
+        (claims.threshold, claims.interval),
+        (MonkeyAmount(U256::from(100) * U256::from(10).pow(U256::from(18))), Duration::from_secs(600))
+    );
+    for section in ["[funding]", "[claims]"] {
+        assert!(parse(&text.replacen(section, &format!("{section}\nbogus = 1"), 1)).is_err(), "{section}");
+    }
+    let mut without_chain: toml::Table = toml::from_str(&text).unwrap();
+    without_chain.remove("chain");
+    let err = parse(&toml::to_string(&without_chain).unwrap()).unwrap_err();
+    assert!(err.to_string().contains("[claims] needs a [chain]"), "{err}");
+    let hex = text.replace(
+        "key = { type = \"keystore\", path = \"keys/funding.json\", password = { env = \"TRADER_FUNDING_PASSWORD\" } }",
+        "key = { type = \"hex_file\", path = \"funding.hex\" }",
+    );
+    let cfg: Config = toml::from_str(&hex).unwrap();
+    cfg.validate(true).unwrap();
+    assert!(cfg.validate(false).unwrap_err().to_string().contains("funding.key"));
+}
+
+/// Chain values outside their bounds are refused: no endpoint, a URL that is not https:// off this
+/// machine, a zero wait, and a threshold that is not an amount of MONKEY; an endpoint's URL is in
+/// no error and no debug print.
+#[test]
+fn chain_values_are_checked_and_urls_never_printed() {
+    let claims = uncomment(&example(), &["[claims]", "threshold", "interval"]);
+    for (from, to) in [
+        ("rpc = [\"https://arbitrum.example/rpc\"]", "rpc = []"),
+        ("rpc = [\"https://arbitrum.example/rpc\"]", "rpc = [\"http://arbitrum.example/rpc/secret-key\"]"),
+        ("rpc = [\"https://arbitrum.example/rpc\"]", "rpc = [\"secret-key\"]"),
+        ("rpc = [\"https://arbitrum.example/rpc\"]", "rpc = \"https://arbitrum.example/rpc/secret-key\""),
+        ("rpc = [\"https://arbitrum.example/rpc\"]", "rpc = { url = \"https://arbitrum.example/rpc/secret-key\" }"),
+        ("poll_interval = \"2s\"", "poll_interval = \"0s\""),
+        ("threshold = \"100\"", "threshold = \"-1\""),
+        ("threshold = \"100\"", "threshold = \"0.0000000000000000001\""),
+        ("interval = \"10m\"", "interval = \"0s\""),
+        ("max_fee_gwei = \"1\"", "max_fee_gwei = \"0\""),
+        ("max_fee_gwei = \"1\"", "max_fee_gwei = \"0.0000000001\""),
+        ("max_fee_gwei = \"1\"", "max_fee_gwei = \"-1\""),
+    ] {
+        let err = parse(&claims.replacen(from, to, 1)).expect_err(to);
+        assert!(!format!("{err:#}").contains("secret-key"), "{to}: {err:#}");
+    }
+    let local =
+        parse(&example().replacen("https://arbitrum.example/rpc", "http://127.0.0.1:8545/secret-key", 1)).unwrap();
+    assert!(!format!("{:?}", local.chain).contains("secret-key"));
+    let half = parse(&claims.replacen("threshold = \"100\"", "threshold = \"0.5\"", 1)).unwrap();
+    assert_eq!(half.claims.unwrap().threshold, MonkeyAmount(U256::from(500_000_000_000_000_000u64)));
+    let finest = parse(&claims.replacen("threshold = \"100\"", "threshold = \"0.000000000000000001\"", 1)).unwrap();
+    assert_eq!(finest.claims.unwrap().threshold, MonkeyAmount(U256::from(1)));
+    let fee = parse(&example().replacen("max_fee_gwei = \"1\"", "max_fee_gwei = \"0.000000001\"", 1)).unwrap();
+    assert_eq!(fee.chain.unwrap().max_fee_gwei, Gwei(1));
 }
 
 /// An unknown key is refused in every section, the key and password tables included.
@@ -36,6 +108,7 @@ fn unknown_keys_are_refused() {
         ("\n[node.limits]\n", "\n[node.limits]\nbogus = 1\n"),
         ("per_ip = { per_second = 50,", "per_ip = { bogus = 1, per_second = 50,"),
         ("\n[logging]\n", "\n[logging]\nbogus = 1\n"),
+        ("\n[chain]\n", "\n[chain]\nbogus = 1\n"),
         ("\n[logging]\n", "\n[bogus]\n[logging]\n"),
         ("path = \"keys/account.json\", password", "path = \"keys/account.json\", bogus = 1, password"),
         ("{ env = \"TRADER_KEY_PASSWORD\" }", "{ env = \"TRADER_KEY_PASSWORD\", bogus = 1 }"),
@@ -241,6 +314,17 @@ fn authorities_bracket_ipv6_hosts() {
 
 // ── Helpers ──
 
+/// `text` with the commented-out lines that start with one of `starts` uncommented.
+fn uncomment(text: &str, starts: &[&str]) -> String {
+    text.lines()
+        .map(|line| match line.strip_prefix("# ") {
+            Some(rest) if starts.iter().any(|start| rest.starts_with(start)) => rest,
+            _ => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The example's text.
 fn example() -> String {
     std::fs::read_to_string(EXAMPLE).unwrap()
@@ -248,7 +332,7 @@ fn example() -> String {
 
 /// Parses and checks `text` as a dev build's config.
 fn parse(text: &str) -> anyhow::Result<Config> {
-    let cfg: Config = toml::from_str(text)?;
+    let cfg = super::parse(text)?;
     cfg.validate(true)?;
     Ok(cfg)
 }

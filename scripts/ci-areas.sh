@@ -34,7 +34,7 @@ while IFS= read -r file; do
     scripts/dev-stack.sh) areas+=" rust ci_scripts" ;;
     # The Rust jobs, and the dev scenario and the example config the tests load.
     crates/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | deny.toml | config/* \
-      | scripts/dev-trade-one.sh | scripts/dev-trade-many.sh)
+      | scripts/dev-trade-one.sh | scripts/dev-trade-many.sh | scripts/dev-lifecycle.sh)
       areas+=" rust" ;;
     console/*) areas+=" console" ;;
     *)
