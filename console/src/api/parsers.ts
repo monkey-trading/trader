@@ -1,11 +1,11 @@
 /** Parsers that turn the bot's JSON bodies and feed messages into typed values. */
 import {
-  choice, count, decimal, flag, items, nullableDecimal, nullableText, object, ShapeError, text, type Fields,
+  baseUnits, choice, count, decimal, flag, integer, items, list, nullableBaseUnits, nullableDecimal, nullableInteger,
+  nullableText, object, ShapeError, text, type Fields,
 } from "@/lib/shape";
 
 import type {
-  AccountDetail, AccountList, AccountRead, AccountSummary, CurvePoint, Fill, LiveMessage, Order, Param, Position,
-  Strategy,
+  AccountView, CurvePoint, Figures, Fill, LiveMessage, Monkey, Order, Overview, Param, Position, Strategy, Totals,
 } from "./types";
 
 /** The result of parsing one body: a value, or what was wrong with it. */
@@ -25,122 +25,165 @@ export function parseWith<T>(read: (body: unknown) => T, body: unknown): Parsed<
   }
 }
 
-/** Reads an account's figures; fields it does not know are dropped. */
-function summaryOf(fields: Fields): AccountSummary {
-  return {
-    address: text(fields, "address"),
-    name: text(fields, "name"),
-    state: choice(fields, "state", ["running", "stopped", "halted"]),
-    stateReason: nullableText(fields, "stateReason"),
-    balance: decimal(fields, "balance"),
-    equity: decimal(fields, "equity"),
-    realisedPnl: decimal(fields, "realisedPnl"),
-    unrealisedPnl: decimal(fields, "unrealisedPnl"),
-    marginLevel: nullableDecimal(fields, "marginLevel"),
-    openPositions: count(fields, "openPositions"),
-    monkeyEarned: decimal(fields, "monkeyEarned"),
-    monkeyClaimed: decimal(fields, "monkeyClaimed"),
-  };
-}
-
 function positionOf(fields: Fields): Position {
   return {
-    market: text(fields, "market"),
+    market: count(fields, "market"),
+    symbol: nullableText(fields, "symbol"),
     qty: decimal(fields, "qty"),
     entry: decimal(fields, "entry"),
     mark: nullableDecimal(fields, "mark"),
-    unrealisedPnl: decimal(fields, "unrealisedPnl"),
+    unrealisedPnl: nullableDecimal(fields, "unrealised_pnl"),
     closeout: nullableDecimal(fields, "closeout"),
   };
 }
 
 function orderOf(fields: Fields): Order {
+  const kind = object(fields["kind"], "kind");
   return {
-    orderId: text(fields, "orderId"),
-    market: text(fields, "market"),
+    orderId: count(fields, "order_id"),
+    market: count(fields, "market"),
     side: choice(fields, "side", SIDES),
     qty: decimal(fields, "qty"),
-    price: nullableDecimal(fields, "price"),
-    reduceOnly: flag(fields, "reduceOnly"),
+    kind:
+      choice(kind, "kind", ["limit", "market"]) === "limit"
+        ? { type: "limit", price: decimal(kind, "price") }
+        : { type: "market", quoted: decimal(kind, "quoted") },
+    reduceOnly: flag(fields, "reduce_only"),
+  };
+}
+
+function monkeyOf(fields: Fields): Monkey {
+  return {
+    entitled: baseUnits(fields, "entitled"),
+    newestEntitled: baseUnits(fields, "newest_entitled"),
+    claimed: nullableBaseUnits(fields, "claimed"),
+  };
+}
+
+function figuresOf(fields: Fields): Figures {
+  return {
+    balance: decimal(fields, "balance"),
+    equity: decimal(fields, "equity"),
+    margin: decimal(fields, "margin"),
+    marginLevelBps: nullableInteger(fields, "margin_level_bps"),
+    unrealisedPnl: decimal(fields, "unrealised_pnl"),
+    realisedPnl: decimal(fields, "realised_pnl"),
+    positions: items(fields, "positions", positionOf),
+    orders: items(fields, "orders", orderOf),
+    monkey: monkeyOf(object(fields["monkey"], "monkey")),
+    timeMs: count(fields, "time_ms"),
+  };
+}
+
+/** Reads a `[low, high]` pair of whole numbers. */
+function boundsOf(value: unknown): readonly [number, number] {
+  const pair = list(value, "bounds");
+  const [low, high] = pair;
+  if (pair.length !== 2 || typeof low !== "number" || typeof high !== "number" || !Number.isSafeInteger(low) || !Number.isSafeInteger(high)) {
+    throw new ShapeError("bounds is not a pair of integers");
+  }
+  return [low, high];
+}
+
+/** Pairs each period the strategy runs with the bounds the console may set it within. */
+function paramsOf(fields: Fields): readonly Param[] {
+  const params = object(fields["params"], "params");
+  const bounds = fields["bounds"] === null ? null : object(fields["bounds"], "bounds");
+  return Object.keys(params).map((name) => ({
+    name,
+    value: integer(params, name),
+    bounds: bounds === null ? null : boundsOf(bounds[name]),
+  }));
+}
+
+function strategyOf(fields: Fields): Strategy {
+  return {
+    id: count(fields, "id"),
+    kind: text(fields, "kind"),
+    market: text(fields, "market"),
+    bar: text(fields, "bar"),
+    running: flag(fields, "running"),
+    params: paramsOf(fields),
+    warmedUp: flag(fields, "warmed_up"),
+    target: nullableText(fields, "target"),
+  };
+}
+
+function pointOf(fields: Fields): CurvePoint {
+  return { timeMs: count(fields, "time_ms"), equity: decimal(fields, "equity") };
+}
+
+function accountOf(fields: Fields): AccountView {
+  return {
+    address: text(fields, "address"),
+    state: choice(fields, "state", ["starting", "running", "stopped", "flattening", "halted"]),
+    halt: nullableText(fields, "halt"),
+    strategies: items(fields, "strategies", strategyOf),
+    figures: fields["figures"] === null ? null : figuresOf(object(fields["figures"], "figures")),
+    error: nullableText(fields, "error"),
+    curve: items(fields, "curve", pointOf),
   };
 }
 
 function fillOf(fields: Fields): Fill {
   return {
-    id: text(fields, "id"),
-    time: count(fields, "time"),
-    market: text(fields, "market"),
+    cursor: text(fields, "cursor"),
+    time: count(fields, "ts"),
+    market: count(fields, "market"),
+    symbol: nullableText(fields, "symbol"),
     side: choice(fields, "side", SIDES),
     qty: decimal(fields, "qty"),
     price: decimal(fields, "price"),
-    fee: decimal(fields, "fee"),
-    realisedPnl: decimal(fields, "realisedPnl"),
+    realisedPnl: decimal(fields, "realised_pnl"),
+    profitFee: decimal(fields, "profit_fee"),
   };
 }
 
-function pointOf(fields: Fields): CurvePoint {
-  return { time: count(fields, "time"), equity: decimal(fields, "equity") };
-}
-
-function paramOf(fields: Fields): Param {
+function totalsOf(fields: Fields): Totals {
   return {
-    name: text(fields, "name"),
-    kind: choice(fields, "kind", ["integer", "decimal"]),
-    value: decimal(fields, "value"),
-    min: decimal(fields, "min"),
-    max: decimal(fields, "max"),
+    accounts: count(fields, "accounts"),
+    reporting: count(fields, "reporting"),
+    balance: decimal(fields, "balance"),
+    equity: decimal(fields, "equity"),
+    margin: decimal(fields, "margin"),
+    marginLevelBps: nullableInteger(fields, "margin_level_bps"),
+    unrealisedPnl: decimal(fields, "unrealised_pnl"),
+    realisedPnl: decimal(fields, "realised_pnl"),
+    monkey: monkeyOf(object(fields["monkey"], "monkey")),
   };
 }
 
-function strategyOf(fields: Fields): Strategy {
-  return {
-    id: text(fields, "id"),
-    kind: text(fields, "kind"),
-    market: text(fields, "market"),
-    bar: text(fields, "bar"),
-    state: choice(fields, "state", ["running", "stopped", "failed"]),
-    reason: nullableText(fields, "reason"),
-    params: items(fields, "params", paramOf),
-  };
+function overviewOf(fields: Fields): Overview {
+  return { accounts: items(fields, "accounts", accountOf), totals: totalsOf(object(fields["totals"], "totals")) };
 }
 
-/** The part of an account the feed's `account` message carries. */
-function liveAccountOf(fields: Fields): Omit<AccountDetail, "fills" | "curve"> {
-  return {
-    ...summaryOf(fields),
-    positions: items(fields, "positions", positionOf),
-    orders: items(fields, "orders", orderOf),
-    strategies: items(fields, "strategies", strategyOf),
-  };
+/** Parses `GET /api/accounts`. */
+export function readOverview(body: unknown): Overview {
+  return overviewOf(object(body, "accounts body"));
 }
 
-function detailOf(fields: Fields): AccountDetail {
-  return { ...liveAccountOf(fields), fills: items(fields, "fills", fillOf), curve: items(fields, "curve", pointOf) };
+/** Parses `GET /api/accounts/{address}`. */
+export function readAccount(body: unknown): AccountView {
+  return accountOf(object(body, "account body"));
 }
 
-/** Parses `GET` of the accounts list. */
-export function readAccountList(body: unknown): AccountList {
-  const fields = object(body, "accounts body");
-  return { seq: count(fields, "seq"), accounts: items(fields, "accounts", summaryOf) };
-}
-
-/** Parses `GET` of one account, which is also what a control returns. */
-export function readAccount(body: unknown): AccountRead {
-  const fields = object(body, "account body");
-  return { seq: count(fields, "seq"), account: detailOf(object(fields["account"], "account")) };
+/** Parses `GET /api/accounts/{address}/fills`. */
+export function readFills(body: unknown): readonly Fill[] {
+  return items(object(body, "fills body"), "fills", fillOf);
 }
 
 /** Parses one feed message. */
 export function readLiveMessage(body: unknown): LiveMessage {
   const fields = object(body, "feed message");
-  const seq = count(fields, "seq");
-  switch (choice(fields, "type", ["account", "fill", "curve"])) {
+  switch (choice(fields, "type", ["snapshot", "account", "fills", "totals"])) {
+    case "snapshot":
+      return { type: "snapshot", overview: overviewOf(fields) };
     case "account":
-      return { type: "account", seq, account: liveAccountOf(object(fields["account"], "account")) };
-    case "fill":
-      return { type: "fill", seq, address: text(fields, "address"), fill: fillOf(object(fields["fill"], "fill")) };
-    case "curve":
-      return { type: "curve", seq, address: text(fields, "address"), point: pointOf(object(fields["point"], "point")) };
+      return { type: "account", account: accountOf(object(fields["account"], "account")) };
+    case "fills":
+      return { type: "fills", address: text(fields, "address"), fills: items(fields, "fills", fillOf) };
+    case "totals":
+      return { type: "totals", totals: totalsOf(object(fields["totals"], "totals")) };
   }
 }
 

@@ -3,7 +3,7 @@ import { BACKOFF_BASE_MS, BACKOFF_CAP_MS, reconnectDelay } from "./backoff";
 import { curvePath, curveRange } from "./curve";
 import { checkParams } from "./params";
 import { accountPath, parseRoute } from "./route";
-import { totalsOf } from "./totals";
+import { marketName, symbolsOf } from "./markets";
 
 describe("reconnectDelay", () => {
   it("doubles from the base, with jitter between half and all of it", () => {
@@ -33,27 +33,18 @@ describe("parseRoute", () => {
   });
 });
 
-describe("totalsOf", () => {
-  const row = (n: string) => ({
-    equity: n, realisedPnl: n, unrealisedPnl: `-${n}`, openPositions: 1, monkeyEarned: n, monkeyClaimed: "0",
-  });
-
-  it("sums served strings exactly", () => {
-    expect(totalsOf([row("0.1"), row("0.2")])).toEqual({
-      equity: "0.3", realisedPnl: "0.3", unrealisedPnl: "-0.3", openPositions: 2, monkeyEarned: "0.3", monkeyClaimed: "0",
-    });
-  });
-
-  it("totals no accounts as zero", () => {
-    expect(totalsOf([]).equity).toBe("0");
+describe("market names", () => {
+  it("takes symbols from positions and fills and falls back to the id", () => {
+    const symbols = symbolsOf([{ market: 1, symbol: "BTC-USD" }], [{ market: 2, symbol: null }, { market: 3, symbol: "ETH-USD" }]);
+    expect([marketName(1, symbols), marketName(2, symbols), marketName(3, symbols)]).toEqual(["BTC-USD", "Market 2", "ETH-USD"]);
   });
 });
 
 describe("curve", () => {
   const points = [
-    { time: 0, equity: "100" },
-    { time: 10, equity: "150" },
-    { time: 20, equity: "50.5" },
+    { timeMs: 0, equity: "100" },
+    { timeMs: 10, equity: "150" },
+    { timeMs: 20, equity: "50.5" },
   ];
 
   it("reports the range as exact two-place strings", () => {
@@ -71,30 +62,25 @@ describe("curve", () => {
 });
 
 describe("checkParams", () => {
-  const sma = [
-    { name: "fast", kind: "integer", draft: "5", min: "2", max: "50" },
-    { name: "width", kind: "decimal", draft: " 1.5 ", min: "0.5", max: "4" },
-  ] as const;
+  const fast = { name: "fast", draft: "5", bounds: [2, 50] } as const;
+  const slow = { name: "slow", draft: " 20 ", bounds: [5, 200] } as const;
 
-  it("sends integers as numbers and decimals as strings", () => {
-    expect(checkParams(sma)).toEqual({ status: "ok", values: { fast: 5, width: "1.5" } });
+  it("sends whole numbers, trimmed", () => {
+    expect(checkParams([fast, slow])).toEqual({ status: "ok", values: { fast: 5, slow: 20 } });
   });
 
-  it("names each problem at its field and sends nothing", () => {
-    const result = checkParams([
-      { ...sma[0], draft: "1" },
-      { ...sma[1], draft: "2.5.1" },
-    ]);
-    expect(result).toEqual({
+  it("accepts the bounds themselves and refuses one step beyond", () => {
+    expect(checkParams([{ ...fast, draft: "2" }, { ...slow, draft: "200" }]).status).toBe("ok");
+    expect(checkParams([{ ...fast, draft: "1" }, { ...slow, draft: "201" }])).toEqual({
       status: "invalid",
-      problems: { fast: "Enter a value from 2 to 50.", width: "Enter a decimal number." },
+      problems: { fast: "Enter a value from 2 to 50.", slow: "Enter a value from 5 to 200." },
     });
   });
 
-  it("refuses a fraction for an integer", () => {
-    expect(checkParams([{ ...sma[0], draft: "5.5" }])).toEqual({
+  it("names each problem at its field and sends nothing", () => {
+    expect(checkParams([{ ...fast, draft: "5.5" }, { ...slow, draft: "-3" }, { name: "x", draft: "", bounds: [1, 2] }])).toEqual({
       status: "invalid",
-      problems: { fast: "Enter a whole number." },
+      problems: { fast: "Enter a whole number.", slow: "Enter a whole number.", x: "Enter a whole number." },
     });
   });
 });

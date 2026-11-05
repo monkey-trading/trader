@@ -1,4 +1,4 @@
-/** The parameter form of one strategy: fields checked against the bot's bounds, saved on submit. */
+/** The period form of one strategy: fields checked against the bot's bounds, saved on submit. */
 import { useId, useState, type SubmitEvent } from "react";
 
 import type { Param } from "@/api/types";
@@ -10,34 +10,46 @@ import { useAction } from "./use-action";
 
 interface ParamsFormProps {
   readonly address: string;
-  readonly strategyId: string;
+  readonly strategyId: number;
   readonly params: readonly Param[];
 }
 
-/** Edits the parameters. The parent keys this by the saved values, so a save resets the drafts. */
+/** Edits the periods. The parent keys this by the saved values, so a save resets the drafts. */
 export function ParamsForm({ address, strategyId, params }: ParamsFormProps) {
   const { api } = useServices();
   const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>(
-    () => Object.fromEntries(params.map((param) => [param.name, param.value])),
+    () => Object.fromEntries(params.map((param) => [param.name, String(param.value)])),
   );
   const [problems, setProblems] = useState<Readonly<Record<string, string>>>({});
-  const action = useAction();
+  const action = useAction(address);
   const prefix = useId();
+
+  const editable = params.flatMap((param) => (param.bounds === null ? [] : [{ ...param, bounds: param.bounds }]));
+  if (editable.length === 0) {
+    return (
+      <p className="mt-2 text-sm text-muted">
+        {params.map((param) => `${param.name} ${String(param.value)}`).join(", ")}. The bot's config does not let the
+        console change these.
+      </p>
+    );
+  }
 
   const onSubmit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const checked = checkParams(params.map((param) => ({ ...param, draft: drafts[param.name] ?? "" })));
+    const checked = checkParams(editable.map((param) => ({ name: param.name, draft: drafts[param.name] ?? "", bounds: param.bounds })));
     if (checked.status === "invalid") {
       setProblems(checked.problems);
       return;
     }
     setProblems({});
-    action.run(() => api.setParams(address, strategyId, checked.values));
+    // The bot takes every period together; one that is not editable keeps the value it has.
+    const all = Object.fromEntries(params.map((param) => [param.name, param.value]));
+    action.run(() => api.setParams(address, strategyId, { ...all, ...checked.values }));
   };
 
   return (
     <form onSubmit={onSubmit} className="mt-2 flex flex-col gap-2">
-      {params.map((param) => {
+      {editable.map((param) => {
         const id = `${prefix}-${param.name}`;
         const problem = problems[param.name];
         return (
@@ -48,8 +60,8 @@ export function ParamsForm({ address, strategyId, params }: ParamsFormProps) {
             <input
               id={id}
               type="text"
-              inputMode="decimal"
-              maxLength={32}
+              inputMode="numeric"
+              maxLength={9}
               value={drafts[param.name] ?? ""}
               aria-invalid={problem !== undefined}
               aria-describedby={`${id}-help`}
@@ -59,7 +71,7 @@ export function ParamsForm({ address, strategyId, params }: ParamsFormProps) {
               className="min-h-9 rounded border border-line bg-surface px-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             />
             <p id={`${id}-help`} className={`text-sm ${problem === undefined ? "text-muted" : "text-loss"}`}>
-              {problem ?? `From ${param.min} to ${param.max}.`}
+              {problem ?? `From ${String(param.bounds[0])} to ${String(param.bounds[1])} bars.`}
             </p>
           </div>
         );

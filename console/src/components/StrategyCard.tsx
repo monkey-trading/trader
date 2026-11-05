@@ -16,14 +16,11 @@ const KIND_NAMES: Readonly<Record<string, string>> = {
   donchian_breakout: "Donchian channel breakout",
 };
 
-/** The strategy's state in words. */
-const STATE_WORDS = { running: "Running", stopped: "Stopped", failed: "Failed" } as const;
-
 /** A strategy of the account being shown. */
 export function StrategyCard({ address, strategy }: { readonly address: string; readonly strategy: Strategy }) {
   const { api } = useServices();
-  const toggle = useAction();
-  const running = strategy.state === "running";
+  const toggle = useAction(address);
+  const running = strategy.running;
   const name = KIND_NAMES[strategy.kind] ?? strategy.kind;
   return (
     <section aria-label={`${name} on ${strategy.market}`} className="rounded border border-line bg-surface p-3">
@@ -32,8 +29,9 @@ export function StrategyCard({ address, strategy }: { readonly address: string; 
         {strategy.market}, {strategy.bar} bars
       </p>
       <p className="my-2">
-        State: <strong>{STATE_WORDS[strategy.state]}</strong>
-        {strategy.reason === null ? "" : ` (${strategy.reason})`}
+        State: <strong>{running ? "Running" : "Stopped"}</strong>
+        {strategy.warmedUp ? "" : ", warming up"}
+        {strategy.target === null ? "" : `, wants ${strategy.target}`}
       </p>
       <ActionButton
         label={running ? "Stop strategy" : "Start strategy"}

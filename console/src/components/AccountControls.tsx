@@ -1,7 +1,7 @@
 /** Start, stop and flatten for one account. Flatten asks for a second press. */
 import { useRef, useState } from "react";
 
-import type { AccountSummary } from "@/api/types";
+import type { AccountView } from "@/api/types";
 
 import { ActionButton, ActionError, BUTTON_CLASS } from "./ActionButton";
 import { useServices } from "./app-context";
@@ -11,7 +11,7 @@ import { useAction } from "./use-action";
 function FlattenControl({ address }: { readonly address: string }) {
   const { api } = useServices();
   const [confirming, setConfirming] = useState(false);
-  const action = useAction();
+  const action = useAction(address);
   const ask = useRef<HTMLButtonElement>(null);
   const confirm = useRef<HTMLButtonElement>(null);
 
@@ -66,11 +66,14 @@ function FlattenControl({ address }: { readonly address: string }) {
   );
 }
 
-/** The account's controls. */
-export function AccountControls({ account }: { readonly account: AccountSummary }) {
+/** The account's controls; an account that is starting, flattening or halted takes none. */
+export function AccountControls({ account }: { readonly account: AccountView }) {
   const { api } = useServices();
   const running = account.state === "running";
-  const toggle = useAction();
+  const toggle = useAction(account.address);
+  if (account.state !== "running" && account.state !== "stopped") {
+    return <p className="text-sm text-muted">{WAITING[account.state]}</p>;
+  }
   return (
     <div className="flex flex-wrap items-start gap-4">
       <ActionButton
@@ -83,3 +86,10 @@ export function AccountControls({ account }: { readonly account: AccountSummary 
     </div>
   );
 }
+
+/** Why an account in these states has no controls. */
+const WAITING = {
+  starting: "The account is reading the node; its controls appear once it follows the log.",
+  flattening: "The account is closing its positions.",
+  halted: "The account stopped on its own and takes no controls; see the reason above.",
+} as const;

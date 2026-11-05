@@ -1,15 +1,14 @@
-/** The overview: every account's figures in one table, with totals. */
+/** The overview: every account's figures in one table, with the bot's totals. */
 import type { ReactNode } from "react";
 
-import type { AccountSummary } from "@/api/types";
+import type { AccountView } from "@/api/types";
 import { useLive } from "@/components/app-context";
 import { CELL, DataTable } from "@/components/DataTable";
 import { Link } from "@/components/Link";
 import { PageTitle } from "@/components/PageTitle";
 import { Pnl } from "@/components/Pnl";
-import { formatDecimal, formatRatioPercent, formatUsdc, shortAddress } from "@/lib/format";
+import { formatBpsPercent, formatMonkey, formatUsdc, shortAddress } from "@/lib/format";
 import { accountPath } from "@/lib/route";
-import { totalsOf } from "@/lib/totals";
 
 const HEAD = [
   "Account", "State", "Equity (USDC)", "Realised P&L (USDC)", "Unrealised P&L (USDC)", "Margin level",
@@ -20,44 +19,48 @@ const NUMERIC = [2, 3, 4, 5, 6, 7, 8] as const;
 /** Stands where a figure is missing. */
 const NONE = "—";
 
+/** What stands for MONKEY the bot has not read from the vault yet. */
+const NOT_READ = "Not read yet";
+
 /** A right-aligned number cell. */
 function Num({ children }: { readonly children: ReactNode }) {
   return <td className={`${CELL} text-right`}>{children}</td>;
 }
 
-/** Shows a nullable decimal with `show`, or the placeholder. */
-function maybe(value: string | null, show: (value: string) => ReactNode): ReactNode {
+/** Shows a nullable figure with `show`, or the placeholder. */
+function maybe<T>(value: T | null, show: (value: T) => ReactNode): ReactNode {
   return value === null ? NONE : show(value);
 }
 
-/** One account's row. */
-function AccountRow({ account }: { readonly account: AccountSummary }) {
+/** One account's row; an account with no figures yet shows the placeholder and why. */
+function AccountRow({ account }: { readonly account: AccountView }) {
+  const { figures } = account;
   return (
     <tr className="border-t border-line">
       <th scope="row" className={`${CELL} font-medium`}>
-        <Link to={accountPath(account.address)}>{account.name}</Link>
-        <span className="ml-2 text-muted">{shortAddress(account.address)}</span>
+        <Link to={accountPath(account.address)}>{shortAddress(account.address)}</Link>
+        {account.error === null ? null : <span className="ml-2 text-loss">{`Read failed: ${account.error}`}</span>}
       </th>
-      <td className={CELL}>{account.state}</td>
-      <Num>{formatUsdc(account.equity)}</Num>
-      <Num><Pnl value={account.realisedPnl} /></Num>
-      <Num><Pnl value={account.unrealisedPnl} /></Num>
-      <Num>{maybe(account.marginLevel, formatRatioPercent)}</Num>
-      <Num>{account.openPositions}</Num>
-      <Num>{formatDecimal(account.monkeyEarned, 2)}</Num>
-      <Num>{formatDecimal(account.monkeyClaimed, 2)}</Num>
+      <td className={CELL}>{account.halt === null ? account.state : `${account.state} (${account.halt})`}</td>
+      <Num>{maybe(figures, (f) => formatUsdc(f.equity))}</Num>
+      <Num>{maybe(figures, (f) => <Pnl value={f.realisedPnl} />)}</Num>
+      <Num>{maybe(figures, (f) => <Pnl value={f.unrealisedPnl} />)}</Num>
+      <Num>{maybe(figures?.marginLevelBps ?? null, formatBpsPercent)}</Num>
+      <Num>{maybe(figures, (f) => f.positions.length)}</Num>
+      <Num>{maybe(figures, (f) => formatMonkey(f.monkey.newestEntitled))}</Num>
+      <Num>{maybe(figures, (f) => (f.monkey.claimed === null ? NOT_READ : formatMonkey(f.monkey.claimed)))}</Num>
     </tr>
   );
 }
 
 /** Lists the accounts and their totals. */
 export function OverviewPage() {
-  const { accounts, loaded, connection } = useLive();
-  const totals = totalsOf(accounts);
+  const { accounts, totals, loaded, connection } = useLive();
+  const positions = accounts.reduce((sum, account) => sum + (account.figures?.positions.length ?? 0), 0);
   return (
     <>
       <PageTitle>Accounts</PageTitle>
-      {!loaded ? (
+      {!loaded || totals === null ? (
         <p className="text-muted">Loading accounts…</p>
       ) : accounts.length === 0 ? (
         <p className="text-muted">The bot has no accounts.</p>
@@ -70,15 +73,20 @@ export function OverviewPage() {
             <tr className="border-t-2 border-line font-semibold">
               <th scope="row" className={CELL}>Total</th>
               <td className={CELL} />
-              <Num>{maybe(totals.equity, formatUsdc)}</Num>
-              <Num>{maybe(totals.realisedPnl, (value) => <Pnl value={value} />)}</Num>
-              <Num>{maybe(totals.unrealisedPnl, (value) => <Pnl value={value} />)}</Num>
-              <Num>{NONE}</Num>
-              <Num>{totals.openPositions}</Num>
-              <Num>{maybe(totals.monkeyEarned, (value) => formatDecimal(value, 2))}</Num>
-              <Num>{maybe(totals.monkeyClaimed, (value) => formatDecimal(value, 2))}</Num>
+              <Num>{formatUsdc(totals.equity)}</Num>
+              <Num><Pnl value={totals.realisedPnl} /></Num>
+              <Num><Pnl value={totals.unrealisedPnl} /></Num>
+              <Num>{maybe(totals.marginLevelBps, formatBpsPercent)}</Num>
+              <Num>{positions}</Num>
+              <Num>{formatMonkey(totals.monkey.newestEntitled)}</Num>
+              <Num>{totals.monkey.claimed === null ? NOT_READ : formatMonkey(totals.monkey.claimed)}</Num>
             </tr>
           </DataTable>
+          {totals.reporting < totals.accounts ? (
+            <p className="mt-2 text-sm text-muted">
+              {`Totals cover ${String(totals.reporting)} of ${String(totals.accounts)} accounts: the rest have no figures yet.`}
+            </p>
+          ) : null}
         </div>
       )}
     </>

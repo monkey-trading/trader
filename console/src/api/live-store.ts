@@ -1,10 +1,10 @@
-/** The live store: one feed connection per tab, resynced from the REST reads, read by components. */
+/** The live store: one feed connection per tab, opening with the bot's snapshot, read by components. */
 import { reconnectDelay } from "@/lib/backoff";
 
 import type { Api, Outcome } from "./client";
-import { EMPTY_BOOK, withList, withMessage, withRead, type Book } from "./live-state";
+import { EMPTY_BOOK, keyOf, withAccount, withFills, withMessage, type Book } from "./live-state";
 import { parseWith, readLiveMessage } from "./parsers";
-import type { AccountDetail, AccountRead, AccountSummary, LiveMessage } from "./types";
+import type { AccountView, Fill, Totals } from "./types";
 
 /** Where the connection stands; nothing is shown as live unless it is `live`. */
 export type Connection = "connecting" | "syncing" | "live" | "reconnecting" | "stopped";
@@ -14,13 +14,14 @@ export interface LiveSnapshot {
   readonly connection: Connection;
   /** Feed messages that failed their check since the page loaded. */
   readonly dropped: number;
-  /** False until the first read of the list has finished. */
+  /** False until the feed's first snapshot has arrived. */
   readonly loaded: boolean;
-  /** Every account, ordered by name. */
-  readonly accounts: readonly AccountSummary[];
-  readonly details: ReadonlyMap<string, AccountDetail>;
-  /** Why an account's detail could not be read, by address. */
-  readonly detailFailures: ReadonlyMap<string, string>;
+  /** Every account, in the order the bot lists them. */
+  readonly accounts: readonly AccountView[];
+  readonly totals: Totals | null;
+  readonly fills: ReadonlyMap<string, readonly Fill[]>;
+  /** Why an account's fills could not be read, by lower-case address. */
+  readonly fillFailures: ReadonlyMap<string, string>;
 }
 
 /** One open feed connection. */
@@ -48,16 +49,14 @@ export interface LiveDeps {
   readonly onUnauthenticated: () => void;
 }
 
-/** Messages held while the reads are in flight; past this the connection restarts. */
-const BUFFER_CAP = 1000;
-
 const INITIAL: LiveSnapshot = {
   connection: "stopped",
   dropped: 0,
   loaded: false,
   accounts: [],
-  details: new Map(),
-  detailFailures: new Map(),
+  totals: null,
+  fills: new Map(),
+  fillFailures: new Map(),
 };
 
 /** Holds the book of accounts and keeps it current from the feed. */
@@ -71,10 +70,12 @@ export class LiveStore {
   private failures: ReadonlyMap<string, string> = new Map();
   private readonly listeners = new Set<() => void>();
   private readonly tracked = new Map<string, number>();
+  /** Per account, how many feed messages have set its view or its fills; a read that began before one is stale. */
+  private readonly viewVersions = new Map<string, number>();
+  private readonly fillVersions = new Map<string, number>();
   private socket: FeedSocket | null = null;
-  private buffer: LiveMessage[] = [];
   private attempt = 0;
-  /** Bumped on every connection start and stop, so a late answer for an old one is ignored. */
+  /** Bumped on every connection start, stop and failure, so a late event of an old one is ignored. */
   private epoch = 0;
   private cancelRetry: (() => void) | null = null;
   private cancelFrame: (() => void) | null = null;
@@ -104,12 +105,10 @@ export class LiveStore {
     };
   }
 
-  /** Asks for an account's detail to be kept current while the caller shows it; returns the release. */
+  /** Asks for an account's fills to be read and kept current while the caller shows them; returns the release. */
   track(address: string): () => void {
     this.tracked.set(address, (this.tracked.get(address) ?? 0) + 1);
-    if (this.connection === "live") {
-      void this.readDetail(address, this.epoch);
-    }
+    void this.readFills(address, this.epoch);
     return () => {
       const left = (this.tracked.get(address) ?? 1) - 1;
       if (left <= 0) {
@@ -120,10 +119,21 @@ export class LiveStore {
     };
   }
 
-  /** Takes an account a control returned, as the freshest read of it. */
-  accept(read: AccountRead): void {
-    this.book = withRead(this.book, read);
-    this.publish();
+  /** Reads an account again, after a control changed it, so the page shows the result before the feed's next push. */
+  async refresh(address: string): Promise<void> {
+    const epoch = this.epoch;
+    const key = keyOf(address);
+    const version = this.viewVersions.get(key) ?? 0;
+    const outcome = await this.deps.api.account(address);
+    if (epoch !== this.epoch || (this.viewVersions.get(key) ?? 0) !== version) {
+      return;
+    }
+    if (outcome.status === "ok") {
+      this.book = withAccount(this.book, outcome.value);
+      this.publish();
+    } else if (outcome.status === "unauthenticated") {
+      this.endSession();
+    }
   }
 
   private stop(): void {
@@ -132,46 +142,61 @@ export class LiveStore {
     this.cancelRetry = null;
     this.socket?.close();
     this.socket = null;
-    this.buffer = [];
     this.book = EMPTY_BOOK;
     this.loaded = false;
     this.failures = new Map();
+    this.viewVersions.clear();
+    this.fillVersions.clear();
     this.connection = "stopped";
     this.publish();
+  }
+
+  private endSession(): void {
+    this.stop();
+    this.deps.onUnauthenticated();
   }
 
   private connect(state: "connecting" | "reconnecting"): void {
     const epoch = this.epoch;
     this.connection = state;
-    this.buffer = [];
     this.publish();
     this.socket = this.deps.openFeed({
       onOpen: () => {
         if (epoch === this.epoch) {
-          void this.sync(epoch);
+          this.connection = "syncing";
+          this.publish();
         }
       },
       onMessage: (data) => {
         if (epoch === this.epoch) {
-          this.receive(data);
+          this.receive(data, epoch);
         }
       },
       onClose: () => {
         if (epoch === this.epoch) {
-          this.reconnectLater();
+          void this.lostFeed();
         }
       },
     });
   }
 
-  private reconnectLater(): void {
-    // The old socket's late close event must not schedule a second retry.
+  /** The feed ended: ask whether the session is still good, then retry after a capped, jittered wait. */
+  private async lostFeed(): Promise<void> {
+    // The old socket's late close event must not start a second retry.
     this.epoch += 1;
+    const epoch = this.epoch;
     this.socket?.close();
     this.socket = null;
     this.connection = "reconnecting";
     this.publish();
-    const epoch = this.epoch;
+    const session: Outcome<null> = await this.deps.api.session();
+    if (epoch !== this.epoch) {
+      return;
+    }
+    if (session.status === "unauthenticated") {
+      this.endSession();
+      return;
+    }
     const wait = reconnectDelay(this.attempt, this.deps.random());
     this.attempt += 1;
     this.cancelRetry = this.deps.timeout(() => {
@@ -181,87 +206,74 @@ export class LiveStore {
     }, wait);
   }
 
-  /** Reads the list and every tracked detail, then applies the messages held meanwhile. */
-  private async sync(epoch: number): Promise<void> {
-    this.connection = "syncing";
-    this.publish();
-    const list = await this.deps.api.accounts();
-    if (epoch !== this.epoch) {
-      return;
-    }
-    if (!this.accepted(list)) {
-      return;
-    }
-    this.book = withList(this.book, list.value);
-    this.loaded = true;
-    await Promise.all([...this.tracked.keys()].map((address) => this.readDetail(address, epoch)));
-    if (epoch !== this.epoch) {
-      return;
-    }
-    for (const message of this.buffer) {
-      this.book = withMessage(this.book, message);
-    }
-    this.buffer = [];
-    this.attempt = 0;
-    this.connection = "live";
-    this.publish();
-  }
-
-  /** Whether an outcome is usable; an unusable one ends the connection and schedules the next. */
-  private accepted<T>(outcome: Outcome<T>): outcome is Extract<Outcome<T>, { status: "ok" }> {
-    if (outcome.status === "ok") {
-      return true;
-    }
-    if (outcome.status === "unauthenticated") {
-      this.stop();
-      this.deps.onUnauthenticated();
-    } else {
-      this.reconnectLater();
-    }
-    return false;
-  }
-
-  private async readDetail(address: string, epoch: number): Promise<void> {
-    const outcome = await this.deps.api.account(address);
-    if (epoch !== this.epoch) {
-      return;
-    }
-    if (outcome.status === "ok") {
-      this.book = withRead(this.book, outcome.value);
-      this.failures = new Map([...this.failures].filter(([key]) => key !== address));
-    } else if (outcome.status === "unauthenticated") {
-      this.stop();
-      this.deps.onUnauthenticated();
-      return;
-    } else {
-      this.failures = new Map(this.failures).set(address, outcome.message);
-    }
-    this.publish();
-  }
-
-  private receive(data: string): void {
+  private receive(data: string, epoch: number): void {
     let json: unknown;
     try {
       json = JSON.parse(data);
     } catch {
-      this.dropped += 1;
-      this.publish();
+      this.drop();
       return;
     }
     const parsed = parseWith(readLiveMessage, json);
-    if (parsed.status === "invalid") {
-      this.dropped += 1;
-      this.publish();
-    } else if (this.connection === "syncing") {
-      if (this.buffer.length >= BUFFER_CAP) {
-        this.reconnectLater();
-        return;
-      }
-      this.buffer.push(parsed.value);
-    } else if (this.connection === "live") {
-      this.book = withMessage(this.book, parsed.value);
-      this.publish();
+    // The bot opens every feed with its snapshot; anything before it is not part of the protocol.
+    if (parsed.status === "invalid" || (!this.loadedOnThisFeed() && parsed.value.type !== "snapshot")) {
+      this.drop();
+      return;
     }
+    const message = parsed.value;
+    if (message.type === "account") {
+      this.bump(this.viewVersions, message.account.address);
+    } else if (message.type === "fills") {
+      this.bump(this.fillVersions, message.address);
+    }
+    this.book = withMessage(this.book, message);
+    if (message.type === "snapshot") {
+      this.loaded = true;
+      this.attempt = 0;
+      this.connection = "live";
+      for (const account of message.overview.accounts) {
+        this.bump(this.viewVersions, account.address);
+      }
+      for (const address of this.tracked.keys()) {
+        void this.readFills(address, epoch);
+      }
+    }
+    this.publish();
+  }
+
+  /** Whether the open connection has delivered its snapshot. */
+  private loadedOnThisFeed(): boolean {
+    return this.connection === "live";
+  }
+
+  private drop(): void {
+    this.dropped += 1;
+    this.publish();
+  }
+
+  private bump(versions: Map<string, number>, address: string): void {
+    const key = keyOf(address);
+    versions.set(key, (versions.get(key) ?? 0) + 1);
+  }
+
+  /** Reads an account's fills; a feed message that arrived meanwhile is newer than the read. */
+  private async readFills(address: string, epoch: number): Promise<void> {
+    const key = keyOf(address);
+    const version = this.fillVersions.get(key) ?? 0;
+    const outcome = await this.deps.api.fills(address);
+    if (epoch !== this.epoch || (this.fillVersions.get(key) ?? 0) !== version) {
+      return;
+    }
+    if (outcome.status === "ok") {
+      this.book = withFills(this.book, address, outcome.value);
+      this.failures = new Map([...this.failures].filter(([failed]) => failed !== key));
+    } else if (outcome.status === "unauthenticated") {
+      this.endSession();
+      return;
+    } else {
+      this.failures = new Map(this.failures).set(key, outcome.message);
+    }
+    this.publish();
   }
 
   /** Schedules a snapshot for the next frame; any number of changes before it share one render. */
@@ -275,11 +287,10 @@ export class LiveStore {
         connection: this.connection,
         dropped: this.dropped,
         loaded: this.loaded,
-        accounts: [...this.book.summaries.values()].sort(
-          (a, b) => a.name.localeCompare(b.name, "en") || a.address.localeCompare(b.address, "en"),
-        ),
-        details: this.book.details,
-        detailFailures: this.failures,
+        accounts: [...this.book.accounts.values()],
+        totals: this.book.totals,
+        fills: this.book.fills,
+        fillFailures: this.failures,
       };
       for (const listener of this.listeners) {
         listener();

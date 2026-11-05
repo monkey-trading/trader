@@ -63,6 +63,34 @@ export function count(fields: Fields, key: string): number {
   return value;
 }
 
+/** Reads a signed safe integer field. */
+export function integer(fields: Fields, key: string): number {
+  const value = fields[key];
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw new ShapeError(`${key} is not an integer`);
+  }
+  return value;
+}
+
+/** Reads a signed safe integer field that may be null. */
+export function nullableInteger(fields: Fields, key: string): number | null {
+  return fields[key] === null ? null : integer(fields, key);
+}
+
+/** Reads a non-negative integer base-unit amount sent as a decimal string of digits. */
+export function baseUnits(fields: Fields, key: string): string {
+  const value = text(fields, key);
+  if (!/^\d{1,40}$/.test(value)) {
+    throw new ShapeError(`${key} is not an amount in base units`);
+  }
+  return value;
+}
+
+/** Reads a base-unit amount that may be null. */
+export function nullableBaseUnits(fields: Fields, key: string): string | null {
+  return fields[key] === null ? null : baseUnits(fields, key);
+}
+
 /** Reads a boolean field. */
 export function flag(fields: Fields, key: string): boolean {
   const value = fields[key];

@@ -1,5 +1,5 @@
 /** Display formatting for the bot's decimal strings, independent of the user's locale. */
-import { isDecimal, parseUnits, unitsToText } from "./decimal";
+import { baseUnitsToDecimal, isDecimal, parseUnits, unitsToText } from "./decimal";
 
 /** What stands where a figure is missing or cannot be read. */
 export const UNAVAILABLE = "unavailable";
@@ -41,9 +41,20 @@ export function formatTrimmed(value: string, places: number): string {
   return text.includes(".") ? text.replace(/\.?0+$/, "") : text;
 }
 
-/** A ratio as a percentage with two places: `2.5` reads `250.00%`. */
-export function formatRatioPercent(value: string): string {
-  return isDecimal(value) ? `${grouped(unitsToText(parseUnits(value) * 100n, 2))}%` : UNAVAILABLE;
+/** A margin level in basis points as a percentage with two places: `202500` reads `2,025.00%`. */
+export function formatBpsPercent(bps: number): string {
+  if (!Number.isSafeInteger(bps)) {
+    return UNAVAILABLE;
+  }
+  const absolute = Math.abs(bps);
+  const whole = Math.trunc(absolute / 100);
+  const hundredths = String(absolute % 100).padStart(2, "0");
+  return `${bps < 0 ? "-" : ""}${group(String(whole))}.${hundredths}%`;
+}
+
+/** An amount of MONKEY given in base units (18 decimals) as whole MONKEY with two places, truncated. */
+export function formatMonkey(baseUnits: string): string {
+  return /^\d{1,40}$/.test(baseUnits) ? formatDecimal(baseUnitsToDecimal(baseUnits), 2) : UNAVAILABLE;
 }
 
 /** An address as its first six and last four characters. */

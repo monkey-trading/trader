@@ -5,7 +5,7 @@
 //   CONSOLE_URL        the console's address, such as https://127.0.0.1:8443
 //   CONSOLE_PASSWORD   the login password
 //   PLAYWRIGHT_DIR     the scratch directory holding node_modules/playwright
-//   REFUSING_ACCOUNT   (optional) the name of an account whose strategies refuse to start
+//   REFUSING_ACCOUNT   (optional) the address of an account whose strategies refuse to start
 //   EXPECT_ACCOUNTS    (optional) how many accounts the overview must list
 import { createRequire } from "node:module";
 import process from "node:process";
@@ -32,6 +32,23 @@ function usdc(value) {
 function signed(value) {
   const text = usdc(value);
   return /[1-9]/.test(text) && !text.startsWith("-") ? `+${text}` : text;
+}
+
+/** Basis points as a percentage with two places. */
+function percent(bps) {
+  const whole = String(Math.trunc(Math.abs(bps) / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${bps < 0 ? "-" : ""}${whole}.${String(Math.abs(bps) % 100).padStart(2, "0")}%`;
+}
+
+/** MONKEY base units (18 decimals) as whole MONKEY with two places, truncated. */
+function monkey(units) {
+  const padded = units.padStart(19, "0");
+  return usdc(`${padded.slice(0, -18).replace(/^0+(?=\d)/, "")}.${padded.slice(-18)}`);
+}
+
+/** The first six and last four characters of an address, as the console shortens it. */
+function short(address) {
+  return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
 function check(condition, message) {
@@ -91,11 +108,15 @@ try {
   if (process.env.EXPECT_ACCOUNTS) {
     check(listed.length === Number(process.env.EXPECT_ACCOUNTS), `expected ${process.env.EXPECT_ACCOUNTS} accounts, API lists ${listed.length}`);
   }
-  for (const account of listed) {
-    await eventually(`${account.name}'s row matches the API`, async () => {
+  for (const account of listed.filter((a) => a.figures !== null)) {
+    await eventually(`${short(account.address)}'s row matches the API`, async () => {
       const fresh = (await api("/api/accounts")).accounts.find((a) => a.address === account.address);
-      const cells = await page.getByRole("row").filter({ hasText: fresh.name }).getByRole("cell").allTextContents();
-      const want = [fresh.state, usdc(fresh.equity), signed(fresh.realisedPnl), signed(fresh.unrealisedPnl)];
+      const f = fresh.figures;
+      const cells = await page.getByRole("row").filter({ hasText: short(account.address) }).getByRole("cell").allTextContents();
+      const want = [
+        fresh.state, usdc(f.equity), signed(f.realised_pnl), signed(f.unrealised_pnl),
+        f.margin_level_bps === null ? "—" : percent(f.margin_level_bps), String(f.positions.length), monkey(f.monkey.newest_entitled),
+      ];
       return want.every((text, index) => cells[index] === text) ? true : { cells, want };
     });
   }
@@ -107,39 +128,33 @@ try {
 
   // Account page: stop and start a strategy, then see the API agree.
   const first = listed[0];
-  await page.getByRole("link", { name: first.name, exact: true }).click();
-  await page.getByRole("heading", { level: 1, name: first.name }).waitFor();
+  const running = async () => (await api(`/api/accounts/${first.address}`)).strategies[0].running;
+  await page.getByRole("link", { name: short(first.address) }).click();
+  await page.getByRole("heading", { level: 1, name: short(first.address) }).waitFor();
   const card = page.getByRole("region", { name: /on /i }).first();
   await card.getByRole("button", { name: "Stop strategy" }).click();
   await card.getByRole("button", { name: "Start strategy" }).waitFor();
-  const stopped = (await api(`/api/accounts/${first.address}`)).account.strategies[0];
-  check(stopped.state === "stopped", "API still shows the strategy running after a stop");
+  check(!(await running()), "API still shows the strategy running after a stop");
   await card.getByRole("button", { name: "Start strategy" }).click();
   await card.getByRole("button", { name: "Stop strategy" }).waitFor();
-  check((await api(`/api/accounts/${first.address}`)).account.strategies[0].state === "running", "API shows the strategy stopped after a start");
+  check(await running(), "API shows the strategy stopped after a start");
 
   // A refusal shows at the control that caused it.
   if (process.env.REFUSING_ACCOUNT) {
-    await page.goto(`${url}/`);
-    await page.getByRole("link", { name: process.env.REFUSING_ACCOUNT, exact: true }).click();
+    await page.goto(`${url}/accounts/${process.env.REFUSING_ACCOUNT}`);
     const refusing = page.getByRole("region", { name: /on /i }).first();
-    const stopButton = refusing.getByRole("button", { name: "Start strategy" });
-    if ((await stopButton.count()) === 0) {
-      await refusing.getByRole("button", { name: "Stop strategy" }).click();
-      await stopButton.waitFor();
-    }
-    await stopButton.click();
+    await refusing.getByRole("button", { name: "Start strategy" }).click();
     await refusing.getByText(/^Failed: /).waitFor();
     check((await page.getByText(/^Failed: /).count()) === 1, "a failure showed somewhere other than its control");
   }
 
   // Flatten asks twice, then the positions are gone in the page and in the API.
   await page.goto(`${url}/accounts/${first.address}`);
-  await page.getByRole("heading", { level: 1, name: first.name }).waitFor();
+  await page.getByRole("heading", { level: 1, name: short(first.address) }).waitFor();
   await page.getByRole("button", { name: "Flatten account" }).click();
   await page.getByRole("button", { name: "Confirm flatten" }).click();
   await page.getByText("No open positions.").waitFor();
-  await eventually("the API shows no positions", async () => (await api(`/api/accounts/${first.address}`)).account.positions.length === 0);
+  await eventually("the API shows no positions", async () => (await api(`/api/accounts/${first.address}`)).figures.positions.length === 0);
 
   check(foreign.length === 0, `requests left the console's origin: ${foreign.join(", ")}`);
   check(problems.length === 0, `page errors: ${problems.join("; ")}`);

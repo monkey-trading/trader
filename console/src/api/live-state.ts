@@ -1,90 +1,61 @@
-/** The console's book of accounts and the pure steps that change it: a read replaces, a feed message adds. */
-import type { AccountDetail, AccountList, AccountRead, AccountSummary, LiveMessage } from "./types";
+/** The console's book of accounts and the pure steps that change it: the feed's messages and the REST reads. */
+import type { AccountView, Fill, LiveMessage, Overview, Totals } from "./types";
 
 /** Most fills kept per account in the page; the oldest are dropped. */
 export const FILL_CAP = 200;
 /** Most equity curve points kept per account in the page; the oldest are dropped. */
-export const CURVE_CAP = 500;
+export const CURVE_CAP = 2000;
 
-/** What the console knows of the accounts. */
+/** What the console knows of the accounts. Keys are lower-case addresses, in the order the bot lists them. */
 export interface Book {
-  readonly summaries: ReadonlyMap<string, AccountSummary>;
-  readonly details: ReadonlyMap<string, AccountDetail>;
-  /** The feed position of the read each account was last taken from; older messages are ignored. */
-  readonly base: ReadonlyMap<string, number>;
+  readonly accounts: ReadonlyMap<string, AccountView>;
+  readonly totals: Totals | null;
+  readonly fills: ReadonlyMap<string, readonly Fill[]>;
 }
 
 /** A book that knows nothing. */
-export const EMPTY_BOOK: Book = { summaries: new Map(), details: new Map(), base: new Map() };
+export const EMPTY_BOOK: Book = { accounts: new Map(), totals: null, fills: new Map() };
 
-/** The figures of a detail, without its lists. */
-function summaryOf(detail: AccountSummary): AccountSummary {
-  return {
-    address: detail.address,
-    name: detail.name,
-    state: detail.state,
-    stateReason: detail.stateReason,
-    balance: detail.balance,
-    equity: detail.equity,
-    realisedPnl: detail.realisedPnl,
-    unrealisedPnl: detail.unrealisedPnl,
-    marginLevel: detail.marginLevel,
-    openPositions: detail.openPositions,
-    monkeyEarned: detail.monkeyEarned,
-    monkeyClaimed: detail.monkeyClaimed,
-  };
+/** The key an address is held under; the route may spell it in another case than the bot does. */
+export function keyOf(address: string): string {
+  return address.toLowerCase();
 }
 
-/** Takes a read of the whole list: accounts the bot no longer lists go, the rest are replaced. */
-export function withList(book: Book, list: AccountList): Book {
-  const summaries = new Map(list.accounts.map((account) => [account.address, account]));
-  const details = new Map([...book.details].filter(([address]) => summaries.has(address)));
-  const base = new Map([...summaries.keys()].map((address) => [address, list.seq]));
-  return { summaries, details, base };
+/** An account's curve, capped to the newest points. */
+function capped(account: AccountView): AccountView {
+  return account.curve.length > CURVE_CAP ? { ...account, curve: account.curve.slice(-CURVE_CAP) } : account;
 }
 
-/** Takes a read of one account, which replaces what the book held of it. */
-export function withRead(book: Book, read: AccountRead): Book {
-  const { address } = read.account;
-  return {
-    summaries: new Map(book.summaries).set(address, summaryOf(read.account)),
-    details: new Map(book.details).set(address, read.account),
-    base: new Map(book.base).set(address, read.seq),
-  };
+/** Takes the feed's opening snapshot: the accounts and totals replace what was known, fills of kept accounts stay. */
+export function withSnapshot(book: Book, overview: Overview): Book {
+  const accounts = new Map(overview.accounts.map((account) => [keyOf(account.address), capped(account)]));
+  const fills = new Map([...book.fills].filter(([key]) => accounts.has(key)));
+  return { accounts, totals: overview.totals, fills };
 }
 
-/** Applies one feed message; one at or before its account's read, or for a detail not held, changes only what it can. */
+/** Takes one account's view, which replaces what the book held of it; an account the book never listed is added last. */
+export function withAccount(book: Book, account: AccountView): Book {
+  return { ...book, accounts: new Map(book.accounts).set(keyOf(account.address), capped(account)) };
+}
+
+/** Takes an account's fills; fills of an account the book does not list are dropped. */
+export function withFills(book: Book, address: string, fills: readonly Fill[]): Book {
+  const key = keyOf(address);
+  return book.accounts.has(key)
+    ? { ...book, fills: new Map(book.fills).set(key, fills.slice(0, FILL_CAP)) }
+    : book;
+}
+
+/** Applies one feed message. */
 export function withMessage(book: Book, message: LiveMessage): Book {
   switch (message.type) {
-    case "account": {
-      const { address } = message.account;
-      if (message.seq <= (book.base.get(address) ?? -1)) {
-        return book;
-      }
-      const held = book.details.get(address);
-      return {
-        ...book,
-        summaries: new Map(book.summaries).set(address, summaryOf(message.account)),
-        details: held
-          ? new Map(book.details).set(address, { ...message.account, fills: held.fills, curve: held.curve })
-          : book.details,
-      };
-    }
-    case "fill": {
-      const held = book.details.get(message.address);
-      if (!held || message.seq <= (book.base.get(message.address) ?? -1)) {
-        return book;
-      }
-      const fills = [message.fill, ...held.fills].slice(0, FILL_CAP);
-      return { ...book, details: new Map(book.details).set(message.address, { ...held, fills }) };
-    }
-    case "curve": {
-      const held = book.details.get(message.address);
-      if (!held || message.seq <= (book.base.get(message.address) ?? -1)) {
-        return book;
-      }
-      const curve = [...held.curve, message.point].slice(-CURVE_CAP);
-      return { ...book, details: new Map(book.details).set(message.address, { ...held, curve }) };
-    }
+    case "snapshot":
+      return withSnapshot(book, message.overview);
+    case "account":
+      return withAccount(book, message.account);
+    case "fills":
+      return withFills(book, message.address, message.fills);
+    case "totals":
+      return { ...book, totals: message.totals };
   }
 }

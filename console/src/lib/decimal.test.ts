@@ -1,5 +1,5 @@
 /** Tests of exact decimal arithmetic. */
-import { compareDecimals, isDecimal, parseUnits, signOf, sumUnits, unitsToText } from "./decimal";
+import { baseUnitsToDecimal, compareDecimals, isDecimal, parseUnits, signOf, sumUnits, unitsToText } from "./decimal";
 
 describe("isDecimal", () => {
   it("accepts plain decimals and refuses everything else", () => {
@@ -47,5 +47,17 @@ describe("sums and comparisons", () => {
     expect(compareDecimals("1.0", "1")).toBe(0);
     expect(compareDecimals("-2", "-1")).toBe(-1);
     expect([signOf("-0.5"), signOf("0.0"), signOf("3")]).toEqual([-1, 0, 1]);
+  });
+});
+
+describe("baseUnitsToDecimal", () => {
+  it("places the point eighteen digits from the right", () => {
+    expect(baseUnitsToDecimal("1")).toBe("0.000000000000000001");
+    expect(baseUnitsToDecimal("1500000000000000000")).toBe("1.500000000000000000");
+    expect(baseUnitsToDecimal("100000000000000000000")).toBe("100.000000000000000000");
+  });
+
+  it("throws on anything but digits", () => {
+    expect(() => baseUnitsToDecimal("1.5")).toThrow("not an amount in base units");
   });
 });

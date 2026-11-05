@@ -66,9 +66,10 @@ list.
   login or the signed-in pages) over the stores it creates; `src/api/` holds the client with every
   route (`client.ts`), the parsers that check each body and feed message (`parsers.ts`,
   `types.ts`), the book of accounts and its pure steps (`live-state.ts`), the live store that owns the
-  one WebSocket and resyncs from the REST reads (`live-store.ts`, `feed.ts`), and the session
-  (`session-store.ts`); `src/lib/` holds pure helpers (exact decimals, formatting, totals, routes,
-  curve layout, parameter checks, reconnect delay); `src/pages/` has the login, overview and
+  one WebSocket, opens on the bot's snapshot and reads fills and a control's result from REST
+  (`live-store.ts`, `feed.ts`), and the session
+  (`session-store.ts`); `src/lib/` holds pure helpers (exact decimals, formatting, market names,
+  routes, curve layout, parameter checks, reconnect delay); `src/pages/` has the login, overview and
   account pages; `src/components/` the shared components and the app context; `src/test-harness.tsx`
   mounts the app over stand-in calls for the component tests (`App.test.tsx`, `controls.test.tsx`).
   `stub/` is a stand-in console API with three accounts (`npm run stub`), and `browser-test/run.mjs`

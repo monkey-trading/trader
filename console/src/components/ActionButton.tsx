@@ -1,6 +1,5 @@
 /** A button for an `Action`, with the failure it caused shown under it. */
 import type { Outcome } from "@/api/client";
-import type { AccountRead } from "@/api/types";
 
 import type { Action } from "./use-action";
 
@@ -10,7 +9,7 @@ interface ActionButtonProps {
   readonly pendingLabel: string;
   readonly action: Action;
   /** The call the button makes. */
-  readonly call: () => Promise<Outcome<AccountRead>>;
+  readonly call: () => Promise<Outcome<null>>;
 }
 
 /** Shared look of every button. */

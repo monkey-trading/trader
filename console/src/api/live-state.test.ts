@@ -1,67 +1,66 @@
 /** Tests of the pure book steps. */
-import { detailBody, liveBody, summaryBody } from "./fixtures";
-import { CURVE_CAP, EMPTY_BOOK, FILL_CAP, withList, withMessage, withRead } from "./live-state";
-import { readAccount, readAccountList, readLiveMessage } from "./parsers";
+import { ADDRESS, fillBody, overviewBody, totalsBody, viewBody } from "./fixtures";
+import { CURVE_CAP, EMPTY_BOOK, FILL_CAP, keyOf, withMessage, withSnapshot } from "./live-state";
+import { readAccount, readFills, readLiveMessage, readOverview } from "./parsers";
 
-const ADDRESS = `0x${"11".repeat(20)}`;
-const list = (seq: number, ...overrides: Record<string, unknown>[]) =>
-  readAccountList({ seq, accounts: overrides.map((o) => summaryBody(o)) });
-const read = (seq: number, overrides: Record<string, unknown> = {}) => readAccount({ seq, account: detailBody(overrides) });
-const message = (value: unknown) => readLiveMessage(value);
-const FILL = { id: "f2", time: 2, market: "BTC-USD", side: "sell", qty: "1", price: "2", fee: "0", realisedPnl: "1" };
+const OTHER = `0x${"22".repeat(20)}`;
+const overview = (...accounts: Record<string, unknown>[]) => readOverview(overviewBody(accounts, totalsBody()));
+const fills = (count: number) => readFills({ fills: Array.from({ length: count }, (_, i) => fillBody({ cursor: `${String(i)}:0` })) });
 
-describe("withList", () => {
-  it("replaces the accounts and drops those the bot no longer lists", () => {
-    const first = withList(EMPTY_BOOK, list(1, {}, { address: "0xbeef", name: "b" }));
-    const second = withList(withRead(first, read(1)), list(2, {}));
-    expect([...second.summaries.keys()]).toEqual([ADDRESS]);
-    expect(second.details.has(ADDRESS)).toBe(true);
-    expect(withList(second, list(3, { address: "0xbeef" })).details.size).toBe(0);
+describe("withSnapshot", () => {
+  it("replaces the accounts and totals, keeps the order the bot gave and drops fills of accounts that went", () => {
+    const first = withSnapshot(EMPTY_BOOK, overview(viewBody(), viewBody({ address: OTHER })));
+    const held = withMessage(first, { type: "fills", address: OTHER, fills: fills(2) });
+    const second = withSnapshot(held, overview(viewBody()));
+
+    expect([...first.accounts.keys()]).toEqual([ADDRESS, OTHER]);
+    expect([...second.accounts.keys()]).toEqual([ADDRESS]);
+    expect(second.fills.size).toBe(0);
+    expect(held.fills.get(OTHER)).toHaveLength(2);
+  });
+
+  it("keeps the fills of an account that stays", () => {
+    const held = withMessage(withSnapshot(EMPTY_BOOK, overview(viewBody())), { type: "fills", address: ADDRESS, fills: fills(1) });
+    expect(withSnapshot(held, overview(viewBody())).fills.get(ADDRESS)).toHaveLength(1);
+  });
+
+  it("caps an account's curve to the newest points", () => {
+    const long = Array.from({ length: CURVE_CAP + 3 }, (_, i) => ({ time_ms: i, equity: "1" }));
+    const book = withSnapshot(EMPTY_BOOK, overview(viewBody({ curve: long })));
+    const curve = book.accounts.get(ADDRESS)?.curve ?? [];
+    expect([curve.length, curve[0]?.timeMs]).toEqual([CURVE_CAP, 3]);
   });
 });
 
 describe("withMessage", () => {
-  const held = withRead(EMPTY_BOOK, read(5));
+  const held = withSnapshot(EMPTY_BOOK, overview(viewBody(), viewBody({ address: OTHER })));
 
-  it("replaces the account's figures and keeps its fills and curve", () => {
-    const next = withMessage(held, message({ type: "account", seq: 6, account: liveBody({ equity: "1" }) }));
-    expect(next.summaries.get(ADDRESS)?.equity).toBe("1");
-    expect(next.details.get(ADDRESS)?.equity).toBe("1");
-    expect(next.details.get(ADDRESS)?.fills).toHaveLength(1);
+  it("replaces one account's view in place, without changing the order", () => {
+    const next = withMessage(held, readLiveMessage({ type: "account", account: viewBody({ state: "stopped" }) }));
+    expect([...next.accounts.values()].map((a) => a.state)).toEqual(["stopped", "running"]);
   });
 
-  it("ignores a message at or before the read it follows", () => {
-    for (const seq of [4, 5]) {
-      expect(withMessage(held, message({ type: "account", seq, account: liveBody({ equity: "1" }) }))).toBe(held);
-      expect(withMessage(held, message({ type: "fill", seq, address: ADDRESS, fill: FILL }))).toBe(held);
-    }
+  it("holds an account's address in either case under one key", () => {
+    const next = withMessage(held, readLiveMessage({ type: "account", account: viewBody({ address: ADDRESS.toUpperCase().replace("0X", "0x") }) }));
+    expect(next.accounts.size).toBe(2);
+    expect(keyOf("0xAB")).toBe("0xab");
   });
 
-  it("puts a new fill first and caps the list, dropping the oldest", () => {
-    let book = held;
-    for (let seq = 6; seq < 6 + FILL_CAP + 10; seq += 1) {
-      book = withMessage(book, message({ type: "fill", seq, address: ADDRESS, fill: { ...FILL, id: `n${String(seq)}` } }));
-    }
-    const fills = book.details.get(ADDRESS)?.fills ?? [];
-    expect(fills).toHaveLength(FILL_CAP);
-    expect(fills[0]?.id).toBe(`n${String(6 + FILL_CAP + 9)}`);
+  it("replaces fills, newest first, capped, and ignores fills of an unlisted account", () => {
+    const next = withMessage(held, { type: "fills", address: ADDRESS, fills: fills(FILL_CAP + 10) });
+    expect(next.fills.get(ADDRESS)).toHaveLength(FILL_CAP);
+    expect(next.fills.get(ADDRESS)?.[0]?.cursor).toBe("0:0");
+    expect(withMessage(held, { type: "fills", address: "0xdead", fills: fills(1) })).toBe(held);
   });
 
-  it("appends curve points and caps the curve, dropping the oldest", () => {
-    let book = held;
-    for (let seq = 6; seq < 6 + CURVE_CAP + 5; seq += 1) {
-      book = withMessage(book, message({ type: "curve", seq, address: ADDRESS, point: { time: seq, equity: "1" } }));
-    }
-    const curve = book.details.get(ADDRESS)?.curve ?? [];
-    expect(curve).toHaveLength(CURVE_CAP);
-    expect(curve.at(-1)?.time).toBe(6 + CURVE_CAP + 4);
+  it("takes new totals", () => {
+    const next = withMessage(held, readLiveMessage({ type: "totals", totals: totalsBody({ equity: "7" }) }));
+    expect(next.totals?.equity).toBe("7");
   });
 
-  it("changes only the summary of an account whose page is not open", () => {
-    const book = withList(EMPTY_BOOK, list(1, {}));
-    const next = withMessage(book, message({ type: "account", seq: 2, account: liveBody({ equity: "7" }) }));
-    expect(next.summaries.get(ADDRESS)?.equity).toBe("7");
-    expect(next.details.size).toBe(0);
-    expect(withMessage(book, message({ type: "fill", seq: 2, address: ADDRESS, fill: FILL }))).toBe(book);
+  it("takes a snapshot message as a snapshot", () => {
+    const next = withMessage(held, readLiveMessage({ type: "snapshot", ...overviewBody([viewBody()]) }));
+    expect(next.accounts.size).toBe(1);
+    expect(readAccount(viewBody()).address).toBe(ADDRESS);
   });
 });

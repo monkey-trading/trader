@@ -1,6 +1,6 @@
 /** Tests of display formatting. */
 import {
-  formatDecimal, formatRatioPercent, formatSigned, formatTime, formatTrimmed, formatUsdc, shortAddress, UNAVAILABLE,
+  formatBpsPercent, formatDecimal, formatMonkey, formatSigned, formatTime, formatTrimmed, formatUsdc, shortAddress, UNAVAILABLE,
 } from "./format";
 
 describe("formatUsdc", () => {
@@ -36,10 +36,34 @@ describe("formatTrimmed", () => {
   });
 });
 
-describe("formatRatioPercent", () => {
-  it("shifts the decimal point two places", () => {
-    expect(formatRatioPercent("2.5")).toBe("250.00%");
-    expect(formatRatioPercent("33.114754098")).toBe("3,311.47%");
+describe("formatBpsPercent", () => {
+  it("reads basis points as a percentage with two places, exactly", () => {
+    expect(formatBpsPercent(202_500)).toBe("2,025.00%");
+    expect(formatBpsPercent(5_000)).toBe("50.00%");
+    expect(formatBpsPercent(7)).toBe("0.07%");
+    expect(formatBpsPercent(-150)).toBe("-1.50%");
+  });
+
+  it("shows a value that is not an integer as unavailable", () => {
+    expect(formatBpsPercent(1.5)).toBe(UNAVAILABLE);
+  });
+});
+
+describe("formatMonkey", () => {
+  it("moves the point eighteen places and truncates to two", () => {
+    expect(formatMonkey("1500000000000000000")).toBe("1.50");
+    expect(formatMonkey("12999999999999999999")).toBe("12.99");
+    expect(formatMonkey("0")).toBe("0.00");
+    expect(formatMonkey("123456789012345678901234")).toBe("123,456.78");
+  });
+
+  it("keeps every digit of an amount a float would lose", () => {
+    expect(formatMonkey("9007199254740993000000000000")).toBe("9,007,199,254.74");
+  });
+
+  it("shows text that is not base units as unavailable", () => {
+    expect(formatMonkey("1.5")).toBe(UNAVAILABLE);
+    expect(formatMonkey("")).toBe(UNAVAILABLE);
   });
 });
 

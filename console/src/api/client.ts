@@ -1,6 +1,6 @@
 /** The console's only door to the bot: every route, request and response check lives here. */
-import { parseWith, readAccount, readAccountList, readErrorMessage, type Parsed } from "./parsers";
-import type { AccountList, AccountRead } from "./types";
+import { parseWith, readAccount, readErrorMessage, readFills, type Parsed } from "./parsers";
+import type { AccountView, Fill } from "./types";
 
 /** What a call came to. A refusal or an outage is a value the control shows, not an exception. */
 export type Outcome<T> =
@@ -14,12 +14,12 @@ export interface Api {
   session(): Promise<Outcome<null>>;
   login(password: string): Promise<Outcome<null>>;
   logout(): Promise<Outcome<null>>;
-  accounts(): Promise<Outcome<AccountList>>;
-  account(address: string): Promise<Outcome<AccountRead>>;
-  setAccountRunning(address: string, running: boolean): Promise<Outcome<AccountRead>>;
-  flatten(address: string): Promise<Outcome<AccountRead>>;
-  setStrategyRunning(address: string, strategyId: string, running: boolean): Promise<Outcome<AccountRead>>;
-  setParams(address: string, strategyId: string, params: Readonly<Record<string, string | number>>): Promise<Outcome<AccountRead>>;
+  account(address: string): Promise<Outcome<AccountView>>;
+  fills(address: string): Promise<Outcome<readonly Fill[]>>;
+  setAccountRunning(address: string, running: boolean): Promise<Outcome<null>>;
+  flatten(address: string): Promise<Outcome<null>>;
+  setStrategyRunning(address: string, strategyId: number, running: boolean): Promise<Outcome<null>>;
+  setParams(address: string, strategyId: number, params: Readonly<Record<string, number>>): Promise<Outcome<null>>;
 }
 
 /** The routes of the bot's console API, the one place their paths are written. */
@@ -27,14 +27,14 @@ export const routes = {
   session: "/api/session",
   login: "/api/login",
   logout: "/api/logout",
-  accounts: "/api/accounts",
   account: (address: string) => `/api/accounts/${encodeURIComponent(address)}`,
+  fills: (address: string) => `/api/accounts/${encodeURIComponent(address)}/fills`,
   accountRun: (address: string, action: "start" | "stop") => `/api/accounts/${encodeURIComponent(address)}/${action}`,
   flatten: (address: string) => `/api/accounts/${encodeURIComponent(address)}/flatten`,
-  strategyRun: (address: string, id: string, action: "start" | "stop") =>
-    `/api/accounts/${encodeURIComponent(address)}/strategies/${encodeURIComponent(id)}/${action}`,
-  strategyParams: (address: string, id: string) =>
-    `/api/accounts/${encodeURIComponent(address)}/strategies/${encodeURIComponent(id)}/params`,
+  strategyRun: (address: string, id: number, action: "start" | "stop") =>
+    `/api/accounts/${encodeURIComponent(address)}/strategies/${String(id)}/${action}`,
+  strategyParams: (address: string, id: number) =>
+    `/api/accounts/${encodeURIComponent(address)}/strategies/${String(id)}/params`,
   /** The live feed's path, on the page's own origin. */
   feed: "/api/live",
 } as const;
@@ -87,23 +87,21 @@ async function call<T>(
     : { status: "refused", message, retryAfterSeconds: retryAfter(response) };
 }
 
-/** Reads no body: the session, login and logout answers carry nothing the console uses. */
+/** Reads no body: the session, login, logout and control answers are 204s with nothing the console uses. */
 const nothing = (): null => null;
 
 /** Builds the API client over `fetchFn` (the page's `fetch`; tests pass a stand-in). */
 export function createApi(fetchFn: Fetch): Api {
-  const account = (method: "GET" | "POST" | "PUT", path: string, body?: unknown) =>
-    call(fetchFn, method, path, body, readAccount);
+  const control = (method: "POST" | "PUT", path: string, body: unknown) => call(fetchFn, method, path, body, nothing);
   return {
     session: () => call(fetchFn, "GET", routes.session, undefined, nothing),
-    login: (password) => call(fetchFn, "POST", routes.login, { password }, nothing),
-    logout: () => call(fetchFn, "POST", routes.logout, {}, nothing),
-    accounts: () => call(fetchFn, "GET", routes.accounts, undefined, readAccountList),
-    account: (address) => account("GET", routes.account(address)),
-    setAccountRunning: (address, running) => account("POST", routes.accountRun(address, running ? "start" : "stop"), {}),
-    flatten: (address) => account("POST", routes.flatten(address), {}),
-    setStrategyRunning: (address, id, running) =>
-      account("POST", routes.strategyRun(address, id, running ? "start" : "stop"), {}),
-    setParams: (address, id, params) => account("PUT", routes.strategyParams(address, id), { params }),
+    login: (password) => control("POST", routes.login, { password }),
+    logout: () => control("POST", routes.logout, {}),
+    account: (address) => call(fetchFn, "GET", routes.account(address), undefined, readAccount),
+    fills: (address) => call(fetchFn, "GET", routes.fills(address), undefined, readFills),
+    setAccountRunning: (address, running) => control("POST", routes.accountRun(address, running ? "start" : "stop"), {}),
+    flatten: (address) => control("POST", routes.flatten(address), {}),
+    setStrategyRunning: (address, id, running) => control("POST", routes.strategyRun(address, id, running ? "start" : "stop"), {}),
+    setParams: (address, id, params) => control("PUT", routes.strategyParams(address, id), params),
   };
 }

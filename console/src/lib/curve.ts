@@ -7,7 +7,7 @@ export const CURVE_HEIGHT = 160;
 
 /** A point of the curve as the bot serves it. */
 export interface RawPoint {
-  readonly time: number;
+  readonly timeMs: number;
   readonly equity: string;
 }
 
@@ -41,10 +41,10 @@ export function curvePath(points: readonly RawPoint[]): string {
   const low = values.reduce((a, b) => (b < a ? b : a));
   const high = values.reduce((a, b) => (b > a ? b : a));
   const span = Number(high - low);
-  const duration = last.time - first.time;
+  const duration = last.timeMs - first.timeMs;
   return points
     .map((point, index) => {
-      const x = duration > 0 ? ((point.time - first.time) / duration) * CURVE_WIDTH : (index / (points.length - 1)) * CURVE_WIDTH;
+      const x = duration > 0 ? ((point.timeMs - first.timeMs) / duration) * CURVE_WIDTH : (index / (points.length - 1)) * CURVE_WIDTH;
       const y = span > 0 ? CURVE_HEIGHT - (Number((values[index] ?? low) - low) / span) * CURVE_HEIGHT : CURVE_HEIGHT / 2;
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     })

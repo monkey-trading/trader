@@ -8,7 +8,7 @@ import { extname, join, normalize } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { createModel, detail, flatten, live, summary, tick, units } from "./model.mjs";
+import { createModel, fills, flatten, overview, tick, view } from "./model.mjs";
 import { accept } from "./websocket.mjs";
 
 const PASSWORD = process.env.STUB_PASSWORD ?? "stub-password";
@@ -61,11 +61,8 @@ async function login(request, response) {
   failedLogins = 0;
   const token = randomBytes(16).toString("hex");
   sessions.add(token);
-  return send(response, 200, {}, { "Set-Cookie": `session=${token}; HttpOnly; SameSite=Strict; Path=/` });
-}
-
-function read(item) {
-  return { seq: model.seq, account: detail(model, item) };
+  response.writeHead(204, { ...SECURITY_HEADERS, "Set-Cookie": `session=${token}; HttpOnly; SameSite=Strict; Path=/` });
+  return response.end();
 }
 
 function broadcast(messages) {
@@ -76,46 +73,67 @@ function broadcast(messages) {
   }
 }
 
+/** Pushes what a control changed, as the bot's feed does. */
+function pushChanges(item, withFills) {
+  const messages = [{ type: "account", account: view(model, item) }, { type: "totals", totals: overview(model).totals }];
+  if (withFills) {
+    messages.push({ type: "fills", address: item.address, fills: item.fills });
+  }
+  broadcast(messages);
+}
+
+function noContent(response) {
+  response.writeHead(204, SECURITY_HEADERS);
+  response.end();
+}
+
 async function control(request, response, parts) {
   const [address, ...rest] = parts;
-  const item = model.accounts.find((candidate) => candidate.address === address);
+  const item = model.accounts.find((candidate) => candidate.address === address.toLowerCase());
   if (item === undefined) {
     return send(response, 404, { error: "no such account" });
   }
   const [what, id, action] = rest;
   if (request.method === "GET" && what === undefined) {
-    return send(response, 200, read(item));
+    return send(response, 200, view(model, item));
+  }
+  if (request.method === "GET" && what === "fills") {
+    return send(response, 200, fills(item));
   }
   const body = await readJson(request);
+  let flattened = false;
   if (request.method === "POST" && what === "flatten") {
     flatten(model, item);
+    flattened = true;
   } else if (request.method === "POST" && (what === "start" || what === "stop")) {
     item.state = what === "start" ? "running" : "stopped";
   } else if (what === "strategies") {
-    const found = item.strategies.find((candidate) => candidate.id === id);
-    if (found === undefined) {
+    if (Number(id) !== item.strategy.id) {
       return send(response, 404, { error: "no such strategy" });
     }
     if (request.method === "POST" && item.blocked !== undefined && action === "start") {
-      return send(response, 409, { error: `cannot start: ${item.blocked}` });
+      return send(response, 422, { error: `cannot start: ${item.blocked}` });
     }
     if (request.method === "POST") {
-      found.state = action === "start" ? "running" : "stopped";
+      item.strategy.running = action === "start";
     } else {
-      for (const param of found.params) {
-        const value = units(body?.params?.[param.name]);
-        if (value === null || value < units(param.min) || value > units(param.max)) {
-          return send(response, 400, { error: `${param.name} is outside ${param.min} to ${param.max}` });
+      const bounds = item.strategy.bounds;
+      for (const name of Object.keys(item.strategy.params)) {
+        const value = body?.[name];
+        if (bounds === null || !Number.isSafeInteger(value) || value < bounds[name][0] || value > bounds[name][1]) {
+          return send(response, 422, { error: `${name} is outside its bounds` });
         }
-        param.value = String(body.params[param.name]);
       }
+      if (body.fast >= body.slow) {
+        return send(response, 422, { error: "fast must be below slow" });
+      }
+      item.strategy.params = { fast: body.fast, slow: body.slow };
     }
   } else {
     return send(response, 404, { error: "not found" });
   }
-  model.seq += 1;
-  broadcast([{ type: "account", seq: model.seq, account: live(model, item) }]);
-  return send(response, 200, read(item));
+  pushChanges(item, flattened);
+  return noContent(response);
 }
 
 async function api(request, response, url) {
@@ -126,18 +144,19 @@ async function api(request, response, url) {
     return login(request, response);
   }
   if (!signedIn(request)) {
-    return send(response, 401, { error: "sign in" });
+    return send(response, 401, { error: "log in first" });
   }
   const parts = url.pathname.split("/").slice(2).map(decodeURIComponent);
   if (parts[0] === "session") {
-    return send(response, 200, {});
+    return noContent(response);
   }
   if (parts[0] === "logout") {
     sessions.clear();
-    return send(response, 200, {}, { "Set-Cookie": "session=; Max-Age=0; Path=/" });
+    response.writeHead(204, { ...SECURITY_HEADERS, "Set-Cookie": "session=; Max-Age=0; Path=/" });
+    return response.end();
   }
   if (parts[0] === "accounts" && parts.length === 1) {
-    return send(response, 200, { seq: model.seq, accounts: model.accounts.map((item) => summary(model, item)) });
+    return send(response, 200, overview(model));
   }
   if (parts[0] === "accounts") {
     return control(request, response, parts.slice(1));
@@ -169,6 +188,7 @@ server.on("upgrade", (request, socket) => {
   }
   const feed = accept(request, socket, () => feeds.delete(feed));
   feeds.add(feed);
+  feed.send(JSON.stringify({ type: "snapshot", ...overview(model) }));
 });
 
 setInterval(() => {

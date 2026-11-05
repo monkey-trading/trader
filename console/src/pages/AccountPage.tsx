@@ -1,7 +1,7 @@
 /** One account: figures, controls, equity curve, strategies, positions, orders and fills. */
 import { useEffect, type ReactNode } from "react";
 
-import type { AccountDetail } from "@/api/types";
+import type { Figures } from "@/api/types";
 import { AccountControls } from "@/components/AccountControls";
 import { useLive, useServices } from "@/components/app-context";
 import { EquityCurve } from "@/components/EquityCurve";
@@ -10,7 +10,9 @@ import { PageTitle } from "@/components/PageTitle";
 import { Pnl } from "@/components/Pnl";
 import { FillsTable, OrdersTable, PositionsTable } from "@/components/PositionsTable";
 import { StrategyCard } from "@/components/StrategyCard";
-import { formatDecimal, formatRatioPercent, formatUsdc } from "@/lib/format";
+import { keyOf } from "@/api/live-state";
+import { formatBpsPercent, formatMonkey, formatUsdc, shortAddress } from "@/lib/format";
+import { symbolsOf } from "@/lib/markets";
 
 /** A labelled figure. */
 function Figure({ label, children }: { readonly label: string; readonly children: ReactNode }) {
@@ -23,57 +25,77 @@ function Figure({ label, children }: { readonly label: string; readonly children
 }
 
 /** The account's figures as a description list. */
-function Figures({ account }: { readonly account: AccountDetail }) {
+function FigureList({ figures }: { readonly figures: Figures }) {
+  const { monkey } = figures;
   return (
     <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-      <Figure label="Equity (USDC)">{formatUsdc(account.equity)}</Figure>
-      <Figure label="Balance (USDC)">{formatUsdc(account.balance)}</Figure>
-      <Figure label="Realised P&L (USDC)"><Pnl value={account.realisedPnl} /></Figure>
-      <Figure label="Unrealised P&L (USDC)"><Pnl value={account.unrealisedPnl} /></Figure>
-      <Figure label="Margin level">{account.marginLevel === null ? "—" : formatRatioPercent(account.marginLevel)}</Figure>
-      <Figure label="Open positions">{account.openPositions}</Figure>
-      <Figure label="MONKEY earned">{formatDecimal(account.monkeyEarned, 2)}</Figure>
-      <Figure label="MONKEY claimed">{formatDecimal(account.monkeyClaimed, 2)}</Figure>
+      <Figure label="Equity (USDC)">{formatUsdc(figures.equity)}</Figure>
+      <Figure label="Balance (USDC)">{formatUsdc(figures.balance)}</Figure>
+      <Figure label="Realised P&L (USDC)"><Pnl value={figures.realisedPnl} /></Figure>
+      <Figure label="Unrealised P&L (USDC)"><Pnl value={figures.unrealisedPnl} /></Figure>
+      <Figure label="Margin level">{figures.marginLevelBps === null ? "—" : formatBpsPercent(figures.marginLevelBps)}</Figure>
+      <Figure label="Margin required (USDC)">{formatUsdc(figures.margin)}</Figure>
+      <Figure label="MONKEY earned">{formatMonkey(monkey.newestEntitled)}</Figure>
+      <Figure label="MONKEY claimable now">{formatMonkey(monkey.entitled)}</Figure>
+      <Figure label="MONKEY claimed">{monkey.claimed === null ? "Not read yet" : formatMonkey(monkey.claimed)}</Figure>
     </dl>
+  );
+}
+
+/** A section with its heading. */
+function Section({ id, title, children }: { readonly id: string; readonly title: string; readonly children: ReactNode }) {
+  return (
+    <section aria-labelledby={id}>
+      <h2 id={id} className="mb-2 text-xl font-semibold">{title}</h2>
+      {children}
+    </section>
   );
 }
 
 /** The page of the account at `address`. */
 export function AccountPage({ address }: { readonly address: string }) {
   const { live } = useServices();
-  const { details, detailFailures, connection } = useLive();
+  const { accounts, fills, fillFailures, loaded, connection } = useLive();
   useEffect(() => live.track(address), [live, address]);
-  const account = details.get(address);
-  const failure = detailFailures.get(address);
+  const key = keyOf(address);
+  const account = accounts.find((candidate) => keyOf(candidate.address) === key);
+  const accountFills = fills.get(key) ?? [];
+  const failure = fillFailures.get(key);
 
   return (
     <>
       <p className="mb-2"><Link to="/">All accounts</Link></p>
-      <PageTitle>{account?.name ?? "Account"}</PageTitle>
+      <PageTitle>{account === undefined ? "Account" : shortAddress(account.address)}</PageTitle>
       {account === undefined ? (
-        <p className={failure === undefined ? "text-muted" : "text-loss"}>
-          {failure === undefined ? "Loading account…" : `This account could not be read: ${failure}`}
-        </p>
+        <p className="text-muted">{loaded ? "The bot has no such account." : "Loading account…"}</p>
       ) : (
         <div className={`flex flex-col gap-6 ${connection === "live" ? "" : "opacity-70"}`}>
           <p className="break-all text-sm text-muted">
             {account.address} · {account.state}
-            {account.stateReason === null ? "" : ` (${account.stateReason})`}
+            {account.halt === null ? "" : ` (${account.halt})`}
           </p>
+          {account.error === null ? null : <p className="text-loss">{`The last read of the node failed: ${account.error}`}</p>}
           <AccountControls account={account} />
-          <Figures account={account} />
-          <section aria-labelledby="curve"><h2 id="curve" className="mb-2 text-xl font-semibold">Equity</h2><EquityCurve points={account.curve} /></section>
-          <section aria-labelledby="strategies">
-            <h2 id="strategies" className="mb-2 text-xl font-semibold">Strategies</h2>
+          {account.figures === null ? <p className="text-muted">The bot has not read this account's figures yet.</p> : <FigureList figures={account.figures} />}
+          <Section id="curve" title="Equity"><EquityCurve points={account.curve} /></Section>
+          <Section id="strategies" title="Strategies">
             <div className="grid gap-3 md:grid-cols-2">
               {account.strategies.map((strategy) => (
                 <StrategyCard key={strategy.id} address={account.address} strategy={strategy} />
               ))}
             </div>
-          </section>
-          <section aria-labelledby="positions"><h2 id="positions" className="mb-2 text-xl font-semibold">Positions</h2><PositionsTable positions={account.positions} /></section>
-          <section aria-labelledby="orders"><h2 id="orders" className="mb-2 text-xl font-semibold">Orders</h2><OrdersTable orders={account.orders} /></section>
-          <section aria-labelledby="fills"><h2 id="fills" className="mb-2 text-xl font-semibold">Fills</h2><FillsTable fills={account.fills} /></section>
+          </Section>
+          <Section id="positions" title="Positions"><PositionsTable positions={account.figures?.positions ?? []} /></Section>
+          <Section id="orders" title="Orders">
+            <OrdersTable
+              orders={account.figures?.orders ?? []}
+              symbols={symbolsOf(account.figures?.positions ?? [], accountFills)}
+            />
+          </Section>
+          <Section id="fills" title="Fills">
+            {failure === undefined ? null : <p className="mb-2 text-loss">{`Fills could not be read: ${failure}`}</p>}
+            <FillsTable fills={accountFills} />
+          </Section>
         </div>
       )}
     </>

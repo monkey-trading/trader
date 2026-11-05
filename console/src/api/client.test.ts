@@ -1,6 +1,6 @@
 /** Tests of the API client over a stand-in fetch. */
 import { createApi, routes } from "./client";
-import { detailBody } from "./fixtures";
+import { fillBody, viewBody } from "./fixtures";
 
 /** A fetch that answers every call with `status`, `body` and `headers`, and records what it was asked. */
 function fakeFetch(status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -13,11 +13,15 @@ function fakeFetch(status: number, body: unknown, headers: Record<string, string
 }
 
 describe("createApi", () => {
-  it("sends a JSON POST with the cookie and no key or token of its own", async () => {
-    const { fetchFn, calls } = fakeFetch(200, { seq: 2, account: detailBody() });
+  it("sends a JSON POST with the cookie, and a 204 is success", async () => {
+    const fetchFn = (path: string, init?: RequestInit) => {
+      calls.push({ path, init });
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+    const calls: { path: string; init: RequestInit | undefined }[] = [];
     const outcome = await createApi(fetchFn).flatten("0xabc");
 
-    expect(outcome.status).toBe("ok");
+    expect(outcome).toEqual({ status: "ok", value: null });
     expect(calls).toEqual([
       {
         path: "/api/accounts/0xabc/flatten",
@@ -26,50 +30,55 @@ describe("createApi", () => {
     ]);
   });
 
-  it("sends integer parameters as numbers in a PUT", async () => {
-    const { fetchFn, calls } = fakeFetch(200, { seq: 2, account: detailBody() });
-    await createApi(fetchFn).setParams("0xabc", "s 1", { fast: 5, width: "1.5" });
+  it("puts the periods as the body of a PUT, with the strategy's numeric id in the path", async () => {
+    const { fetchFn, calls } = fakeFetch(204, null);
+    await createApi(fetchFn).setParams("0xabc", 0, { fast: 5, slow: 20 });
 
-    expect(calls[0]?.path).toBe("/api/accounts/0xabc/strategies/s%201/params");
+    expect(calls[0]?.path).toBe("/api/accounts/0xabc/strategies/0/params");
     expect(calls[0]?.init?.method).toBe("PUT");
-    expect(calls[0]?.init?.body).toBe('{"params":{"fast":5,"width":"1.5"}}');
+    expect(calls[0]?.init?.body).toBe('{"fast":5,"slow":20}');
+  });
+
+  it("reads an account and its fills through their parsers", async () => {
+    expect((await createApi(fakeFetch(200, viewBody()).fetchFn).account("0xabc")).status).toBe("ok");
+    const fills = await createApi(fakeFetch(200, { fills: [fillBody()] }).fetchFn).fills("0xabc");
+    expect(fills.status === "ok" && fills.value.length).toBe(1);
   });
 
   it("reports a 401 as an ended session", async () => {
-    const { fetchFn } = fakeFetch(401, { error: "sign in" });
-    expect(await createApi(fetchFn).accounts()).toEqual({ status: "unauthenticated" });
+    const { fetchFn } = fakeFetch(401, { error: "log in first" });
+    expect(await createApi(fetchFn).session()).toEqual({ status: "unauthenticated" });
   });
 
   it("carries the bot's reason and Retry-After on a refusal", async () => {
-    const { fetchFn } = fakeFetch(429, { error: "Too many login attempts." }, { "Retry-After": "30" });
+    const { fetchFn } = fakeFetch(429, { error: "too many attempts; try again later" }, { "Retry-After": "30" });
     expect(await createApi(fetchFn).login("x")).toEqual({
-      status: "refused", message: "Too many login attempts.", retryAfterSeconds: 30,
+      status: "refused", message: "too many attempts; try again later", retryAfterSeconds: 30,
     });
   });
 
   it("falls back to the status when a refusal has no readable body", async () => {
-    const fetchFn = () => Promise.resolve(new Response("<html>", { status: 400 }));
+    const fetchFn = () => Promise.resolve(new Response("<html>", { status: 422 }));
     expect(await createApi(fetchFn).flatten("0xabc")).toEqual({
-      status: "refused", message: "The bot refused the request (status 400).", retryAfterSeconds: null,
+      status: "refused", message: "The bot refused the request (status 422).", retryAfterSeconds: null,
     });
   });
 
   it("treats a server error and a dead connection as unavailable", async () => {
-    const { fetchFn } = fakeFetch(503, { error: "engine unavailable" });
-    expect(await createApi(fetchFn).accounts()).toEqual({ status: "unavailable", message: "engine unavailable" });
+    const { fetchFn } = fakeFetch(504, { error: "the account has not answered yet; it may still act on the request" });
+    expect((await createApi(fetchFn).flatten("0xabc")).status).toBe("unavailable");
     const dead = () => Promise.reject(new TypeError("network"));
-    expect(await createApi(dead).accounts()).toEqual({ status: "unavailable", message: "The bot did not answer." });
+    expect(await createApi(dead).session()).toEqual({ status: "unavailable", message: "The bot did not answer." });
   });
 
   it("treats a success body that fails its check as unavailable, never as data", async () => {
-    const { fetchFn } = fakeFetch(200, { seq: 1, accounts: [{ address: "0x1" }] });
-    const outcome = await createApi(fetchFn).accounts();
-    expect(outcome.status).toBe("unavailable");
+    const { fetchFn } = fakeFetch(200, { address: "0x1" });
+    expect((await createApi(fetchFn).account("0x1")).status).toBe("unavailable");
   });
 });
 
 describe("routes", () => {
-  it("encodes path parts so an id cannot change the route", () => {
-    expect(routes.strategyRun("0xa", "../x", "stop")).toBe("/api/accounts/0xa/strategies/..%2Fx/stop");
+  it("encodes the address so it cannot change the route", () => {
+    expect(routes.accountRun("0xa/../b", "stop")).toBe("/api/accounts/0xa%2F..%2Fb/stop");
   });
 });

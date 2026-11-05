@@ -1,51 +1,75 @@
-/** Bodies shaped as the bot serves them, for the tests of the parsers, stores and pages. */
+/** Bodies shaped as the bot's console API serves them, for the tests of the parsers, stores and pages. */
 
-/** One account's figures. */
-export function summaryBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+/** The address the fixtures' account has. */
+export const ADDRESS = `0x${"11".repeat(20)}`;
+
+/** An account's figures. */
+export function figuresBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    address: `0x${"11".repeat(20)}`,
-    name: "alpha",
-    state: "running",
-    stateReason: null,
     balance: "10000",
     equity: "10100.5",
-    realisedPnl: "-3.25",
-    unrealisedPnl: "100.75",
-    marginLevel: "33.5",
-    openPositions: 1,
-    monkeyEarned: "12.5",
-    monkeyClaimed: "5",
+    margin: "50",
+    margin_level_bps: 202_100,
+    unrealised_pnl: "100.5",
+    realised_pnl: "-3.25",
+    positions: [
+      { market: 1, symbol: "BTC-USD", qty: "0.1", entry: "60000", mark: "61000", unrealised_pnl: "100", closeout: "48000" },
+    ],
+    orders: [{ order_id: 9, client_id: 1, market: 2, side: "buy", qty: "1", kind: { kind: "limit", price: "50" }, reduce_only: false }],
+    monkey: { entitled: "5000000000000000000", newest_entitled: "12500000000000000000", claimed: null },
+    time_ms: 1_700_000_000_000,
     ...overrides,
   };
 }
 
-/** The lists and strategies of an account. */
-export function liveBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+/** One account as the API shows it. */
+export function viewBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    ...summaryBody(),
-    positions: [{ market: "BTC-USD", qty: "0.1", entry: "60000", mark: "61000", unrealisedPnl: "100", closeout: "48000" }],
-    orders: [{ orderId: "7", market: "ETH-USD", side: "buy", qty: "1", price: null, reduceOnly: false }],
+    address: ADDRESS,
+    state: "running",
+    halt: null,
     strategies: [
       {
-        id: "alpha-sma", kind: "sma_crossover", market: "BTC-USD", bar: "1m", state: "running", reason: null,
-        params: [{ name: "fast", kind: "integer", value: "5", min: "2", max: "50" }],
+        id: 0, kind: "sma_crossover", market: "BTC-USD", bar: "1m", running: true,
+        params: { fast: 5, slow: 20 }, bounds: { fast: [2, 50], slow: [5, 200] }, warmed_up: true, target: "long",
       },
+    ],
+    figures: figuresBody(),
+    error: null,
+    curve: [
+      { time_ms: 1_700_000_000_000, equity: "10000" },
+      { time_ms: 1_700_000_060_000, equity: "10100.5" },
     ],
     ...overrides,
   };
 }
 
-/** An account's whole page. */
-export function detailBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+/** The totals over the fixtures' one account. */
+export function totalsBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    ...liveBody(),
-    fills: [
-      { id: "f1", time: 1_700_000_000_000, market: "BTC-USD", side: "buy", qty: "0.1", price: "60000", fee: "0.5", realisedPnl: "0" },
-    ],
-    curve: [
-      { time: 1_700_000_000_000, equity: "10000" },
-      { time: 1_700_000_060_000, equity: "10100.5" },
-    ],
+    accounts: 1,
+    reporting: 1,
+    balance: "10000",
+    equity: "10100.5",
+    margin: "50",
+    margin_level_bps: 202_100,
+    unrealised_pnl: "100.5",
+    realised_pnl: "-3.25",
+    monkey: { entitled: "5000000000000000000", newest_entitled: "12500000000000000000", claimed: null },
     ...overrides,
+  };
+}
+
+/** `GET /api/accounts`, and the feed's snapshot besides its type. */
+export function overviewBody(accounts: readonly Record<string, unknown>[] = [viewBody()], totals = totalsBody()): Record<string, unknown> {
+  return { accounts, totals };
+}
+
+/** A fill as the API serves it. */
+export function fillBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    cursor: "30:0", ts: 1_700_000_000_000, account: ADDRESS, order_id: 1, market: 1, side: "sell", qty: "0.1",
+    price: "61000", index: "61000", spread_bps: 0, realised_pnl: "10", profit_fee: "1", position: "0",
+    liquidation: false, symbol: "BTC-USD", ...overrides,
   };
 }
