@@ -28,13 +28,24 @@ pub fn own_close(seq: u64, ts: i64, body: &Value) -> Value {
     command(seq, ts, cmd, json!([fill]))
 }
 
-/// How many requests the stand-in has seen, after letting the bot catch up with the log.
+/// How many requests the stand-in has seen, after letting the bot catch up with the log and finish what
+/// the log started: a decision waits for a read of the account, a saved state and a nonce before its
+/// order leaves, so the count is taken once the bot's requests have stopped for a while.
 pub async fn posts_after_settling(stand_in: &StandIn) -> usize {
     let last = stand_in.with(|i| i.log.last().map(|(offset, _)| *offset));
     if let Some(last) = last {
         stand_in.applied(last).await;
     }
-    stand_in.with(|i| i.posts.len())
+    let seen = |i: &mut super::Inner| (i.posts.len(), i.account_reads, i.nonce_reads);
+    let mut before = stand_in.with(seen);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let now = stand_in.with(seen);
+        if now == before {
+            return now.0;
+        }
+        before = now;
+    }
 }
 
 /// The state file the bot keeps for the test account.
