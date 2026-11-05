@@ -90,6 +90,10 @@ impl Fleet {
             (Target::Long, 1) | (Target::Short, -1) | (Target::Flat, 0)
         );
         let account = asg.account;
+        // A newer bar's target replaces an order queued for an older one, whether it asks for a move or not.
+        if at_target {
+            asg.pending = None;
+        }
         if self.accounts[account as usize].failed.is_some() || at_target {
             return;
         }
@@ -172,6 +176,11 @@ impl Fleet {
         if acc.failed.is_some() {
             return;
         }
+        // A target restored after a wait for a read can be past the lag orders may go at: not decided.
+        if self.log_ts.saturating_sub(w.ts) > REPLAY_LAG_MS {
+            debug!(account = %acc.address, market, "the target is history by now: no order");
+            return;
+        }
         // The account's limits are checked against the positions the log gives, so an order of another
         // of its markets that is queued, or may not be in the log yet, is waited for: the target is
         // decided again when that order is answered or its fill is read.
@@ -237,7 +246,7 @@ impl Fleet {
                 }
                 let epoch = self.accounts[idx as usize].epoch;
                 let asg = &mut self.assignments[a as usize];
-                asg.pending = Some(Pending { intent, bar_start: w.bar_start, ts: w.ts, epoch, wanted: w });
+                asg.pending = Some(Pending { intent, epoch, wanted: w });
                 self.decisions += 1;
                 if !asg.queued {
                     asg.queued = true;
@@ -272,7 +281,7 @@ impl Fleet {
 
     /// Drops the order assignment `a` has queued, and asks for a read if a target of its account waits.
     /// With `again`, its own target waits too, to be decided on the account as it now is.
-    pub(super) fn drop_pending(&mut self, a: u32, again: bool) {
+    pub fn drop_pending(&mut self, a: u32, again: bool) {
         let asg = &mut self.assignments[a as usize];
         if let (true, Some(pending), None) = (again, asg.pending, asg.wanted) {
             asg.wanted = Some(pending.wanted);

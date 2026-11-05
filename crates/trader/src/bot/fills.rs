@@ -235,9 +235,7 @@ mod tests {
 
     use super::{CASH_EVENTS, KNOWN_EVENTS};
 
-    /// Every kind the bot skips unread is a variant the pinned engine writes: the engine's reading of
-    /// `{"type": kind}` fails for a missing field of the variant, never as an unknown variant (the
-    /// unit variants read whole).
+    /// Every kind that moves cash is one the bot knows the pinned engine writes.
     #[test]
     fn every_cash_event_kind_is_a_known_one() {
         for kind in CASH_EVENTS {
@@ -245,7 +243,9 @@ mod tests {
         }
     }
 
-    /// Every kind the bot skips unread is a variant the pinned engine writes (see below).
+    /// Every kind the bot skips unread is a variant the pinned engine writes: the engine's reading of
+    /// `{"type": kind}` fails for a missing field of the variant, never as an unknown variant (the
+    /// unit variants read whole).
     #[test]
     fn every_known_event_kind_is_the_pinned_engines() {
         for kind in KNOWN_EVENTS {

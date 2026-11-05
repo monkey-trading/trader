@@ -85,7 +85,7 @@ impl Runner {
         if self.out >= self.cap || account.busy {
             return true;
         }
-        if node_ms.saturating_sub(pending.ts) > REPLAY_LAG_MS {
+        if node_ms.saturating_sub(pending.wanted.ts) > REPLAY_LAG_MS {
             self.stale_dropped += 1;
             fleet.drop_pending(a, false);
             return false;
@@ -95,7 +95,8 @@ impl Runner {
         // is decided again once the account is read.
         let stopped = account.controls.is_stopped() || account.flatten_queued;
         if stopped || account.behind || account.epoch != pending.epoch {
-            info!(account = %account.address, market = asg.market, "the account changed since the order was decided: no order");
+            info!(account = %account.address, market = asg.market, stopped, behind = account.behind,
+                again = !stopped, "the account changed since the order was decided: it is dropped, and its target decided again unless the account is stopped");
             fleet.drop_pending(a, !stopped);
             return false;
         }
@@ -144,7 +145,7 @@ impl Runner {
             }
         };
         // Bar starts are positive milliseconds since the epoch, one per bar.
-        let client_id = u64::try_from(pending.bar_start).unwrap_or_default();
+        let client_id = u64::try_from(pending.wanted.bar_start).unwrap_or_default();
         let expires_at = node_ms.saturating_add(EXPIRES_IN_MS);
         let mut request = OrderRequest {
             account: account.address,

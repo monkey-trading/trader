@@ -107,7 +107,7 @@ fn a_newer_decision_replaces_a_queued_one_in_place() {
     apply(&mut fleet, seq + 1, T0 + 3 * MINUTE, &tick(seq + 1, T0 + 3 * MINUTE));
     settle(&mut fleet);
     assert_eq!(fleet.queue.iter().copied().collect::<Vec<_>>(), before);
-    assert!(fleet.assignments.iter().all(|a| a.pending.is_some_and(|p| p.bar_start == T0 + 2 * MINUTE)));
+    assert!(fleet.assignments.iter().all(|a| a.pending.is_some_and(|p| p.wanted.bar_start == T0 + 2 * MINUTE)));
     assert_eq!(fleet.assignments[0].pending.unwrap().intent.side, engine_core::types::Side::Sell, "short");
 }
 
@@ -337,5 +337,61 @@ fn a_relisting_stops_only_the_accounts_it_concerns() {
     assert!(fleet.accounts[0].failed.is_some(), "the cap above the market's own stops its account");
     assert!(fleet.accounts[1].failed.is_none(), "the other account goes on");
     assert_eq!(fleet.markets[0].spec.margin_tiers[0].bps, 1000, "the market takes its new listing");
-    assert!(fleet.accounts.iter().all(|a| a.epoch == 1), "an order decided under the old listing is not sent");
+    assert!(fleet.accounts.iter().all(|a| a.epoch == 1), "the relisting moved every account's epoch");
+}
+
+/// A fill and a cash event move the epoch of their account alone, so an order decided before is not sent.
+#[test]
+fn fills_and_cash_events_move_only_their_accounts_epoch() {
+    let (mut fleet, seq) = warmed(3);
+    settle(&mut fleet);
+    fleet.accounts[1].signed.push_back(signature("55").parse().unwrap());
+    let address = fleet.accounts[1].address.to_string();
+    let ts = T0 + MINUTE;
+    apply(&mut fleet, seq, ts, &order_fill(seq, ts, &address, &signature("55"), 1, "1"));
+    assert_eq!(fleet.accounts.iter().map(|a| a.epoch).collect::<Vec<_>>(), [0, 1, 0]);
+    let address = fleet.accounts[2].address.to_string();
+    let event = format!(r#"{{"type":"financing","account":"{address}","market":1,"amount":"-1"}}"#);
+    fleet
+        .apply(
+            &command(seq + 1, ts, r#"{"type":"tick"}"#, &format!("[{event}]")),
+            at(seq + 1),
+            u64::try_from(ts + 50).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(fleet.accounts.iter().map(|a| a.epoch).collect::<Vec<_>>(), [0, 1, 1]);
+}
+
+/// An order dropped because its account changed keeps its target, to be decided on a read of the account;
+/// one dropped because the account is stopped does not, and a newer target takes precedence.
+#[test]
+fn a_dropped_order_keeps_its_target_unless_the_account_stopped() {
+    let (mut fleet, seq) = warmed(3);
+    go_long(&mut fleet, seq);
+    assert!(fleet.assignments.iter().all(|a| a.pending.is_some() && a.wanted.is_none()));
+    let target = fleet.assignments[0].pending.unwrap().wanted.target;
+    fleet.drop_pending(0, true);
+    assert!(fleet.assignments[0].pending.is_none());
+    assert_eq!(fleet.assignments[0].wanted.map(|w| w.target), Some(target), "decided again at the next read");
+    assert_eq!(fleet.reads.iter().copied().collect::<Vec<_>>(), [0], "and the account is read");
+    fleet.drop_pending(1, false);
+    assert!(fleet.assignments[1].wanted.is_none(), "a stopped account's target is not restored");
+    // A newer target waiting is not replaced by the dropped order's older one.
+    let newer = fleet.assignments[2].pending.unwrap().wanted;
+    fleet.assignments[2].wanted = Some(trader::bot::fleet::Wanted { bar_start: newer.bar_start + MINUTE, ..newer });
+    fleet.drop_pending(2, true);
+    assert_eq!(fleet.assignments[2].wanted.map(|w| w.bar_start), Some(newer.bar_start + MINUTE));
+}
+
+/// A newer bar that finds the position at its target replaces an order queued for an older bar.
+#[test]
+fn a_bar_at_its_target_drops_the_order_queued_for_an_older_one() {
+    let (mut fleet, seq) = warmed(1);
+    go_long(&mut fleet, seq);
+    assert!(fleet.assignments[0].pending.is_some());
+    // The position is already where the next bar wants it.
+    fleet.assignments[0].position = "1".parse().unwrap();
+    let seq = seq + 2;
+    apply(&mut fleet, seq, T0 + 3 * MINUTE, &prices(seq, T0 + 3 * MINUTE, 1, "103"));
+    assert!(fleet.assignments[0].pending.is_none());
 }

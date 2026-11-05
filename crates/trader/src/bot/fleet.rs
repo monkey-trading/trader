@@ -171,12 +171,10 @@ pub struct Wanted {
     pub gap: bool,
 }
 
-/// An order to send, decided at `ts` for the bar starting at `bar_start`.
+/// An order to send, decided for a bar (`wanted` names it and the command that completed it).
 #[derive(Clone, Copy, Debug)]
 pub struct Pending {
     pub intent: OrderIntent,
-    pub bar_start: Millis,
-    pub ts: Millis,
     /// The account's `epoch` when the order was decided.
     pub epoch: u64,
     /// The target it was decided from, to decide again if the account changes before it is sent.
