@@ -1,7 +1,8 @@
 /** Tests of the pure book steps. */
-import { ADDRESS, fillBody, overviewBody, totalsBody, viewBody } from "./fixtures";
-import { CURVE_CAP, EMPTY_BOOK, FILL_CAP, keyOf, withMessage, withSnapshot } from "./live-state";
+import { ADDRESS, FULL_CURVE, fillBody, overviewBody, totalsBody, viewBody } from "./fixtures";
+import { CURVE_CAP, CURVE_WINDOW_MS, EMPTY_BOOK, FILL_CAP, keyOf, mergeCurve, withAccount, withMessage, withSnapshot } from "./live-state";
 import { readAccount, readFills, readLiveMessage, readOverview } from "./parsers";
+import type { CurvePoint } from "./types";
 
 const OTHER = `0x${"22".repeat(20)}`;
 const overview = (...accounts: Record<string, unknown>[]) => readOverview(overviewBody(accounts, totalsBody()));
@@ -24,11 +25,36 @@ describe("withSnapshot", () => {
     expect(withSnapshot(held, overview(viewBody())).fills.get(ADDRESS)).toHaveLength(1);
   });
 
-  it("caps an account's curve to the newest points", () => {
-    const long = Array.from({ length: CURVE_CAP + 3 }, (_, i) => ({ time_ms: i, equity: "1" }));
-    const book = withSnapshot(EMPTY_BOOK, overview(viewBody({ curve: long })));
-    const curve = book.accounts.get(ADDRESS)?.curve ?? [];
-    expect([curve.length, curve[0]?.timeMs]).toEqual([CURVE_CAP, 3]);
+  it("starts an account's curve from the newest point the snapshot carries and keeps one it already had", () => {
+    const first = withSnapshot(EMPTY_BOOK, overview(viewBody({ curve: [{ time_ms: 1000, equity: "1" }] })));
+    const second = withSnapshot(first, overview(viewBody({ curve: [{ time_ms: 2000, equity: "2" }] })));
+    expect(first.curves.get(ADDRESS)).toEqual([{ timeMs: 1000, equity: "1" }]);
+    expect(second.curves.get(ADDRESS)?.map((p) => p.timeMs)).toEqual([1000, 2000]);
+    expect(withSnapshot(second, overview(viewBody({ address: OTHER }))).curves.has(ADDRESS)).toBe(false);
+  });
+});
+
+describe("mergeCurve", () => {
+  const point = (timeMs: number, equity = "1"): CurvePoint => ({ timeMs, equity });
+
+  it("keeps one point per time, the incoming one winning, oldest first", () => {
+    expect(mergeCurve([point(2, "old"), point(1)], [point(3), point(2, "new")])).toEqual([point(1), point(2, "new"), point(3)]);
+  });
+
+  it("returns the held curve itself when nothing arrives", () => {
+    const held = [point(1)];
+    expect(mergeCurve(held, [])).toBe(held);
+  });
+
+  it("trims to 24 hours before the newest point, the boundary point staying", () => {
+    const newest = 10 * CURVE_WINDOW_MS;
+    const merged = mergeCurve([point(newest - CURVE_WINDOW_MS - 1), point(newest - CURVE_WINDOW_MS)], [point(newest)]);
+    expect(merged.map((p) => p.timeMs)).toEqual([newest - CURVE_WINDOW_MS, newest]);
+  });
+
+  it("keeps at most the cap, dropping the oldest", () => {
+    const merged = mergeCurve([], Array.from({ length: CURVE_CAP + 3 }, (_, i) => point(i)));
+    expect([merged.length, merged[0]?.timeMs]).toEqual([CURVE_CAP, 3]);
   });
 });
 
@@ -56,6 +82,20 @@ describe("withMessage", () => {
   it("takes new totals", () => {
     const next = withMessage(held, readLiveMessage({ type: "totals", totals: totalsBody({ equity: "7" }) }));
     expect(next.totals?.equity).toBe("7");
+  });
+
+  it("appends the point of an account message to the curve, once however often it repeats", () => {
+    const message = readLiveMessage({ type: "account", account: viewBody({ curve: [{ time_ms: 1_700_000_180_000, equity: "9" }] }) });
+    const once = withMessage(held, message);
+    const twice = withMessage(once, message);
+    expect(twice.curves.get(ADDRESS)?.map((p) => p.timeMs)).toEqual([1_700_000_120_000, 1_700_000_180_000]);
+    expect(twice.curves.get(ADDRESS)).toHaveLength(once.curves.get(ADDRESS)?.length ?? -1);
+  });
+
+  it("merges a full read's curve with the points the feed brought before it", () => {
+    const full = readAccount(viewBody({ curve: FULL_CURVE }));
+    const next = withAccount(withMessage(held, readLiveMessage({ type: "account", account: viewBody({ curve: [{ time_ms: 1_700_000_180_000, equity: "10200" }] }) })), full);
+    expect(next.curves.get(ADDRESS)?.map((p) => p.timeMs)).toEqual([1_700_000_000_000, 1_700_000_060_000, 1_700_000_120_000, 1_700_000_180_000]);
   });
 
   it("takes a snapshot message as a snapshot", () => {

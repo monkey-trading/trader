@@ -111,8 +111,8 @@ function figures(model, item) {
   };
 }
 
-/** One account as the API shows it. */
-export function view(model, item) {
+/** One account as the API shows it: the account read carries the whole curve, every other answer its newest point. */
+export function view(model, item, whole = false) {
   return {
     address: item.address,
     state: item.state,
@@ -120,7 +120,7 @@ export function view(model, item) {
     strategies: [item.strategy],
     figures: figures(model, item),
     error: null,
-    curve: item.curve,
+    curve: whole ? item.curve : item.curve.slice(-1),
   };
 }
 

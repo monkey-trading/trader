@@ -35,11 +35,12 @@ describe("strategy controls", () => {
   it("reads the account again after a stop and shows the state the bot gives", async () => {
     const api = stubApi();
     const stopped = readAccount(viewBody({ strategies: [{ ...readStrategyBody(), running: false }] }));
-    api.account.mockResolvedValue({ status: "ok", value: stopped });
     const user = userEvent.setup();
     mount(api, PAGE);
 
-    await user.click(await screen.findByRole("button", { name: "Stop strategy" }));
+    const stop = await screen.findByRole("button", { name: "Stop strategy" });
+    api.account.mockResolvedValue({ status: "ok", value: stopped });
+    await user.click(stop);
 
     expect(await screen.findByRole("button", { name: "Start strategy" })).toBeInTheDocument();
     expect(screen.getByText("Stopped")).toBeInTheDocument();
@@ -65,18 +66,19 @@ describe("strategy controls", () => {
 describe("account controls", () => {
   it("stops the account and shows the state the bot gives", async () => {
     const api = stubApi();
-    api.account.mockResolvedValue(STOPPED);
     const user = userEvent.setup();
     mount(api, PAGE);
 
-    await user.click(await screen.findByRole("button", { name: "Stop account" }));
+    const stop = await screen.findByRole("button", { name: "Stop account" });
+    api.account.mockResolvedValue(STOPPED);
+    await user.click(stop);
 
     expect(api.setAccountRunning).toHaveBeenCalledExactlyOnceWith(ADDRESS, false);
     expect(await screen.findByRole("button", { name: "Start account" })).toBeInTheDocument();
   });
 
   it("offers no control to an account that is starting, flattening or halted", async () => {
-    mount(stubApi(), PAGE, overviewBody([viewBody({ state: "halted", halt: "an answer was signed by another key" })]));
+    mount(stubApi(overviewBody([viewBody({ state: "halted", halt: "an answer was signed by another key" })])), PAGE);
 
     expect(await screen.findByText(/The account stopped on its own/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /account$/ })).not.toBeInTheDocument();
@@ -84,14 +86,15 @@ describe("account controls", () => {
 
   it("flattens only after a second press, which a keyboard reaches and can cancel", async () => {
     const api = stubApi();
+    const user = userEvent.setup();
+    mount(api, PAGE);
+
+    const flatten = await screen.findByRole("button", { name: "Flatten account" });
     api.account.mockResolvedValue({
       status: "ok",
       value: readAccount(viewBody({ state: "stopped", figures: figuresBody({ positions: [] }) })),
     });
-    const user = userEvent.setup();
-    mount(api, PAGE);
-
-    await user.click(await screen.findByRole("button", { name: "Flatten account" }));
+    await user.click(flatten);
     expect(api.flatten).not.toHaveBeenCalled();
     await waitFor(() => { expect(screen.getByRole("button", { name: "Confirm flatten" })).toHaveFocus(); });
 
@@ -163,7 +166,7 @@ describe("parameter form", () => {
 
   it("shows the periods read-only when the config sets no bounds", async () => {
     const strategy = { ...readStrategyBody(), bounds: null };
-    mount(stubApi(), PAGE, overviewBody([viewBody({ strategies: [strategy] })]));
+    mount(stubApi(overviewBody([viewBody({ strategies: [strategy] })])), PAGE);
 
     expect(await screen.findByText(/fast 5, slow 20/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save parameters" })).not.toBeInTheDocument();

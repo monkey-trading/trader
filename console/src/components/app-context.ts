@@ -2,7 +2,8 @@
 import { createContext, use, useSyncExternalStore } from "react";
 
 import type { Api } from "@/api/client";
-import type { LiveSnapshot, LiveStore } from "@/api/live-store";
+import type { LiveStore } from "@/api/live-store";
+import type { LiveSnapshot } from "@/api/live-types";
 import type { SessionStatus, SessionStore } from "@/api/session-store";
 
 /** Everything a component may need from outside React. */

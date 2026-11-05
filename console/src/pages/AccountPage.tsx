@@ -55,7 +55,7 @@ function Section({ id, title, children }: { readonly id: string; readonly title:
 /** The page of the account at `address`. */
 export function AccountPage({ address }: { readonly address: string }) {
   const { live } = useServices();
-  const { accounts, fills, fillFailures, loaded, connection } = useLive();
+  const { accounts, curves, fills, fillFailures, loaded, connection } = useLive();
   useEffect(() => live.track(address), [live, address]);
   const key = keyOf(address);
   const account = accounts.find((candidate) => keyOf(candidate.address) === key);
@@ -77,7 +77,7 @@ export function AccountPage({ address }: { readonly address: string }) {
           {account.error === null ? null : <p className="text-loss">{`The last read of the node failed: ${account.error}`}</p>}
           <AccountControls account={account} />
           {account.figures === null ? <p className="text-muted">The bot has not read this account's figures yet.</p> : <FigureList figures={account.figures} />}
-          <Section id="curve" title="Equity"><EquityCurve points={account.curve} /></Section>
+          <Section id="curve" title="Equity"><EquityCurve points={curves.get(key) ?? []} /></Section>
           <Section id="strategies" title="Strategies">
             <div className="grid gap-3 md:grid-cols-2">
               {account.strategies.map((strategy) => (

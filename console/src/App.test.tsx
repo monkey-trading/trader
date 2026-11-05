@@ -61,7 +61,7 @@ describe("App", () => {
 
   it("shows an account without figures as unavailable with the reason, and says the totals cover fewer", async () => {
     const overview = overviewBody([viewBody({ figures: null, error: "the node did not answer" })], totalsBody({ accounts: 2, reporting: 1 }));
-    mount(stubApi(), "/", overview);
+    mount(stubApi(overview));
 
     const table = await screen.findByRole("table", { name: "Accounts" });
     expect(within(table).getByText("Read failed: the node did not answer")).toBeInTheDocument();
@@ -80,7 +80,7 @@ describe("App", () => {
     expect(screen.getByRole("table", { name: "Open positions" })).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Resting orders" })).toBeInTheDocument();
     expect(await screen.findByRole("table", { name: "Recent fills" })).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: /^Equity now 10,100.50 USDC/ })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /^Equity now 10,100.50 USDC; lowest 10,000.00, highest 10,100.50 over 3 readings/ })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "SMA crossover on BTC-USD" })).toBeInTheDocument();
     expect(screen.getByText("MONKEY claimable now").nextSibling?.textContent).toBe("5.00");
   });
@@ -99,7 +99,7 @@ describe("App", () => {
   });
 
   it("shows the figures of an account whose address the route spells in another case", async () => {
-    mount(stubApi(), `/accounts/0x${"AB".repeat(20)}`, overviewBody([viewBody({ address: `0x${"ab".repeat(20)}` })]));
+    mount(stubApi(overviewBody([viewBody({ address: `0x${"ab".repeat(20)}` })])), `/accounts/0x${"AB".repeat(20)}`);
 
     expect(await screen.findByRole("img", { name: /^Equity now/ })).toBeInTheDocument();
   });

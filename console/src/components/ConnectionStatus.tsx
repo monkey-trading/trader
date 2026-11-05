@@ -1,5 +1,5 @@
 /** The connection state in the page frame; no figure is presented as live while the feed is down. */
-import type { Connection } from "@/api/live-store";
+import type { Connection } from "@/api/live-types";
 
 import { useLive } from "./app-context";
 

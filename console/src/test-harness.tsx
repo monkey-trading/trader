@@ -3,9 +3,10 @@ import { render } from "@testing-library/react";
 import { vi } from "vitest";
 
 import type { Api, Outcome } from "@/api/client";
-import { ADDRESS, fillBody, overviewBody, viewBody } from "@/api/fixtures";
-import { LiveStore, type FeedHandlers } from "@/api/live-store";
-import { readAccount, readFills } from "@/api/parsers";
+import { ADDRESS, FULL_CURVE, fillBody, overviewBody, viewBody } from "@/api/fixtures";
+import { LiveStore } from "@/api/live-store";
+import type { FeedHandlers } from "@/api/live-types";
+import { readAccount, readFills, readOverview } from "@/api/parsers";
 import { SessionStore } from "@/api/session-store";
 import { App } from "@/App";
 import { AppContext } from "@/components/app-context";
@@ -13,27 +14,39 @@ import { AppContext } from "@/components/app-context";
 export { ADDRESS };
 
 /** The calls the app made, as mocks to assert on and to give different answers. */
-export function stubApi(): { [K in keyof Api]: ReturnType<typeof vi.fn<Api[K]>> } {
+export function stubApi(
+  overview: Record<string, unknown> = overviewBody(),
+): { [K in keyof Api]: ReturnType<typeof vi.fn<Api[K]>> } & { readonly overview: Record<string, unknown> } {
   const nothing: Outcome<null> = { status: "ok", value: null };
+  const views = readOverview(overview).accounts;
   const done = () => Promise.resolve(nothing);
   return {
     session: vi.fn<Api["session"]>(done),
     login: vi.fn<Api["login"]>(done),
     logout: vi.fn<Api["logout"]>(done),
-    account: vi.fn<Api["account"]>(() => Promise.resolve({ status: "ok", value: readAccount(viewBody()) })),
+    // An account read is the overview's account with the whole curve, as the bot serves it.
+    account: vi.fn<Api["account"]>((address) => {
+      const found = views.find((view) => view.address.toLowerCase() === address.toLowerCase());
+      return Promise.resolve(
+        found === undefined
+          ? { status: "refused", message: "no such account", retryAfterSeconds: null }
+          : { status: "ok", value: { ...found, curve: readAccount(viewBody({ curve: FULL_CURVE })).curve } },
+      );
+    }),
     fills: vi.fn<Api["fills"]>(() => Promise.resolve({ status: "ok", value: readFills({ fills: [fillBody()] }) })),
     setAccountRunning: vi.fn<Api["setAccountRunning"]>(done),
     flatten: vi.fn<Api["flatten"]>(done),
     setStrategyRunning: vi.fn<Api["setStrategyRunning"]>(done),
     setParams: vi.fn<Api["setParams"]>(done),
+    overview,
   };
 }
 
 /**
- * Mounts `App` at `path`; frames and timers run at once, and the feed opens with a snapshot of `overview`.
+ * Mounts `App` at `path`; frames and timers run at once, and the feed opens with a snapshot of the api's overview.
  * The test drives later messages through `feeds`.
  */
-export function mount(api: ReturnType<typeof stubApi>, path = "/", overview: Record<string, unknown> = overviewBody()) {
+export function mount(api: ReturnType<typeof stubApi>, path = "/") {
   window.history.replaceState(null, "", path);
   const feeds: FeedHandlers[] = [];
   const session = new SessionStore(api);
@@ -44,7 +57,7 @@ export function mount(api: ReturnType<typeof stubApi>, path = "/", overview: Rec
       // The browser opens a socket asynchronously, and the bot sends its snapshot first.
       queueMicrotask(() => {
         handlers.onOpen();
-        handlers.onMessage(JSON.stringify({ type: "snapshot", ...overview }));
+        handlers.onMessage(JSON.stringify({ type: "snapshot", ...api.overview }));
       });
       return { close: () => undefined };
     },

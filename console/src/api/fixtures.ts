@@ -22,7 +22,14 @@ export function figuresBody(overrides: Record<string, unknown> = {}): Record<str
   };
 }
 
-/** One account as the API shows it. */
+/** The whole curve `GET /api/accounts/{address}` serves, oldest first; every other answer carries only the newest point. */
+export const FULL_CURVE = [
+  { time_ms: 1_700_000_000_000, equity: "10000" },
+  { time_ms: 1_700_000_060_000, equity: "10050" },
+  { time_ms: 1_700_000_120_000, equity: "10100.5" },
+];
+
+/** One account as the API shows it, with the newest curve point only. */
 export function viewBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     address: ADDRESS,
@@ -36,10 +43,7 @@ export function viewBody(overrides: Record<string, unknown> = {}): Record<string
     ],
     figures: figuresBody(),
     error: null,
-    curve: [
-      { time_ms: 1_700_000_000_000, equity: "10000" },
-      { time_ms: 1_700_000_060_000, equity: "10100.5" },
-    ],
+    curve: FULL_CURVE.slice(-1),
     ...overrides,
   };
 }

@@ -35,10 +35,7 @@ describe("readOverview", () => {
           monkey: { entitled: "5000000000000000000", newestEntitled: "12500000000000000000", claimed: null },
         },
         error: null,
-        curve: [
-          { timeMs: 1_700_000_000_000, equity: "10000" },
-          { timeMs: 1_700_000_060_000, equity: "10100.5" },
-        ],
+        curve: [{ timeMs: 1_700_000_120_000, equity: "10100.5" }],
       });
     }
   });

@@ -95,7 +95,7 @@ async function control(request, response, parts) {
   }
   const [what, id, action] = rest;
   if (request.method === "GET" && what === undefined) {
-    return send(response, 200, view(model, item));
+    return send(response, 200, view(model, item, true));
   }
   if (request.method === "GET" && what === "fills") {
     return send(response, 200, fills(item));

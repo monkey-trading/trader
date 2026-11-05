@@ -1,53 +1,10 @@
 /** The live store: one feed connection per tab, opening with the bot's snapshot, read by components. */
 import { reconnectDelay } from "@/lib/backoff";
 
-import type { Api, Outcome } from "./client";
-import { EMPTY_BOOK, keyOf, withAccount, withFills, withMessage, type Book } from "./live-state";
+import type { Outcome } from "./client";
+import { EMPTY_BOOK, keyOf, withAccount, withCurve, withFills, withMessage, type Book } from "./live-state";
+import type { Connection, FeedSocket, LiveDeps, LiveSnapshot } from "./live-types";
 import { parseWith, readLiveMessage } from "./parsers";
-import type { AccountView, Fill, Totals } from "./types";
-
-/** Where the connection stands; nothing is shown as live unless it is `live`. */
-export type Connection = "connecting" | "syncing" | "live" | "reconnecting" | "stopped";
-
-/** What components read. A new object is published at most once per animation frame. */
-export interface LiveSnapshot {
-  readonly connection: Connection;
-  /** Feed messages that failed their check since the page loaded. */
-  readonly dropped: number;
-  /** False until the feed's first snapshot has arrived. */
-  readonly loaded: boolean;
-  /** Every account, in the order the bot lists them. */
-  readonly accounts: readonly AccountView[];
-  readonly totals: Totals | null;
-  readonly fills: ReadonlyMap<string, readonly Fill[]>;
-  /** Why an account's fills could not be read, by lower-case address. */
-  readonly fillFailures: ReadonlyMap<string, string>;
-}
-
-/** One open feed connection. */
-export interface FeedSocket {
-  close(): void;
-}
-
-/** What the store hands the feed to report. */
-export interface FeedHandlers {
-  readonly onOpen: () => void;
-  readonly onMessage: (data: string) => void;
-  readonly onClose: () => void;
-}
-
-/** What the store needs from the outside world. */
-export interface LiveDeps {
-  readonly api: Api;
-  readonly openFeed: (handlers: FeedHandlers) => FeedSocket;
-  /** Runs `callback` on the next animation frame; returns a canceller. */
-  readonly frame: (callback: () => void) => () => void;
-  /** Runs `callback` after `ms`; returns a canceller. */
-  readonly timeout: (callback: () => void, ms: number) => () => void;
-  readonly random: () => number;
-  /** Called when the bot says the session is gone. */
-  readonly onUnauthenticated: () => void;
-}
 
 const INITIAL: LiveSnapshot = {
   connection: "stopped",
@@ -55,6 +12,7 @@ const INITIAL: LiveSnapshot = {
   loaded: false,
   accounts: [],
   totals: null,
+  curves: new Map(),
   fills: new Map(),
   fillFailures: new Map(),
 };
@@ -105,10 +63,14 @@ export class LiveStore {
     };
   }
 
-  /** Asks for an account's fills to be read and kept current while the caller shows them; returns the release. */
+  /**
+   * Asks for an account's fills and full equity curve to be read, and its fills kept current, while the caller
+   * shows them; returns the release.
+   */
   track(address: string): () => void {
     this.tracked.set(address, (this.tracked.get(address) ?? 0) + 1);
     void this.readFills(address, this.epoch);
+    void this.refresh(address);
     return () => {
       const left = (this.tracked.get(address) ?? 1) - 1;
       if (left <= 0) {
@@ -119,17 +81,23 @@ export class LiveStore {
     };
   }
 
-  /** Reads an account again, after a control changed it, so the page shows the result before the feed's next push. */
+  /**
+   * Reads an account whole: its full curve, and its view as the result of a control, so the page shows it before
+   * the feed's next push. The curve merges whatever the feed brought meanwhile; the view yields to a newer one.
+   */
   async refresh(address: string): Promise<void> {
     const epoch = this.epoch;
     const key = keyOf(address);
     const version = this.viewVersions.get(key) ?? 0;
     const outcome = await this.deps.api.account(address);
-    if (epoch !== this.epoch || (this.viewVersions.get(key) ?? 0) !== version) {
+    if (epoch !== this.epoch) {
       return;
     }
     if (outcome.status === "ok") {
-      this.book = withAccount(this.book, outcome.value);
+      this.book =
+        (this.viewVersions.get(key) ?? 0) === version
+          ? withAccount(this.book, outcome.value)
+          : withCurve(this.book, address, outcome.value.curve);
       this.publish();
     } else if (outcome.status === "unauthenticated") {
       this.endSession();
@@ -236,6 +204,7 @@ export class LiveStore {
       }
       for (const address of this.tracked.keys()) {
         void this.readFills(address, epoch);
+        void this.refresh(address);
       }
     }
     this.publish();
@@ -289,6 +258,7 @@ export class LiveStore {
         loaded: this.loaded,
         accounts: [...this.book.accounts.values()],
         totals: this.book.totals,
+        curves: this.book.curves,
         fills: this.book.fills,
         fillFailures: this.failures,
       };

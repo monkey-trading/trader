@@ -1,7 +1,8 @@
 /** Tests of the live store over a stand-in feed, API and clock. */
 import type { Api, Outcome } from "./client";
-import { ADDRESS, figuresBody, fillBody, overviewBody, totalsBody, viewBody } from "./fixtures";
-import { LiveStore, type FeedHandlers } from "./live-store";
+import { ADDRESS, FULL_CURVE, figuresBody, fillBody, overviewBody, totalsBody, viewBody } from "./fixtures";
+import { LiveStore } from "./live-store";
+import type { FeedHandlers } from "./live-types";
 import { readAccount, readFills } from "./parsers";
 import type { AccountView, Fill } from "./types";
 
@@ -220,6 +221,38 @@ describe("LiveStore", () => {
     feeds[0]?.handlers.onMessage(JSON.stringify({ type: "account", account: viewBody({ state: "halted" }) }));
     await pending;
     await settle();
+    expect(store.getSnapshot().accounts[0]?.state).toBe("halted");
+  });
+
+  it("reads an account's whole curve when its page opens, then adds each feed point once", async () => {
+    const { store, feeds, settle, open } = harness({
+      account: () => Promise.resolve(ok<AccountView>(readAccount(viewBody({ curve: FULL_CURVE })))),
+    });
+    await open();
+    expect(store.getSnapshot().curves.get(ADDRESS)).toHaveLength(1);
+
+    store.track(ADDRESS);
+    await settle();
+    const point = (time_ms: number) => JSON.stringify({ type: "account", account: viewBody({ curve: [{ time_ms, equity: "7" }] }) });
+    feeds[0]?.handlers.onMessage(point(1_700_000_180_000));
+    feeds[0]?.handlers.onMessage(point(1_700_000_180_000));
+    await settle();
+
+    expect(store.getSnapshot().curves.get(ADDRESS)?.map((p) => p.timeMs)).toEqual([
+      1_700_000_000_000, 1_700_000_060_000, 1_700_000_120_000, 1_700_000_180_000,
+    ]);
+  });
+
+  it("keeps the whole curve when a feed message arrives before the read answers", async () => {
+    let finish: (outcome: Outcome<AccountView>) => void = () => undefined;
+    const { store, feeds, settle, open } = harness({ account: () => new Promise((resolve) => { finish = resolve; }) });
+    await open();
+    store.track(ADDRESS);
+    feeds[0]?.handlers.onMessage(JSON.stringify({ type: "account", account: viewBody({ state: "halted", curve: [{ time_ms: 1_700_000_180_000, equity: "7" }] }) }));
+    finish(ok<AccountView>(readAccount(viewBody({ curve: FULL_CURVE }))));
+    await settle();
+
+    expect(store.getSnapshot().curves.get(ADDRESS)).toHaveLength(4);
     expect(store.getSnapshot().accounts[0]?.state).toBe("halted");
   });
 });

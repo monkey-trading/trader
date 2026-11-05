@@ -1,6 +1,6 @@
 /** Opens the live feed as a browser WebSocket on the page's own origin. */
 import { routes } from "./client";
-import type { FeedHandlers, FeedSocket } from "./live-store";
+import type { FeedHandlers, FeedSocket } from "./live-types";
 
 /** Opens the feed; any error ends in `onClose`, where the store decides when to retry. */
 export function openBrowserFeed(handlers: FeedHandlers): FeedSocket {
