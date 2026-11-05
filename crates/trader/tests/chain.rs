@@ -170,6 +170,54 @@ async fn reads_after_a_transaction_skip_an_endpoint_behind_it() {
     assert_eq!((calls(&s.chain), calls(&ahead)), (2, 1), "and answers again once it has caught up");
 }
 
+/// A read while every endpoint stays behind the bot's last transaction gives up after the receipt
+/// wait, saying so.
+#[tokio::test]
+async fn a_read_behind_the_last_transaction_gives_up_after_the_wait() {
+    let s = Setup::start(false).await;
+    let chain = Chain::connect(&section(&s, &[s.chain.url()]), CHAIN_ID).await.unwrap();
+    chain.send(&s.key, &deposit()).await.unwrap();
+    s.chain.with(|l| l.lag = 1);
+    let err = within(chain.view(VAULT, Vault::usdcCall {})).await.unwrap_err();
+    assert!(err.to_string().contains("behind block"), "{err}");
+}
+
+/// A transaction that used all its gas is reported as out of gas, not by a replayed reason.
+#[tokio::test]
+async fn a_transaction_out_of_gas_is_reported_so() {
+    let s = Setup::start(false).await;
+    s.chain.with(|l| {
+        // The stand-in's receipts use 21,000 gas: the limit, with its headroom, from this estimate.
+        l.estimate = Some(17_500);
+        l.revert_on_chain = Some(Vec::new());
+    });
+    let chain = Chain::connect(&section(&s, &[s.chain.url()]), CHAIN_ID).await.unwrap();
+    let err = chain.send(&s.key, &deposit()).await.unwrap_err();
+    assert!(matches!(&err, TxError::Reverted { reason, .. } if reason.contains("ran out of its 21000 gas")), "{err}");
+}
+
+/// A nonce that is mined and then not, as when its block is undone, takes back the evidence that
+/// another transaction took it: the transaction is signed again only once the nonce stays mined.
+#[tokio::test]
+async fn a_nonce_that_is_undone_takes_back_the_evidence() {
+    let s = Setup::start(false).await;
+    s.chain.with(|l| l.replace = true);
+    let chain = Chain::connect(&section(&s, &[s.chain.url()]), CHAIN_ID).await.unwrap();
+    let nonce_reads = || s.chain.with(|l| l.methods.get("eth_getTransactionCount").copied().unwrap_or_default());
+    let undo = async {
+        until("nonce reads", || nonce_reads() >= 3).await;
+        s.chain.with(|l| l.nonces.insert(wallet(), 0));
+        let reads = nonce_reads();
+        until("more nonce reads", || nonce_reads() >= reads + 10).await;
+        assert!(s.chain.sent().is_empty(), "not signed again while its nonce is not mined");
+        s.chain.with(|l| l.nonces.insert(wallet(), 1));
+    };
+    let deposit = deposit();
+    let (receipt, ()) = tokio::join!(within(chain.send(&s.key, &deposit)), undo);
+    let sent = s.chain.sent();
+    assert_eq!((sent.len(), sent[0].nonce, sent[0].hash), (1, 1, receipt.unwrap().transaction_hash));
+}
+
 /// A fee over the configured cap is not offered: nothing is sent.
 #[tokio::test]
 async fn a_fee_over_the_cap_is_not_sent() {

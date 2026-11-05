@@ -71,18 +71,21 @@ MONKEY, and withdraws, every payout going to the account's own address.
   accounts and holds the time per message and the memory per account to budgets
 - `trader accounts declare --class <professional|eligible-client>` shows the class's statement
   and records it, signed by the account, only for an account the user confirms, in the terminal or
-  with `--confirm <address>`; it needs the node alone
+  with `--confirm <address>`; it needs the node alone, and no `[chain]` section
 - `trader accounts deposit --amount <USDC>` approves the vault for the amount and deposits it from
   the account's wallet (`Vault.deposit`), or with `--from-funding` from the funding key's
   (`Vault.depositFor`), then waits for the node's credit; one the node holds until the account
-  declares is reported as such
+  declares is reported as such. A deposit is sent again only once the vault holds none of the
+  transactions signed for it, at a block by which another transaction took the last one's nonce:
+  it never goes in twice, whatever the endpoints' receipts say
 - `trader accounts claim` claims each account's MONKEY with the node's proof (`Vault.claimEmissions`);
   with `[claims]`, `trader run` claims once the unclaimed amount reaches a threshold
 - `trader accounts withdraw [--amount <USDC>]` requests a signed withdrawal and pays each part the
   FIFO queue approves with `Vault.withdraw` as its authorization comes, until the queue holds
-  nothing more of the request; it asks for a new authorization when one expired unpaid (again
-  after a while if none comes), and without an amount it pays what is already approved. A payout
-  or claim another sender made first counts as done
+  nothing more of the request, reading again after a failed read; it asks for a new authorization
+  when one expired unpaid (again after a while if none comes), waits for one the vault refuses at
+  the chain's time or signer epoch to be replaced, and without an amount it pays what is already
+  approved. A payout or claim another sender made first counts as done
 - `trader accounts status` shows each account's declaration, wallet, balance, unclaimed MONKEY and
   withdrawals
 - Every payout goes to the account's own address: the vault pays a claim or withdrawal to the
@@ -97,7 +100,8 @@ MONKEY, and withdraws, every payout going to the account's own address.
   and signed again only once another transaction from the same key has taken its nonce and every
   endpoint, poll after poll, holds no receipt for it; one that reverts is reported with the
   contract's reason. No fee over the configured cap is offered, so an endpoint that misquotes the
-  price cannot spend the payer's ether. An endpoint's URL is never printed
+  price cannot spend the payer's ether. An endpoint's URL, and each part of it that may carry a
+  key, is replaced in every log line, output line and error, whatever the log level names
 - Declarations keep to the node's fresh-account budget for one client (`node.limits.fresh_accounts`,
   from its `api.fresh_accounts.per_client`). A stale nonce is followed by the request again on the
   current one, and a retry-later answer from the node, as those budgets give, by the request again
@@ -114,6 +118,8 @@ MONKEY, and withdraws, every payout going to the account's own address.
 
 - `src/main.rs`: the entry point
 - `src/lib.rs`: the command line and the runtime
+- `src/logging.rs`: the log, with every RPC endpoint's URL and key replaced in each line written,
+  and the command line's output and errors likewise
 - `src/config/mod.rs`: the config file's sections and loading
 - `src/config/validation.rs`: parsing of the node URL and TLS key hash, and the config's checks
 - `src/config/tests.rs`: the config tests, against `config/example.toml`

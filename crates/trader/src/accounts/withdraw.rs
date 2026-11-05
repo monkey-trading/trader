@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use alloy_primitives::{Address, B256};
 use alloy_sol_types::{Eip712Domain, SolCall, SolInterface, SolStruct, sol};
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, anyhow, bail, ensure};
 use engine_core::Fixed;
 use engine_core::auth::RequestAuth;
 use engine_core::command::WithdrawalRequest;
@@ -16,10 +16,10 @@ use engine_core::eip712::withdrawal_hash;
 use engine_core::event::Event;
 use engine_core::types::AccountId;
 use tokio::time::{Instant, sleep};
-use tracing::{Instrument, info, info_span, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::accounts::{Lifecycle, REQUEST_EXPIRY_MS, retry_later, usdc_units};
-use crate::chain::contracts::Vault;
+use crate::chain::contracts::{Vault, revert_reason};
 use crate::chain::{Call, TxError};
 use crate::keys::AccountKey;
 use crate::node::CallError;
@@ -70,11 +70,12 @@ impl Lifecycle {
             // The chain that pays it is checked before anything is asked of the node.
             self.tokens().await?;
             let deadline = Instant::now() + self.settle_timeout;
-            let requested_seq = match amount {
-                Some(amount) => Some(self.request(key, amount, deadline).await?),
-                None => None,
-            };
-            self.pay(key, requested_seq, deadline).await
+            let Some(amount) = amount else { return self.pay(key, None, deadline).await };
+            let requested_seq = self.request(key, amount, deadline).await?;
+            // Asking again would withdraw twice: what is queued is paid by a withdrawal without an amount.
+            self.pay(key, Some(requested_seq), deadline).await.with_context(|| {
+                format!("the withdrawal is queued as seq {requested_seq}: `withdraw` without --amount pays it")
+            })
         }
         .instrument(span)
         .await
@@ -122,7 +123,7 @@ impl Lifecycle {
                     );
                 }
                 (None, CallError::Refused { status: 409, .. }) => info!("the nonce moved on; signing again"),
-                (None, CallError::Failed { .. }) => {
+                (None, CallError::Failed { .. } | CallError::Unverified { .. }) => {
                     return Err(anyhow::Error::from(error)).with_context(|| {
                         format!("the request may still enter the log until {expires_at}: see `trader accounts status` before asking again")
                     });
@@ -134,10 +135,13 @@ impl Lifecycle {
 
     /// Pays each of the account's unpaid payouts once its authorization is signed and usable,
     /// asking for a replacement of one that expired, until none is left unpaid and the queue holds
-    /// nothing more of request `requested_seq`, when there is one.
+    /// nothing more of request `requested_seq`, when there is one. A read that fails is read again
+    /// at the next poll, and an authorization the vault refuses at the chain's time or signer epoch
+    /// waits for its replacement.
     /// Error cases:
-    /// - a read fails, or an authorization does not match the account, vault and chain
-    /// - a payment would revert, reverts, or gets no receipt
+    /// - an answer is signed by another key, or an authorization does not match the account, vault
+    ///   and chain
+    /// - a payment would revert, reverts, or gets no receipt, for another reason
     /// - the request is still queued, or a payout unpaid, after `deadline`
     async fn pay(
         &self,
@@ -150,24 +154,51 @@ impl Lifecycle {
         let mut paid = Vec::new();
         let mut done = BTreeSet::new();
         let mut position = None;
-        // Each expired authorization the bot asked to replace, and the polls since it asked.
+        // Each expired authorization the bot asked to replace, and the polls since it asked; and each
+        // the vault refused as the chain stands, by payout nonce and expiry.
         let mut reissued: BTreeMap<(u64, u64), u32> = BTreeMap::new();
+        let mut unusable = BTreeSet::new();
+        let mut unread = false;
         loop {
-            // The queue is read before the payouts, so a part it no longer holds is among them.
-            if let Some(seq) = requested_seq {
-                match self.node.withdrawal_queue(account).await?.iter().find(|queued| queued.requested_seq == seq) {
-                    None => {
-                        info!(requested_seq = seq, "the withdrawal is approved");
-                        requested_seq = None;
+            let read = async {
+                // The queue is read before the payouts, so a part it no longer holds is among them.
+                let queued = match requested_seq {
+                    Some(seq) => {
+                        let queue = self.node.withdrawal_queue(account).await?;
+                        Some(queue.into_iter().find(|queued| queued.requested_seq == seq))
                     }
-                    Some(mine) if position != Some(mine.position) => {
-                        info!(position = mine.position, remaining = %mine.remaining, "the withdrawal waits in the queue");
-                        position = Some(mine.position);
+                    None => None,
+                };
+                Ok::<_, CallError>((queued, self.node.payouts(account).await?))
+            };
+            let (queued, answer) = match read.await {
+                Ok(read) => {
+                    if std::mem::take(&mut unread) {
+                        info!("the withdrawal is read again");
                     }
-                    Some(_) => {}
+                    read
                 }
+                Err(e @ CallError::WrongSigner { .. }) => return Err(e.into()),
+                Err(e) => {
+                    not_read(&mut unread, &e);
+                    if Instant::now() >= deadline {
+                        return Err(self.overdue(&paid, position.filter(|_| requested_seq.is_some())));
+                    }
+                    sleep(self.poll_interval).await;
+                    continue;
+                }
+            };
+            match (requested_seq, queued) {
+                (Some(seq), Some(None)) => {
+                    info!(requested_seq = seq, "the withdrawal is approved");
+                    requested_seq = None;
+                }
+                (Some(_), Some(Some(mine))) if position != Some(mine.position) => {
+                    info!(position = mine.position, remaining = %mine.remaining, "the withdrawal waits in the queue");
+                    position = Some(mine.position);
+                }
+                _ => {}
             }
-            let answer = self.node.payouts(account).await?;
             let now_s = answer.time_ms / 1000;
             let unpaid: Vec<&Payout> = answer.payouts.iter().filter(|payout| !done.contains(&payout.nonce)).collect();
             if unpaid.is_empty() && answer.loaded && requested_seq.is_none() {
@@ -175,7 +206,15 @@ impl Lifecycle {
             }
             for payout in unpaid {
                 let nonce = payout.nonce;
-                if self.chain.view(self.vault, Vault::usedNoncesCall { account: wallet, nonce }).await? {
+                let used = match self.chain()?.view(self.vault, Vault::usedNoncesCall { account: wallet, nonce }).await
+                {
+                    Ok(used) => used,
+                    Err(e) => {
+                        not_read(&mut unread, &e);
+                        break;
+                    }
+                };
+                if used {
                     info!(nonce, "the payout is paid already");
                     done.insert(nonce);
                     continue;
@@ -183,49 +222,72 @@ impl Lifecycle {
                 let Some(signed) = &payout.withdrawal else { continue };
                 let call = self.withdraw_call(account, payout, signed)?;
                 let expires_at = signed.authorization.as_ref().expect("checked by withdraw_call").expires_at;
-                if expires_at > now_s.saturating_add(EXPIRY_MARGIN_S) {
-                    let what = format!("paying withdrawal {nonce} of {} USDC", payout.amount);
-                    let call = Call { to: self.vault, data: call.abi_encode().into(), what };
-                    match self.chain.send(self.payer(key), &call).await {
-                        Ok(receipt) => {
-                            info!(nonce, amount = %payout.amount, tx = %receipt.transaction_hash, "withdrawal paid");
-                            paid.push(Paid { nonce, amount: payout.amount, tx: receipt.transaction_hash });
-                        }
-                        // Paid by another sender since the bot read it unpaid, perhaps on an endpoint behind.
-                        Err(
-                            TxError::WouldRevert { revert: Some(data), .. }
-                            | TxError::Reverted { revert: Some(data), .. },
-                        ) if already_paid(&data) => {
-                            info!(nonce, "the payout is paid already");
-                        }
-                        Err(e) => return Err(e.into()),
-                    }
-                    done.insert(nonce);
-                } else if expires_at <= now_s {
+                if expires_at <= now_s {
                     let polls = reissued.entry((nonce, expires_at)).or_insert(REISSUE_AGAIN_POLLS);
                     if *polls >= REISSUE_AGAIN_POLLS {
                         self.reissue(key, nonce, expires_at).await?;
                         *polls = 0;
                     }
                     *polls += 1;
+                    continue;
                 }
+                if expires_at <= now_s.saturating_add(EXPIRY_MARGIN_S) || unusable.contains(&(nonce, expires_at)) {
+                    continue;
+                }
+                let what = format!("paying withdrawal {nonce} of {} USDC", payout.amount);
+                let call = Call { to: self.vault, data: call.abi_encode().into(), what };
+                match self.chain()?.send(self.payer(key), &call).await {
+                    Ok(receipt) => {
+                        info!(nonce, amount = %payout.amount, tx = %receipt.transaction_hash, "withdrawal paid");
+                        paid.push(Paid { nonce, amount: payout.amount, tx: receipt.transaction_hash });
+                    }
+                    Err(
+                        TxError::WouldRevert { revert: Some(data), .. } | TxError::Reverted { revert: Some(data), .. },
+                    ) if already_paid(&data) => {
+                        // Paid by another sender since the bot read it unpaid, perhaps on an endpoint behind.
+                        info!(nonce, "the payout is paid already");
+                    }
+                    Err(
+                        TxError::WouldRevert { revert: Some(data), .. } | TxError::Reverted { revert: Some(data), .. },
+                    ) if replaceable(&data) => {
+                        // Expired, or of a signer epoch gone, as the chain stands: the node replaces it, on
+                        // the signer's change or, once it expired, on the account's request.
+                        warn!(
+                            nonce,
+                            expires_at,
+                            "the vault refuses the authorization: {}; waiting for another",
+                            revert_reason(&data)
+                        );
+                        unusable.insert((nonce, expires_at));
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+                done.insert(nonce);
             }
             if Instant::now() >= deadline {
-                let paid: Vec<String> =
-                    paid.iter().map(|paid| format!("{} USDC in {}", paid.amount, paid.tx)).collect();
-                let paid = if paid.is_empty() { String::new() } else { format!(" (paid {})", paid.join(", ")) };
-                match position.filter(|_| requested_seq.is_some()) {
-                    Some(position) => bail!(
-                        "the withdrawal is still queued at position {position} after {:?}{paid}: see `trader accounts status`",
-                        self.settle_timeout
-                    ),
-                    None => bail!(
-                        "withdrawals are still unpaid after {:?}{paid}: see `trader accounts status`",
-                        self.settle_timeout
-                    ),
-                }
+                return Err(self.overdue(&paid, position.filter(|_| requested_seq.is_some())));
             }
             sleep(self.poll_interval).await;
+        }
+    }
+
+    /// The error of a withdrawal still waiting at its deadline: queued at `position`, or with
+    /// payouts unpaid, and naming what `paid` paid.
+    fn overdue(&self, paid: &[Paid], position: Option<u64>) -> anyhow::Error {
+        let paid: Vec<String> = paid.iter().map(|paid| format!("{} USDC in {}", paid.amount, paid.tx)).collect();
+        let paid = if paid.is_empty() { String::new() } else { format!(" (paid {})", paid.join(", ")) };
+        match position {
+            Some(position) => {
+                let wait = self.settle_timeout;
+                anyhow!(
+                    "the withdrawal is still queued at position {position} after {wait:?}{paid}: see `trader accounts status`"
+                )
+            }
+            None => anyhow!(
+                "withdrawals are still unpaid after {:?}{paid}: see `trader accounts status`",
+                self.settle_timeout
+            ),
         }
     }
 
@@ -305,6 +367,24 @@ fn queued(events: &[Event]) -> anyhow::Result<u64> {
         }
     }
     bail!("the node's answer neither queues nor refuses the withdrawal: {events:?}")
+}
+
+/// Logs that a read failed: once as a warning, then at debug until a read works again.
+fn not_read(unread: &mut bool, error: &dyn std::fmt::Display) {
+    if std::mem::replace(unread, true) {
+        debug!("the withdrawal is still not read: {error}");
+    } else {
+        warn!("the withdrawal was not read; reading it again: {error}");
+    }
+}
+
+/// Whether revert data is the vault's refusal of an authorization at the chain's time or signer
+/// epoch, which a replacement cures.
+fn replaceable(data: &[u8]) -> bool {
+    matches!(
+        Vault::VaultErrors::abi_decode(data),
+        Ok(Vault::VaultErrors::InvalidWithdrawalTime(_) | Vault::VaultErrors::InvalidSignerEpoch(_))
+    )
 }
 
 /// Whether revert data is the vault's refusal of a payout it paid already.

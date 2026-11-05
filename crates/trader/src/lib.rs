@@ -5,22 +5,20 @@ pub mod bot;
 pub mod chain;
 pub mod config;
 pub mod keys;
+pub mod logging;
 pub mod node;
 pub mod stream;
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
 use engine_core::types::AccountId;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::Config;
-
-/// Log targets held at `info` whatever the configured level: below it, the RPC client logs its
-/// endpoint's URL, which may carry an API key.
-const QUIET: &str = "alloy_transport_http=info,reqwest=info";
+use crate::logging::{Redacting, Secrets};
 
 /// The monkeytrading bot.
 #[derive(Debug, Parser)]
@@ -67,12 +65,13 @@ pub fn run() -> anyhow::Result<()> {
     let env = |name: &str| std::env::var(name).ok();
     match Cli::parse().command {
         Command::Run { config } => {
-            let cfg = start(&config)?;
+            let (cfg, secrets) = start(&config)?;
             let runtime = tokio::runtime::Runtime::new().context("the async runtime")?;
-            runtime.block_on(async {
+            let result = runtime.block_on(async {
                 let stop = bot::stop_signal()?;
                 bot::run(cfg, env, stop).await
-            })
+            });
+            redacted(result, &secrets)
         }
         Command::Addresses { config } => {
             let cfg = Config::load(&config)?;
@@ -85,23 +84,30 @@ pub fn run() -> anyhow::Result<()> {
             })
         }
         Command::Accounts { config, accounts, action } => {
-            let cfg = start(&config)?;
+            let (cfg, secrets) = start(&config)?;
             let runtime = tokio::runtime::Runtime::new().context("the async runtime")?;
             let terminal = std::io::stdin().is_terminal();
-            runtime.block_on(accounts::cli::run(cfg, accounts, action, env, terminal, &mut std::io::stdout()))
+            let mut out = Redacting::new(std::io::stdout(), secrets.clone());
+            let result = runtime.block_on(accounts::cli::run(cfg, accounts, action, env, terminal, &mut out));
+            redacted(result, &secrets)
         }
     }
 }
 
-/// Loads the config at `path` and starts logging at its level, but for the RPC client's own logs,
-/// which stay at `info` (`QUIET`).
+/// Loads the config at `path` and starts logging at its level, with no secret of the config in any
+/// line (see `logging`); the config, and its secrets.
 /// Error cases:
 /// - the config does not load (see `Config::load`), or its level is not a filter
-fn start(path: &Path) -> anyhow::Result<Config> {
+fn start(path: &Path) -> anyhow::Result<(Config, Secrets)> {
     let cfg = Config::load(path)?;
-    let filter = EnvFilter::try_new(format!("{},{QUIET}", cfg.logging.level)).context("logging.level")?;
-    tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stdout().is_terminal()).init();
-    Ok(cfg)
+    let secrets = Secrets::of(&cfg);
+    logging::subscriber(&cfg.logging.level, std::io::stdout().is_terminal(), std::io::stdout, secrets.clone())?.init();
+    Ok((cfg, secrets))
+}
+
+/// `result`, its error printed as it is but for `secrets`.
+fn redacted(result: anyhow::Result<()>, secrets: &Secrets) -> anyhow::Result<()> {
+    result.map_err(|e| anyhow!(secrets.redact(&format!("{e:#}"))))
 }
 
 #[cfg(test)]
@@ -140,35 +146,14 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 
-    /// At any configured level, the RPC client's debug lines, which carry its endpoint's URL, are
-    /// not written, while the bot's are.
+    /// A command's error is printed with no secret of the config in it, its causes included.
     #[test]
-    fn the_rpc_clients_debug_lines_are_never_written() {
-        use std::io::Write;
-        use std::sync::{Arc, Mutex};
-
-        #[derive(Clone, Default)]
-        struct Lines(Arc<Mutex<Vec<u8>>>);
-        impl Write for Lines {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let lines = Lines::default();
-        let writer = lines.clone();
-        let filter = tracing_subscriber::EnvFilter::try_new(format!("trace,{}", crate::QUIET)).unwrap();
-        let subscriber = tracing_subscriber::fmt().with_env_filter(filter).with_writer(move || writer.clone()).finish();
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::debug!(target: "alloy_transport_http::reqwest_transport", "https://rpc.example/secret-key");
-            tracing::debug!(target: "reqwest::connect", "https://rpc.example/secret-key");
-            tracing::debug!(target: "trader::chain", "the bot's own line");
-        });
-        let written = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
-        assert!(written.contains("the bot's own line") && !written.contains("secret-key"), "{written}");
+    fn errors_are_printed_without_secrets() {
+        let key = "k3y0f32charactersfromaprovider00";
+        let secrets = crate::logging::Secrets::of_urls([format!("https://rpc.example/v2/{key}").as_str()]);
+        let error = anyhow::anyhow!("no answer from https://rpc.example/v2/{key}").context("reading the vault");
+        let printed = format!("{:#}", crate::redacted(Err(error), &secrets).unwrap_err());
+        assert_eq!(printed, "reading the vault: no answer from [redacted]");
     }
 
     /// `run` takes its config file by `-c` or `--config`.

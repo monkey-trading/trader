@@ -23,9 +23,9 @@ const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(300);
 /// The default time the bot waits on the node: a deposit's credit, a withdrawal's approval and its
 /// payout's authorization.
-const DEFAULT_SETTLE_TIMEOUT: Duration = Duration::from_secs(1800);
+pub(crate) const DEFAULT_SETTLE_TIMEOUT: Duration = Duration::from_secs(1800);
 /// The default time between two polls of the chain or the node while the bot waits.
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// The default highest fee per gas a transaction may offer, in gwei: far above Arbitrum's usual
 /// hundredth of a gwei, and far below what an endpoint misquoting it could otherwise cost.
 const DEFAULT_MAX_FEE_GWEI: u128 = 1;

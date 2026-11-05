@@ -13,6 +13,7 @@ use engine_core::access::EligibilityClass;
 use engine_core::types::AccountId;
 use futures_util::future::join_all;
 use tokio::task::spawn_blocking;
+use tracing::warn;
 
 use crate::accounts::claim::Claimed;
 use crate::accounts::declare::{Confirmed, Declared};
@@ -186,10 +187,10 @@ pub async fn run(
 
 /// The confirmed declarations of `class` for `keys`' accounts that have not declared: those
 /// `confirm` names, and, in a `terminal`, those the user confirms when asked after reading the
-/// statement.
+/// statement. An account whose declaration is not read is not asked.
 /// Error cases:
 /// - `confirm` names an account not among `keys`
-/// - a declaration cannot be read, or the terminal cannot be read
+/// - the terminal cannot be read
 async fn confirm_declarations(
     lifecycle: &Lifecycle,
     keys: &[AccountKey],
@@ -203,8 +204,11 @@ async fn confirm_declarations(
     }
     let mut undeclared = Vec::new();
     for key in keys {
-        if lifecycle.declared(key.address()).await?.is_none() {
-            undeclared.push(key.address());
+        match lifecycle.declared(key.address()).await {
+            Ok(None) => undeclared.push(key.address()),
+            Ok(Some(_)) => {}
+            // Not asked: the account's own line reads it again, and reports it.
+            Err(e) => warn!(account = %key.address(), "its declaration was not read: {e:#}"),
         }
     }
     if undeclared.is_empty() {

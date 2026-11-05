@@ -226,6 +226,49 @@ async fn the_funding_key_is_unlocked_only_for_the_actions_it_pays_for() {
     assert!(format!("{err:#}").contains("the funding key"), "{err:#}");
 }
 
+/// Without a `[chain]` section, `trader accounts declare` declares, and an action that reads the
+/// chain says it needs one.
+#[tokio::test]
+async fn declaring_needs_no_chain_section() {
+    let s = Setup::start(false).await;
+    s.answer(&eligibility_path(), 200, declared_none());
+    s.node.with(|i| i.replies.push_back(attested("professional")));
+    let text = std::fs::read_to_string(s.dir.path().join("bot.toml")).unwrap();
+    let start = text.find("[chain]").unwrap();
+    let end = start + text[start..].find("\n\n").unwrap();
+    let path = s.dir.path().join("no-chain.toml");
+    std::fs::write(&path, format!("{}{}", &text[..start], &text[end..])).unwrap();
+    let cfg = || trader::config::Config::load(&path).unwrap();
+    assert!(cfg().chain.is_none());
+    let declare = Action::Declare { class: Class::Professional, confirm: vec![account()] };
+    let mut out = Vec::new();
+    within(cli::run(cfg(), vec![], declare, |_| None, false, &mut out)).await.unwrap();
+    assert!(String::from_utf8(out).unwrap().contains(&format!("{}: declared Professional", account())));
+    let mut out = Vec::new();
+    within(cli::run(cfg(), vec![], Action::Status, |_| None, false, &mut out)).await.unwrap_err();
+    assert!(String::from_utf8(out).unwrap().contains("has no [chain] section"));
+}
+
+/// An account whose declaration cannot be read is reported in its own line, and the others are
+/// asked and declared as usual.
+#[tokio::test]
+async fn a_declaration_that_cannot_be_read_fails_its_account_alone() {
+    let s = Setup::start(false).await;
+    s.answer(&eligibility_path(), 500, json!({ "error": "internal error" }));
+    let other = common::lifecycle::funding_wallet();
+    s.answer(&format!("/v1/accounts/{}/eligibility", AccountId(other.into_array())), 200, declared("professional"));
+    let entry = "[[account]]\nkey = { type = \"hex_file\", path = \"funding.hex\" }\n[[account.strategy]]\n\
+                 market = \"BTC-USD\"\nbar = \"1m\"\nfast = 1\nslow = 2\nqty = \"1\"\nmax_slippage_bps = 25\n";
+    let cfg = common::lifecycle::config(&s.node, &[s.chain.url()], s.dir.path(), false, entry);
+    let declare = Action::Declare { class: Class::Professional, confirm: vec![] };
+    let mut out = Vec::new();
+    let err = within(cli::run(cfg, vec![], declare, |_| None, false, &mut out)).await.unwrap_err();
+    assert!(err.to_string().contains("1 of 2 accounts failed"), "{err}");
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains(&format!("{}: failed:", account())), "{out}");
+    assert!(out.contains(&format!("{}: declared Professional already", AccountId(other.into_array()))), "{out}");
+}
+
 // ── Helpers ──
 
 fn eligibility_path() -> String {

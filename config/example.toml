@@ -73,8 +73,8 @@ max_slippage_bps = 25
 # qty = "0.1"
 # max_slippage_bps = 25
 
-# The custody chain, for `trader accounts` (declare, deposit, claim, withdraw) and [claims]: Arbitrum
-# in production. Leave the section out to only trade.
+# The custody chain, for `trader accounts` (status, deposit, claim, withdraw) and [claims]: Arbitrum
+# in production. Leave the section out to only trade and declare.
 [chain]
 # JSON-RPC endpoints, tried in order: a read moves to the next when one fails, and every transaction
 # is sent to each. https://, or http:// on this machine. A provider's API key in a URL is never

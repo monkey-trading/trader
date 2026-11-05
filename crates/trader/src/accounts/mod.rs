@@ -26,7 +26,7 @@ use tracing::info;
 
 use crate::chain::Chain;
 use crate::chain::contracts::{ERC20, Vault};
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_POLL_INTERVAL, DEFAULT_SETTLE_TIMEOUT};
 use crate::keys::AccountKey;
 use crate::node::accounts::{Payout, QueuedWithdrawal};
 use crate::node::{CallError, Node, Tls};
@@ -42,8 +42,9 @@ const REQUEST_EXPIRY_MS: Millis = 60_000;
 /// key when one is configured.
 pub struct Lifecycle {
     node: Arc<Node>,
-    /// The chain, which no action asks before it needs it, so the node's alone go on without it.
-    chain: Chain,
+    /// The chain `[chain]` names, which no action asks before it needs it, so the node's alone go on
+    /// without it, or without the section.
+    chain: Option<Chain>,
     tokens: OnceCell<Tokens>,
     domain: Eip712Domain,
     chain_id: u64,
@@ -96,19 +97,22 @@ impl Lifecycle {
         Self::with_node(cfg, Arc::new(node), env).await
     }
 
-    /// The lifecycle of `cfg`'s accounts on `node`, the chain `[chain]` names, and the funding key,
-    /// unlocked with `env` when its password is in a variable. The chain is asked nothing yet.
+    /// The lifecycle of `cfg`'s accounts on `node`, the chain `[chain]` names if any, and the funding
+    /// key, unlocked with `env` when its password is in a variable. The chain is asked nothing yet.
     /// Error cases:
-    /// - the config has no `[chain]` section
+    /// - the chain's client cannot be built (see `Chain::new`)
     /// - the funding key does not load (see `AccountKey::load`)
     pub async fn with_node(
         cfg: &Config,
         node: Arc<Node>,
         env: impl Fn(&str) -> Option<String>,
     ) -> anyhow::Result<Self> {
-        let chain_cfg = cfg.chain.as_ref().context("the config has no [chain] section")?;
         let node_cfg = &cfg.node;
-        let chain = Chain::new(chain_cfg, node_cfg.chain_id)?;
+        let chain = cfg.chain.as_ref().map(|chain| Chain::new(chain, node_cfg.chain_id)).transpose()?;
+        let (settle_timeout, poll_interval) =
+            cfg.chain.as_ref().map_or((DEFAULT_SETTLE_TIMEOUT, DEFAULT_POLL_INTERVAL), |chain| {
+                (chain.settle_timeout, chain.poll_interval)
+            });
         let funding = match &cfg.funding {
             Some(funding) => Some(AccountKey::load(&funding.key, env).await.context("the funding key")?),
             None => None,
@@ -124,8 +128,8 @@ impl Lifecycle {
             chain_id: node_cfg.chain_id,
             vault: Address::from(node_cfg.vault.0),
             funding,
-            settle_timeout: chain_cfg.settle_timeout,
-            poll_interval: chain_cfg.poll_interval,
+            settle_timeout,
+            poll_interval,
         })
     }
 
@@ -141,7 +145,7 @@ impl Lifecycle {
             Err(CallError::Refused { status: 404, .. }) => None,
             Err(e) => return Err(e.into()),
         };
-        let claimed = self.chain.view(self.vault, Vault::emissionsClaimedCall { account: wallet }).await?;
+        let claimed = self.chain()?.view(self.vault, Vault::emissionsClaimedCall { account: wallet }).await?;
         let (unclaimed, unclaimed_newest) = match self.node.emissions(account).await {
             Ok(view) => {
                 let view = view.body;
@@ -155,9 +159,9 @@ impl Lifecycle {
         Ok(AccountStatus {
             account,
             declared,
-            wallet_eth: self.chain.balance(wallet).await?,
-            wallet_usdc: self.chain.view(tokens.usdc, ERC20::balanceOfCall { account: wallet }).await?,
-            wallet_monkey: self.chain.view(tokens.monkey, ERC20::balanceOfCall { account: wallet }).await?,
+            wallet_eth: self.chain()?.balance(wallet).await?,
+            wallet_usdc: self.chain()?.view(tokens.usdc, ERC20::balanceOfCall { account: wallet }).await?,
+            wallet_monkey: self.chain()?.view(tokens.monkey, ERC20::balanceOfCall { account: wallet }).await?,
             balance,
             unclaimed,
             unclaimed_newest,
@@ -177,7 +181,7 @@ impl Lifecycle {
         let mut unpaid = Vec::new();
         for payout in payouts.payouts {
             let nonce = payout.nonce;
-            if !self.chain.view(self.vault, Vault::usedNoncesCall { account: wallet, nonce }).await? {
+            if !self.chain()?.view(self.vault, Vault::usedNoncesCall { account: wallet, nonce }).await? {
                 unpaid.push(payout);
             }
         }
@@ -198,12 +202,19 @@ impl Lifecycle {
     /// - the vault's token addresses cannot be read
     async fn tokens(&self) -> anyhow::Result<Tokens> {
         let tokens = self.tokens.get_or_try_init(|| async {
-            self.chain.check().await?;
-            let usdc = self.chain.view(self.vault, Vault::usdcCall {}).await.context("the vault's USDC")?;
-            let monkey = self.chain.view(self.vault, Vault::monkeyCall {}).await.context("the vault's MONKEY")?;
+            self.chain()?.check().await?;
+            let usdc = self.chain()?.view(self.vault, Vault::usdcCall {}).await.context("the vault's USDC")?;
+            let monkey = self.chain()?.view(self.vault, Vault::monkeyCall {}).await.context("the vault's MONKEY")?;
             anyhow::Ok(Tokens { usdc, monkey })
         });
         Ok(*tokens.await?)
+    }
+
+    /// The chain, for an action that reads it.
+    /// Error cases:
+    /// - the config has no `[chain]` section
+    fn chain(&self) -> anyhow::Result<&Chain> {
+        self.chain.as_ref().context("the config has no [chain] section, which this action needs")
     }
 
     /// The key that pays for `account`'s transactions: the funding key when there is one.
