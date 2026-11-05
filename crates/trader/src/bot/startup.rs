@@ -14,11 +14,11 @@ use trader_core::bars::BarBuilder;
 use trader_core::controls::{Account, Controls};
 use trader_core::hours::GapTracker;
 use trader_core::marks::IndexMarks;
-use trader_core::strategies::is_valid_close;
+use trader_core::strategies::{after_unit_break, is_valid_close};
 
 use crate::bot::day::{Saved, StateFile, holding};
 use crate::bot::fills::other_market;
-use crate::bot::{Bot, Halt, orders, supported};
+use crate::bot::{Bot, Halt, bar_fits, orders, supported};
 use crate::config::Config;
 use crate::keys::AccountKey;
 use crate::node::api::MarkBucket;
@@ -100,6 +100,7 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
     info!(%account, market = market_id, %position, balance = %view.balance, head_seq, "account read");
 
     let bar_ms = Millis::try_from(strategy_cfg.bar.as_millis()).context("bar length")?;
+    bar_fits(&market.spec, bar_ms)?;
     let now = Millis::try_from(now).context("node time")?;
     let strategy = strategy_cfg.params.build()?;
     let state_file = StateFile::new(&cfg.account.state_dir, account);
@@ -109,7 +110,7 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
     // A position keeps the opening time saved for it, if it is on the side saved. One with none, as when
     // a crash came between its fill and the save, is held from now: the hold is the conservative guess.
     let opened = (!position.is_zero()).then(|| match saved.opened.get(&market_id) {
-        Some(at) if saved.side == position.signum() => *at,
+        Some(at) if saved.side == position.signum() && held.is_some_and(|p| p.entry == saved.entry) => *at,
         _ => now,
     });
     controls.restore_opened(opened.map(|at| (market_id, at)).into_iter().collect());
@@ -125,6 +126,7 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         day: controls.day_state(),
         opened: controls.opened().clone(),
         side: position.signum(),
+        entry: held.map_or(Fixed::ZERO, |p| p.entry),
         split_at: saved.split_at,
     };
     state_file.save(saved_state.clone()).await.context("keeping the saved state")?;
@@ -217,7 +219,10 @@ impl Bot {
             buckets.iter().partition(|bucket| bucket.provenance == LOG_DERIVED);
         let mut history = BarBuilder::new(bar_ms, Millis::MIN);
         let mut bars = 0;
-        let past = logged.iter().filter(|bucket| bucket.ts < live_from).map(|bucket| (bucket.ts, Some(bucket.close)));
+        // Only the history since the last split-sized step counts: before it, prices are in other units.
+        let before: Vec<&&MarkBucket> = logged.iter().filter(|bucket| bucket.ts < live_from).collect();
+        let closes: Vec<Fixed> = before.iter().map(|bucket| bucket.close).collect();
+        let past = before[after_unit_break(&closes)..].iter().map(|bucket| (bucket.ts, Some(bucket.close)));
         for (at, close) in past.chain([(live_from, None)]) {
             if let Some(bar) = history.on_command(at, close) {
                 self.gaps.on_bar(&self.spec.schedule, bar.start, bar_ms);

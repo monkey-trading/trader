@@ -8,7 +8,7 @@ use engine_core::event::Event;
 use engine_core::types::{MarketId, Millis};
 use tracing::{debug, error, info, warn};
 
-use crate::bot::{Bot, Halt};
+use crate::bot::{Bot, Halt, READ_EVERY_MS, READ_RETRY_MS};
 use crate::node::CallError;
 use crate::node::api::AccountView;
 use crate::stream::message::CommandMessage;
@@ -98,12 +98,17 @@ impl Bot {
                 }
                 let held = answer.body.positions.get(&self.market);
                 let read = held.map_or(Fixed::ZERO, |position| position.qty);
+                // A read is of the log when it holds the position the log gives. One that is not is read
+                // again soon, and nothing is valued from it. A read that is ahead of the log in other
+                // ways (a later price command, say) differs only in being newer.
                 if read != self.position {
                     self.account_behind = true;
-                    debug!(read = %read, position = %self.position, "the account read is not at the log");
+                    self.read_retry_after = self.log_ts.saturating_add(READ_RETRY_MS);
+                    debug!(read = %read, position = %self.position, head_seq = answer.head_seq, "the account read is not at the log");
                     return Ok(());
                 }
                 self.account_behind = false;
+                self.read_retry_after = self.log_ts.saturating_add(READ_EVERY_MS);
                 self.balance = answer.body.balance;
                 self.entry = held.map_or(Fixed::ZERO, |position| position.entry);
                 info!(balance = %self.balance, head_seq = answer.head_seq, "balance");
@@ -111,6 +116,7 @@ impl Bot {
             Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
             Err(e) => {
                 self.account_behind = true;
+                self.read_retry_after = self.log_ts.saturating_add(READ_RETRY_MS);
                 warn!("the balance was not read: {e}");
             }
         }

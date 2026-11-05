@@ -265,6 +265,13 @@ log="$work/bot-tiny.log"
 trip="$(grep -n 'alert="daily_loss_limit"' "$log" | head -n 1 | cut -d: -f1 || true)"
 [[ -n "$trip" ]] || fail "tiny: the daily loss limit was never reached"
 grep -q 'closing the position' <(tail -n +"$trip" "$log") || fail "tiny: the position was not closed when the limit was reached"
+# The close came from the limit, not from the stop: a fill that leaves it flat before the bots were stopped.
+python3 -I - "$work/tiny-fills.jsonl" "$stop_ms" <<'PY' || fail "tiny: the limit did not flatten the account before the stop"
+import json, sys
+stop_ms = int(sys.argv[2])
+fills = [json.loads(line) for line in open(sys.argv[1])]
+assert any(float(f["position"]) == 0 and f["ts"] < stop_ms - 30000 for f in fills), "no closing fill before the stop"
+PY
 ! grep -q 'placing a market order' <(tail -n +"$((trip + 1))" "$log") || fail "tiny: an order was placed after the limit was reached"
 echo "tiny: flattened at log line $trip, and no order after it"
 

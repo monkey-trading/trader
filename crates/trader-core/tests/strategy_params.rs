@@ -2,7 +2,7 @@
 
 use engine_core::Fixed;
 use trader_core::bands::MAX_CLOSE;
-use trader_core::strategies::{Strategy, StrategyParams, is_valid_close};
+use trader_core::strategies::{Strategy, StrategyParams, after_unit_break, is_valid_close};
 use trader_core::strategy::{ParamsError, Target};
 
 fn fx(text: &str) -> Fixed {
@@ -57,6 +57,7 @@ fn parameters_out_of_range_are_refused() {
     assert_eq!(periods("kind = 'rsi_reversion'\noversold = 60"), Some(ParamsError::Levels));
     assert_eq!(periods("kind = 'rsi_reversion'\noverbought = 40"), Some(ParamsError::Levels));
     assert_eq!(periods("kind = 'rsi_reversion'\noverbought = 100"), Some(ParamsError::Levels));
+    assert_eq!(periods("kind = 'rsi_reversion'\noversold = 50\nexit = 50\noverbought = 50"), Some(ParamsError::Levels));
     assert_eq!(periods("kind = 'bollinger_reversion'\nperiod = 1"), Some(ParamsError::BandPeriod));
     assert_eq!(periods("kind = 'bollinger_reversion'\nperiod = 1001"), Some(ParamsError::BandPeriod));
     assert_eq!(periods("kind = 'bollinger_reversion'\nwidth = 0"), Some(ParamsError::Width));
@@ -199,4 +200,21 @@ fn bollinger_leaves_a_position_at_the_middle() {
     let mut mirrored = build("kind = 'bollinger_reversion'\nperiod = 3\nwidth = 1").unwrap();
     let seen: Vec<_> = ["3", "2", "1", "3", "2"].into_iter().map(|c| mirrored.on_close(fx(c))).collect();
     assert_eq!(seen, [None, None, Some(Long), Some(Short), Some(Flat)]);
+}
+
+/// History starts after the last step of a split's size: 100 to 50 is a 2-for-1, 50 to 100 a reverse
+/// split, and the ordinary moves around them, and a 39% fall, are not breaks.
+#[test]
+fn history_starts_after_a_split_sized_step() {
+    let closes = |texts: &[&str]| texts.iter().map(|t| fx(t)).collect::<Vec<_>>();
+    assert_eq!(after_unit_break(&closes(&["100", "101", "99", "100"])), 0);
+    assert_eq!(after_unit_break(&closes(&["100", "101", "50", "51", "50.5"])), 2);
+    assert_eq!(after_unit_break(&closes(&["50", "51", "102", "101"])), 2);
+    assert_eq!(after_unit_break(&closes(&["100", "50", "100", "99"])), 2, "the last break counts");
+    assert_eq!(after_unit_break(&closes(&["100", "61", "62"])), 0, "a fall of 39% is a move");
+    assert_eq!(after_unit_break(&closes(&["100", "59.999999999"])), 1);
+    assert_eq!(after_unit_break(&closes(&["100", "167", "168"])), 0, "a rise of 67% is a move");
+    assert_eq!(after_unit_break(&closes(&["100", "167.000000001"])), 1);
+    assert_eq!(after_unit_break(&closes(&["100"])), 0);
+    assert_eq!(after_unit_break(&[]), 0);
 }

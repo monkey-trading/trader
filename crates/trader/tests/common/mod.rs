@@ -4,8 +4,11 @@
 #![allow(dead_code)]
 
 mod bot;
+mod controls;
 #[allow(unused_imports)]
 pub use bot::*;
+#[allow(unused_imports)]
+pub use controls::*;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;

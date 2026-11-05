@@ -26,13 +26,18 @@ impl RsiReversion {
     /// A reversion over `period` changes with the three levels, in index points.
     /// Error cases:
     /// - `period` is zero or above `MAX_PERIOD`
-    /// - the levels are not `0 < oversold <= exit <= overbought < 100`
+    /// - the levels are not `0 < oversold <= exit <= overbought < 100` with oversold below overbought, so no close enters both ways
     pub fn new(period: usize, oversold: Fixed, exit: Fixed, overbought: Fixed) -> Result<Self, ParamsError> {
         if period == 0 || period > MAX_PERIOD {
             return Err(ParamsError::Period);
         }
         let hundred = Fixed::from_int(100);
-        if !(Fixed::ZERO < oversold && oversold <= exit && exit <= overbought && overbought < hundred) {
+        if !(Fixed::ZERO < oversold
+            && oversold < overbought
+            && oversold <= exit
+            && exit <= overbought
+            && overbought < hundred)
+        {
             return Err(ParamsError::Levels);
         }
         Ok(Self { rsi: Rsi::new(period), oversold, exit, overbought, target: Target::Flat })

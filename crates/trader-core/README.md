@@ -63,7 +63,7 @@ let mut controls = Controls::new(risk, sizing, restored_day)?;
 if let Some(bar) = bars.on_command(ts, Some(mark))
     && let Some(target) = strategy.on_close(bar.close)
 {
-    match controls.decide(&account, &BarTarget { ts, market, spec: &spec, mark, target, gap, close_first }) {
+    match controls.decide(&account, &BarTarget { ts, market, spec: &spec, mark, target, gap, close_first, max_slippage_bps }) {
         Decision::Order(order) => { /* sign and send it */ }
         Decision::Flatten => { /* close every position */ }
         Decision::AtTarget | Decision::Refused(_) => {}

@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use engine_core::Fixed;
@@ -29,6 +29,9 @@ pub(super) struct Saved {
     /// The side of the position `opened` belongs to: 1 long, -1 short, 0 none.
     #[serde(default)]
     pub(super) side: i64,
+    /// The entry price of that position: another entry is another position, whatever its side.
+    #[serde(default)]
+    pub(super) entry: Fixed,
     /// When the market split, if the bot halted at one: prices before it are in other units.
     #[serde(default)]
     pub(super) split_at: Option<Millis>,
@@ -42,7 +45,7 @@ pub(super) struct StateFile {
 
 impl StateFile {
     /// The file for `account` in `dir`.
-    pub(super) fn new(dir: &std::path::Path, account: AccountId) -> Self {
+    pub(super) fn new(dir: &Path, account: AccountId) -> Self {
         Self { path: dir.join(format!("{account}.json")) }
     }
 
@@ -114,8 +117,9 @@ impl Bot {
     }
 
     /// While the daily loss limit has stopped the account and it still holds a position, closes it,
-    /// again every `FLATTEN_RETRY_MS` of sequenced time, on any command: a close the engine declined,
-    /// or one held back by an order in flight, does not wait for a move of the mark or the next bar.
+    /// again on any command at least `FLATTEN_RETRY_MS` of sequenced time after the last try and once
+    /// the last close's expiry has passed: a close the engine declined does not wait for a move of the mark
+    /// or the next bar.
     /// Error cases:
     /// - an answer signed by another key than the signer
     pub(super) async fn retry_flatten(&mut self, ts: Millis, lag: Millis) -> Result<(), Halt> {
@@ -139,7 +143,8 @@ impl Bot {
         {
             return;
         }
-        let state = Saved { day, opened: self.controls.opened().clone(), side, split_at: self.split_at };
+        let state =
+            Saved { day, opened: self.controls.opened().clone(), side, entry: self.entry, split_at: self.split_at };
         match self.state_file.save(state.clone()).await {
             Ok(()) => {
                 self.saved_state = state;

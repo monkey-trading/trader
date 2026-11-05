@@ -33,7 +33,9 @@ answer that fails the check is an error, never data, and one signed by another k
   keeps it stopped until the next UTC day, across restarts), a margin buffer over the engine's
   requirement, positive cash, a minimum hold, and the market's trading hours. A market with hours
   is followed as the engine prices it, a halt or closure leaves no order, and the first bar after
-  one is a gap; a split or a failed corporate action in the market halts the bot
+  one is a gap; a split or a failed corporate action in the market halts the bot, and a warm-up
+  starts after the last step in the history of 40% down or 67% up, which only a split makes. A split
+  smaller than 2-for-1, or one while the bot is stopped, is not seen
 - Signed market orders toward the strategy's target, on the account's next nonce, quoted at the
   last mark; a declined order is logged with the node's reason and retried on the next bar, and a
   reversal the engine refuses whole is retried as a reduce-only close, then an opening order. No
@@ -80,8 +82,10 @@ answer that fails the check is an error, never data, and one signed by another k
 - `tests/node_answers.rs`, `tests/stream.rs`, `tests/bot.rs`: the binary against the stand-in
 - `tests/bot_halts.rs`: the bot against the stand-in when its market is relisted, the log cannot be
   read, the node changes signer, or a stop cannot leave the account as it should
-- `tests/bot_controls.rs`: the daily loss limit, a market's halt, the minimum hold, cash, the margin
-  buffer, a split and a failed corporate action
+- `tests/bot_controls.rs`: the daily loss limit, a market's halt, the minimum hold, cash and the margin
+  buffer
+- `tests/bot_state.rs`: a split, a failed corporate action, a dividend, a position in another market,
+  a read behind the log, a state file that cannot be written, and what a restart keeps
 - `tests/bot_orders.rs`: the bot's orders when one is refused, goes unanswered, or is a reversal the
   engine refuses whole, and when someone else trades the account
 - `tests/bot_warm_up.rs`: the warm-up from the marks history, which moves of the mark make bars,
@@ -122,8 +126,8 @@ one the config names.
 
 ```bash
 cargo test -p trader
-./scripts/dev-trade-one.sh   # the dev scenarios, about seventeen and twenty minutes
-./scripts/dev-strategies.sh
+./scripts/dev-trade-one.sh   # a dev scenario, about seventeen minutes
+./scripts/dev-strategies.sh  # another, about twenty minutes
 ```
 
 ## Authors

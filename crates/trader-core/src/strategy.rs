@@ -27,7 +27,7 @@ pub enum ParamsError {
     BandPeriod,
     #[error("the band width must be above 0 and at most {MAX_WIDTH} standard deviations")]
     Width,
-    #[error("the levels must satisfy 0 < oversold <= exit <= overbought < 100")]
+    #[error("the levels must satisfy 0 < oversold <= exit <= overbought < 100, with oversold below overbought")]
     Levels,
     #[error("the exit period must be from 1 to the entry period, which is at most {MAX_PERIOD}")]
     ExitPeriod,

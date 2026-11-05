@@ -160,6 +160,17 @@ impl Strategy {
     }
 }
 
+/// Where the history that counts starts in `closes`, oldest first: after the last step of more than
+/// 40% down or 67% up between neighbours, which no market moves in a bar but a split does (2-for-1 or
+/// more; a smaller ratio cannot be told from a move). History before it is in other units.
+pub fn after_unit_break(closes: &[Fixed]) -> usize {
+    let broken = |pair: &[Fixed]| {
+        let (before, after) = (pair[0], pair[1]);
+        after.mul_int(100) < before.mul_int(60) || after.mul_int(100) > before.mul_int(167)
+    };
+    closes.windows(2).rposition(broken).map_or(0, |at| at + 1)
+}
+
 /// Whether `close` is a mark the strategies take: positive, and at most `MAX_CLOSE`, which keeps
 /// every indicator's arithmetic inside its integers.
 pub fn is_valid_close(close: Fixed) -> bool {

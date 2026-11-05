@@ -10,7 +10,7 @@ use engine_core::command::{CancelAllRequest, CloseAllRequest, CloseEntry};
 use engine_core::eip712::{cancel_all_hash, close_all_hash};
 use engine_core::types::Millis;
 use tokio::time::{Instant, timeout_at};
-use tracing::{Instrument, error, info, info_span, warn};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 use trader_core::hours::is_open;
 
 use crate::bot::orders::{EXPIRES_IN_MS, log_order_events};
@@ -176,11 +176,11 @@ impl Bot {
             return Ok(());
         }
         if !is_open(&self.spec.schedule, ts) {
-            info!("the market is shut: the position is closed when it opens");
+            debug!("the market is shut: the position is closed when it opens");
             return Ok(());
         }
         if let Some(reason) = self.order_in_flight(ts) {
-            info!("{reason}: the position is closed at a later bar");
+            debug!("{reason}: the position is closed once it cannot");
             return Ok(());
         }
         let Some(quoted) = self.mark else {

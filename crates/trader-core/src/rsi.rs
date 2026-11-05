@@ -3,6 +3,7 @@
 use std::cmp::Ordering;
 
 use engine_core::Fixed;
+use engine_core::fixed::Rounding;
 
 use crate::sma::MAX_PERIOD;
 
@@ -78,7 +79,7 @@ impl Rsi {
         if total.is_zero() {
             return Some(Fixed::from_int(50));
         }
-        Some(Fixed::from_int(100).mul_div(self.gain, total, engine_core::fixed::Rounding::TowardZero))
+        Some(Fixed::from_int(100).mul_div(self.gain, total, Rounding::TowardZero))
     }
 }
 

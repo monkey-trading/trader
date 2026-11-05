@@ -282,7 +282,7 @@ jobs:
         run: tail -n 200 "$RUNNER_TEMP"/dev-trade-one/*.log
 
   # The strategies' dev scenario (scripts/dev-strategies.sh): a dev node from the engine commit
-  # Cargo.lock pins, and seven accounts trading on it for fifteen minutes, one per strategy. The node, its tools and its dev
+  # Cargo.lock pins, and six strategies on seven accounts trading on it for fifteen minutes, one with a tiny daily loss limit. The node, its tools and its dev
   # config are built once per engine commit and cached by it; a push to main that only refreshes
   # caches builds them and the bot, and runs nothing.
   dev-strategies:

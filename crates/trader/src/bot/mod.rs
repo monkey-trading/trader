@@ -40,10 +40,13 @@ use crate::stream::{Frame, Stream, StreamError};
 pub(super) const REPLAY_LAG_MS: Millis = 30_000;
 
 /// How long, in sequenced time, between reads of the account while the last one was not at the log.
-const READ_RETRY_MS: Millis = 5_000;
+pub(super) const READ_RETRY_MS: Millis = 5_000;
 
 /// How long, in sequenced time, between reads of the account that was at the log.
-const READ_EVERY_MS: Millis = 60_000;
+pub(super) const READ_EVERY_MS: Millis = 60_000;
+
+/// A day.
+const DAY_MS: Millis = 86_400_000;
 
 /// Why the bot stopped on its own.
 #[derive(Debug, thiserror::Error)]
@@ -254,8 +257,6 @@ impl Bot {
         let read = message.ts >= self.read_retry_after;
         if read {
             self.refresh_balance().await?;
-            let wait = if self.account_behind { READ_RETRY_MS } else { READ_EVERY_MS };
-            self.read_retry_after = message.ts.saturating_add(wait);
         }
         if moved.is_some() || filled || read {
             self.check_day(message.ts).await?;
@@ -284,6 +285,7 @@ impl Bot {
             return Ok(());
         }
         supported(spec).map_err(Halt::Unfollowable)?;
+        bar_fits(spec, self.bar_ms).map_err(Halt::Unfollowable)?;
         self.controls.check_market(spec).map_err(|e| Halt::Unfollowable(e.into()))?;
         info!(market = self.market, rules = ?spec.price_rules, "the market's listing changed");
         self.marks.set_rules(ts, spec.price_rules);
@@ -331,6 +333,8 @@ impl Bot {
             max_slippage_bps: self.max_slippage_bps,
         };
         let decision = self.controls.decide(&account, &wanted);
+        // The decision may have tripped the daily limit: that is kept before anything is done about it.
+        self.save_state().await;
         self.track_cash_alert(&decision);
         let intent = match decision {
             Decision::AtTarget => return Ok(()),
@@ -378,6 +382,19 @@ pub(crate) fn supported(spec: &MarketSpec) -> anyhow::Result<()> {
     anyhow::ensure!(
         spec.quote_currency == QuoteCurrency::Usd && spec.contracts.is_empty(),
         "{} is not a USD market priced from spot quotes, the only markets the bot trades",
+        spec.symbol
+    );
+    Ok(())
+}
+
+/// Checks a bar fits the market's hours: a daily bar of a market with hours always spans a closure, so
+/// every one would be a gap or end while the market is shut, and the bot would never trade.
+/// Error cases:
+/// - a market with trading hours and a bar of a day
+pub(crate) fn bar_fits(spec: &MarketSpec, bar_ms: Millis) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(spec.schedule, engine_core::session::Schedule::AlwaysOpen) || bar_ms < DAY_MS,
+        "{} has trading hours, so a bar of a day always spans a closure and would never trade",
         spec.symbol
     );
     Ok(())
