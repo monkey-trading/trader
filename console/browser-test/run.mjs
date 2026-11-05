@@ -117,7 +117,9 @@ try {
         fresh.state, usdc(f.equity), signed(f.realised_pnl), signed(f.unrealised_pnl),
         f.margin_level_bps === null ? "—" : percent(f.margin_level_bps), String(f.positions.length), monkey(f.monkey.newest_entitled),
       ];
-      return want.every((text, index) => cells[index] === text) ? true : { cells, want };
+      // The state cell may carry the day stop's note after the state.
+      const matches = want.every((text, index) => (index === 0 ? cells[0]?.startsWith(text) : cells[index] === text));
+      return matches ? true : { cells, want };
     });
   }
 
