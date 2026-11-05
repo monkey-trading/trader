@@ -55,10 +55,20 @@ key = { type = "hex_file", path = "account.hex" }
 [strategy]
 market = "BTC-USD"
 bar = "1m"
+kind = "sma_crossover"
 fast = 1
 slow = 2
-qty = "0.5"
 max_slippage_bps = 25
+
+[sizing]
+by = "fixed_notional"
+notional = "50000"
+max_leverage = "5"
+
+[risk]
+max_open_positions = 1
+max_total_notional = "200000"
+daily_loss = { usd = "100000" }
 CONFIG
   } | case "$1" in
     0) cat ;;
