@@ -18,6 +18,19 @@ use crate::stream::message::{CommandMessage, EventHead, FillRef, OrderRef};
 /// which are skipped without being read. A kind not listed is read as the pinned engine's `Event`,
 /// which refuses one the pinned engine does not write: the bot halts on a log of another version.
 /// A bump of the engine's `rev` that adds a kind needs it listed here to keep the fast path.
+/// The events that move an account's cash without a fill, each naming the account.
+const CASH_EVENTS: [&str; 8] = [
+    "corporate_dividend",
+    "corporate_cash_in_lieu",
+    "deposited",
+    "withdrawal_approved",
+    "close_out",
+    "bad_debt",
+    "financing",
+    "distribution_allocated",
+];
+
+/// The kinds of event the pinned engine writes, skipped unread.
 const KNOWN_EVENTS: [&str; 55] = [
     "corporate_action_scheduled",
     "corporate_entitlements_captured",
@@ -88,9 +101,9 @@ impl Fleet {
         if let "corporate_split" | "corporate_action_failed" = head.kind {
             return self.corporate_action(message, event);
         }
-        if let ("corporate_dividend" | "corporate_cash_in_lieu", Some(address)) = (head.kind, head.account) {
+        if let (true, Some(address)) = (CASH_EVENTS.contains(&head.kind), head.account) {
             // Cash moves without a fill: the balance held is not the account's, and nothing is valued from
-            // it, until a read agrees.
+            // it, or ordered on it, until a read agrees.
             if let Some(account) = self.account_of(address) {
                 let (log_ts, entry) = (self.log_ts, &mut self.accounts[account as usize]);
                 entry.epoch += 1;

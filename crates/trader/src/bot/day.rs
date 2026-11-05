@@ -54,20 +54,21 @@ impl Saved {
         if side == 0 && split_at.is_none() {
             return Ok(());
         }
-        // The file names its market by the position's opening time, when it holds one: it belongs to that
-        // market only, and an account moved to another market does not inherit its split.
+        // The file names its market by the opening time of its position, when it holds one.
         let mut named = self.opened.keys();
-        if let (Some(&only), None) = (named.next(), named.next())
-            && markets != [only]
-        {
-            return Ok(());
-        }
-        let [market] = markets else {
-            anyhow::bail!(
-                "the saved state was written for one market, and this account trades {}: move the file aside to start it afresh",
-                markets.len()
-            );
+        let market = match (named.next(), named.next()) {
+            (Some(&only), None) if markets.contains(&only) => only,
+            // A position of a market the account no longer trades is not its own.
+            (Some(_), None) => return Ok(()),
+            _ => match markets {
+                [only] => *only,
+                _ => anyhow::bail!(
+                    "the saved state was written for one market, and this account trades {}: move the file aside to start it afresh",
+                    markets.len()
+                ),
+            },
         };
+        let market = &market;
         if side != 0 {
             self.positions.entry(*market).or_insert(SavedPosition { side, entry });
         }
@@ -132,5 +133,40 @@ impl StateFile {
         })
         .await?
         .with_context(|| format!("writing {}", self.path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy(opened: &[MarketId]) -> Saved {
+        Saved {
+            opened: opened.iter().map(|&m| (m, 5)).collect(),
+            side: 1,
+            entry: "100".parse().unwrap(),
+            split_at: Some(9),
+            ..Saved::default()
+        }
+    }
+
+    #[test]
+    fn a_one_market_file_moves_to_the_market_it_names() {
+        // Named, and still traded beside another market.
+        let mut saved = legacy(&[1]);
+        saved.migrate(&[1, 2]).unwrap();
+        assert_eq!(
+            (saved.splits.keys().collect::<Vec<_>>(), saved.positions.keys().collect::<Vec<_>>()),
+            (vec![&1], vec![&1])
+        );
+        // Named, and no longer traded: nothing of it is the account's.
+        let mut saved = legacy(&[1]);
+        saved.migrate(&[2]).unwrap();
+        assert!(saved.splits.is_empty() && saved.positions.is_empty());
+        // Unnamed, for the one market the account trades; refused for several.
+        let mut saved = legacy(&[]);
+        saved.migrate(&[3]).unwrap();
+        assert_eq!(saved.splits.get(&3), Some(&9));
+        assert!(legacy(&[]).migrate(&[1, 2]).is_err());
     }
 }

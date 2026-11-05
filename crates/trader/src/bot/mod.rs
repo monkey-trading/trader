@@ -10,6 +10,7 @@ mod apply;
 pub mod day;
 mod decide;
 mod fills;
+mod flatten;
 pub mod fleet;
 mod orders;
 mod reads;

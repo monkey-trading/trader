@@ -30,6 +30,8 @@ pub(super) enum Done {
         account: u32,
         assignment: u32,
         nonce: u64,
+        /// The expiry the request was signed with: until the log passes it, it may still enter the log.
+        expires_at: engine_core::types::Millis,
         outcome: Result<Verified<Vec<engine_core::event::Event>>, CallError>,
     },
     Nonce {
@@ -160,7 +162,9 @@ impl Runner {
     /// - an answer signed by another key than the signer
     pub(super) fn handle(&mut self, done: Done) -> Result<(), Halt> {
         match done {
-            Done::Order { account, assignment, nonce, outcome } => self.order_done(account, assignment, nonce, outcome),
+            Done::Order { account, assignment, nonce, expires_at, outcome } => {
+                self.order_done(account, assignment, nonce, expires_at, outcome)
+            }
             Done::Nonce { account, outcome } => self.nonce_done(account, outcome),
             Done::View { account, outcome } => self.view_done(account, outcome),
             Done::Saved { account, saved, outcome } => self.saved_done(account, saved, outcome),

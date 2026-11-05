@@ -25,8 +25,8 @@ impl Fleet {
     /// Applies one message of the log, sent by the node at `node_time` as `at`.
     /// Error cases:
     /// - a command or its events the pinned engine cannot read
-    /// - a new listing makes a market one the bot does not trade,
-    ///   (an account it cannot size for, or a bar length it no longer fits, stops only that account)
+    /// - a new listing makes a market one the bot does not trade; an account it cannot size for, or a bar
+    ///   length it no longer fits, stops only that account
     /// - a corporate action that changes a traded market's units or fails
     pub fn apply(&mut self, msg: &str, at: Offset, node_time: u64) -> Result<(), Halt> {
         let unreadable = |e: anyhow::Error| Halt::Unfollowable(e.context(format!("the log message at {at}")));
@@ -97,6 +97,10 @@ impl Fleet {
             if let Err(e) = self.accounts[account as usize].controls.check_market(spec) {
                 refused.push((account, format!("sizing for {}: {e}", spec.symbol)));
             }
+        }
+        // An order decided under the old listing is not sent under the new.
+        for &a in &feed.assignments {
+            self.accounts[self.assignments[a as usize].account as usize].epoch += 1;
         }
         for (account, reason) in refused {
             self.fail(account, format!("the market's new listing: {reason}"));

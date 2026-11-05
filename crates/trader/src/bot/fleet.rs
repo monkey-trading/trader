@@ -125,6 +125,8 @@ pub struct Account {
     pub read_after: Millis,
     /// The earliest sequenced time the daily loss limit tries to close the positions again.
     pub flatten_after: Millis,
+    /// The slippage bound of the group of markets the last close of the account named.
+    pub flatten_bound: Option<i64>,
     pub loss_alert: bool,
     pub cash_alert: bool,
     /// The earliest a failed nonce read is tried again.
@@ -378,6 +380,7 @@ impl Fleet {
                 behind: false,
                 read_after: Millis::MIN,
                 flatten_after: Millis::MIN,
+                flatten_bound: None,
                 loss_alert: false,
                 cash_alert: false,
                 retry_at: None,

@@ -30,26 +30,27 @@ fn reading_the_log_allocates_a_fixed_few_times_once_warm() {
     let log = hour(37, 12 * 60, seq);
     let split = log.iter().position(|e| e.ts >= T0 + 10_000 + 2 * MINUTE).unwrap();
     let (warm_up, measured) = log.split_at(split);
-    let drain = |fleet: &mut Fleet| -> u64 {
+    let drain = |fleet: &mut Fleet| -> (u64, u64) {
         // The runner reads the accounts a bar wants decided and takes the decisions.
-        let (_, allocations) = settle_counting(fleet);
+        let (_, worst, total) = settle_counting(fleet);
         while let Some(a) = fleet.queue.pop_front() {
             let asg = &mut fleet.assignments[a as usize];
             (asg.pending, asg.queued) = (None, false);
         }
-        allocations
+        (worst, total)
     };
     for e in warm_up {
         fleet.apply(&e.msg, at(e.seq), u64::try_from(e.ts + 20).unwrap()).unwrap();
         drain(&mut fleet);
     }
     let decisions = fleet.decisions;
-    let (mut total, mut worst, mut worst_at, mut deciding) = (0, 0, 0, 0);
+    let (mut total, mut worst, mut worst_at, mut deciding, mut deciding_total) = (0, 0, 0, 0, 0);
     for e in measured {
         let info = allocation_counter::measure(|| {
             fleet.apply(&e.msg, at(e.seq), u64::try_from(e.ts + 20).unwrap()).unwrap();
         });
-        deciding = deciding.max(drain(&mut fleet));
+        let (read_worst, read_total) = drain(&mut fleet);
+        (deciding, deciding_total) = (deciding.max(read_worst), deciding_total + read_total);
         total += info.count_total;
         if info.count_total > worst {
             (worst, worst_at) = (info.count_total, e.seq);
@@ -64,4 +65,5 @@ fn reading_the_log_allocates_a_fixed_few_times_once_warm() {
     );
     assert!(worst <= PER_MESSAGE, "a message at seq {worst_at} allocated {worst} times, over {PER_MESSAGE}");
     assert!(deciding <= PER_READ, "a read and its decisions allocated {deciding} times, over {PER_READ}");
+    assert!(deciding_total <= taken, "{taken} decisions to trade, and the reads allocated {deciding_total} times");
 }

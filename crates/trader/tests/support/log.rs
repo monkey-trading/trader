@@ -98,14 +98,14 @@ pub fn settle(fleet: &mut Fleet) -> usize {
     settle_with(fleet, false).0
 }
 
-/// `settle`, also returning the most allocations any one read cost to take and decide from: the views
-/// the node would answer with are built outside the count.
-pub fn settle_counting(fleet: &mut Fleet) -> (usize, u64) {
+/// `settle`, also returning the most allocations any one read cost to take and decide from, and the
+/// total: the views the node would answer with are built outside the count.
+pub fn settle_counting(fleet: &mut Fleet) -> (usize, u64, u64) {
     settle_with(fleet, true)
 }
 
-fn settle_with(fleet: &mut Fleet, counting: bool) -> (usize, u64) {
-    let (mut settled, mut allocations) = (0, 0);
+fn settle_with(fleet: &mut Fleet, counting: bool) -> (usize, u64, u64) {
+    let (mut settled, mut worst, mut total) = (0, 0, 0);
     while let Some(account) = fleet.reads.pop_front() {
         let entry = &mut fleet.accounts[account as usize];
         entry.read_wanted = false;
@@ -125,13 +125,14 @@ fn settle_with(fleet: &mut Fleet, counting: bool) -> (usize, u64) {
             }
         };
         if counting {
-            allocations = allocations.max(allocation_counter::measure(|| take(fleet)).count_total);
+            let count = allocation_counter::measure(|| take(fleet)).count_total;
+            (worst, total) = (worst.max(count), total + count);
         } else {
             take(fleet);
         }
         settled += 1;
     }
-    (settled, allocations)
+    (settled, worst, total)
 }
 
 /// The offset of seq `seq`'s command.

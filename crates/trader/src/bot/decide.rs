@@ -330,7 +330,8 @@ impl Fleet {
                     warn!(alert = "daily_loss_limit", account = %acc.address, ?state, "the daily loss limit is reached: flattening and stopping until the next UTC day");
                 }
                 acc.loss_alert = true;
-                // The close is asked for by `retry_flattens`, at the next command, behind the replay lag.
+                // The close is asked for by `retry_flattens`, behind the replay lag: on this command when a mark move
+                // observed the loss, at the next when a read did.
                 if !self.stopped.contains(&account) {
                     self.stopped.push(account);
                 }
