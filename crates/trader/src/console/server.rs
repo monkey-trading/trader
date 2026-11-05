@@ -197,7 +197,13 @@ impl Server {
 
 /// An account's view as JSON.
 fn view(address: AccountId, status: &AccountStatus, node: &NodeView) -> Value {
-    let view = AccountView { address, status, figures: node.figures.as_deref(), error: node.error.as_deref() };
+    let view = AccountView {
+        address,
+        status,
+        figures: node.figures.as_deref(),
+        error: node.error.as_deref(),
+        curve: &node.curve,
+    };
     serde_json::to_value(view).expect("an account's view serializes")
 }
 

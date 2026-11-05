@@ -60,7 +60,8 @@ bind = "0.0.0.0:8443"
 # The generated certificate and key, the login's hash, and the controls the console set, which a
 # restart keeps.
 data_dir = "data"
-# How often the console reads each account from the node.
+# How often the console reads each account from the node. Each account's equity curve keeps the
+# latest read of each minute for the last 24 hours, in memory: a restart starts it again.
 refresh_interval = "5s"
 # PEM files to serve instead of the generated certificate.
 # tls = { cert = "console.crt", key = "console.key" }

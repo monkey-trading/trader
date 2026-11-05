@@ -1,5 +1,6 @@
 //! Reads each account from the node for the console, every `refresh_interval`: its figures, its
-//! MONKEY entitlement, and its fills since the last read, each a verified answer. The first read of
+//! MONKEY entitlement, and its fills since the last read, each a verified answer, and adds its
+//! equity to its curve. The first read of
 //! an account goes through its whole fill history, which realised profit and loss is summed over;
 //! later reads take only the fills after the newest one seen. A read that fails keeps the last
 //! figures and says why; an answer signed by another key clears them.
@@ -13,7 +14,7 @@ use engine_core::types::{AccountId, MarketId};
 use tokio::sync::watch;
 use tracing::{Instrument, error, info, info_span, warn};
 
-use crate::console::board::{Figures, FillView, NodeView};
+use crate::console::board::{CurvePoint, Figures, FillView, Listing, NodeView, record};
 use crate::node::{CallError, Node};
 
 /// The most fills the console keeps for an account.
@@ -24,14 +25,16 @@ pub struct Refresher {
     node: Node,
     interval: Duration,
     accounts: Vec<Tracked>,
-    symbols: BTreeMap<MarketId, String>,
+    markets: BTreeMap<MarketId, Listing>,
 }
 
-/// An account the refresher reads, where it publishes what it read, and its fills so far.
+/// An account the refresher reads, where it publishes what it read, its fills so far, and its
+/// equity curve.
 struct Tracked {
     address: AccountId,
     view: watch::Sender<NodeView>,
     ledger: Ledger,
+    curve: Vec<CurvePoint>,
     /// Whether the last read failed: an alert fires once per run of failures.
     failing: bool,
 }
@@ -52,10 +55,11 @@ impl Refresher {
             .iter()
             .map(|&address| {
                 let (view, receiver) = watch::channel(NodeView::default());
-                (Tracked { address, view, ledger: Ledger::default(), failing: false }, receiver)
+                let ledger = Ledger::default();
+                (Tracked { address, view, ledger, curve: Vec::new(), failing: false }, receiver)
             })
             .unzip();
-        (Self { node, interval, accounts, symbols: BTreeMap::new() }, views)
+        (Self { node, interval, accounts, markets: BTreeMap::new() }, views)
     }
 
     /// Reads every account, then waits `interval`, for as long as the console runs.
@@ -66,31 +70,51 @@ impl Refresher {
         }
     }
 
-    /// Reads the markets' symbols, then each account once.
+    /// Reads the markets' symbols and marks, then each account once. Without an answer the symbols
+    /// stay as last read, and no mark is shown.
     pub async fn refresh(&mut self) {
         match self.node.markets().await {
-            Ok(markets) => self.symbols = markets.body.into_iter().map(|m| (m.spec.id, m.spec.symbol)).collect(),
-            Err(e) => warn!("the markets were not read; their symbols are as last read: {e}"),
+            Ok(markets) => {
+                self.markets = markets
+                    .body
+                    .into_iter()
+                    .map(|m| {
+                        let listing = Listing {
+                            symbol: m.spec.symbol,
+                            quote: m.spec.quote_currency,
+                            mark: m.mark,
+                            fx_mark: m.fx_mark,
+                        };
+                        (m.spec.id, listing)
+                    })
+                    .collect();
+            }
+            Err(e) => {
+                warn!("the markets were not read; their symbols are as last read, with no marks: {e}");
+                self.markets.values_mut().for_each(|listing| (listing.mark, listing.fx_mark) = (None, None));
+            }
         }
         for account in &mut self.accounts {
             let span = info_span!("refresh", account = %account.address);
-            account.refresh(&self.node, &self.symbols).instrument(span).await;
+            account.refresh(&self.node, &self.markets).instrument(span).await;
         }
     }
 }
 
 impl Tracked {
     /// Reads the account and publishes what it read, or why it could not.
-    async fn refresh(&mut self, node: &Node, symbols: &BTreeMap<MarketId, String>) {
-        let error = match self.read(node, symbols).await {
+    async fn refresh(&mut self, node: &Node, markets: &BTreeMap<MarketId, Listing>) {
+        let error = match self.read(node, markets).await {
             Ok(figures) => {
                 if self.failing {
                     info!(alert_resolved = "console_read_failed", "the account reads again");
                 }
                 self.failing = false;
+                record(&mut self.curve, CurvePoint { time_ms: figures.time_ms, equity: figures.equity });
                 let fills = Arc::new(self.ledger.fills.clone());
+                let curve = Arc::new(self.curve.clone());
                 self.view.send_if_modified(|view| {
-                    let next = NodeView { figures: Some(Arc::new(figures)), fills, error: None };
+                    let next = NodeView { figures: Some(Arc::new(figures)), fills, curve, error: None };
                     let changed = *view != next;
                     *view = next;
                     changed
@@ -102,6 +126,7 @@ impl Tracked {
                     error!(alert = "node_signer_mismatch", "{e}; the console shows nothing of the account");
                 }
                 self.ledger = Ledger::default();
+                self.curve.clear();
                 self.view.send_replace(NodeView::default());
                 e.to_string()
             }
@@ -122,12 +147,12 @@ impl Tracked {
     /// The account's figures, entitlement and new fills, each verified.
     /// Error cases:
     /// - see `CallError`, for any of the three reads
-    async fn read(&mut self, node: &Node, symbols: &BTreeMap<MarketId, String>) -> Result<Figures, CallError> {
+    async fn read(&mut self, node: &Node, markets: &BTreeMap<MarketId, Listing>) -> Result<Figures, CallError> {
         let answer = node.account_figures(self.address).await?;
         let entitlement = node.entitlement(self.address).await?;
-        self.ledger.catch_up(node, self.address, symbols).await?;
+        self.ledger.catch_up(node, self.address, markets).await?;
         let signed = (answer.time_ms, answer.head_seq);
-        Ok(Figures::new(answer.body, signed, entitlement, self.ledger.realised, symbols))
+        Ok(Figures::new(answer.body, signed, entitlement, self.ledger.realised, markets))
     }
 }
 
@@ -142,7 +167,7 @@ impl Ledger {
         &mut self,
         node: &Node,
         account: AccountId,
-        symbols: &BTreeMap<MarketId, String>,
+        markets: &BTreeMap<MarketId, Listing>,
     ) -> Result<(), CallError> {
         let (mut realised, mut newest, mut fresh) = (Fixed::ZERO, None, Vec::new());
         let mut before: Option<String> = None;
@@ -152,7 +177,7 @@ impl Ledger {
                 realised = realised + fill.fill.realised_pnl - fill.fill.profit_fee;
                 newest.get_or_insert_with(|| fill.cursor.clone());
                 if fresh.len() < FILLS_KEPT {
-                    let symbol = symbols.get(&fill.fill.market).cloned();
+                    let symbol = markets.get(&fill.fill.market).map(|listing| listing.symbol.clone());
                     fresh.push(FillView { fill, symbol });
                 }
             }

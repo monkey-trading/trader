@@ -1,6 +1,7 @@
 //! What the console reads, against the stand-in: each account's figures as the node's verified
-//! answers give them, realised profit and loss over the account's whole fill history, read page by
-//! page and then only past the newest fill, the totals, the last figures kept through a failed read
+//! answers give them, with each position's mark and close-out, realised profit and loss over the
+//! account's whole fill history, read page by page and then only past the newest fill, the equity
+//! curve, the totals, the last figures kept through a failed read
 //! and cleared by an answer from another signer, and the live feed's snapshot and changes.
 
 mod common;
@@ -18,6 +19,7 @@ fn seed_figures(stand_in: &StandIn) {
     stand_in.with(|i| {
         let mut view = figures_view("1000", "1012.5", "50", json!({ "1": { "qty": "0.5", "entry": "100" } }));
         view["orders"] = json!({ "9": common::resting_order(9) });
+        view["closeouts"] = json!([{ "market": 1, "reach": "at", "price": "60.5" }]);
         i.accounts.insert(a.clone(), view);
         i.emissions.insert(a.clone(), emissions_answer(&a, "5", "9"));
         i.history.insert(
@@ -54,11 +56,16 @@ async fn reads_match_the_nodes_answers() {
         assert_eq!(figures[field], value, "{field}: {figures}");
     }
     assert_eq!(figures["margin_level_bps"], 202_500);
-    assert_eq!(figures["positions"], json!([{ "market": 1, "symbol": "BTC-USD", "qty": "0.5", "entry": "100" }]));
+    assert_eq!(
+        figures["positions"],
+        json!([{ "market": 1, "symbol": "BTC-USD", "qty": "0.5", "entry": "100", "mark": "99",
+            "unrealised_pnl": "-0.5", "closeout": { "reach": "at", "price": "60.5" } }])
+    );
     assert_eq!(figures["orders"][0]["order_id"], 9);
     assert_eq!(figures["monkey"], json!({ "entitled": "5", "newest_entitled": "9", "claimed": null }));
     assert_eq!(view["strategies"][0]["market"], "BTC-USD");
 
+    assert_eq!(view["curve"], json!([{ "time_ms": figures["time_ms"], "equity": "1012.5" }]));
     let fills = running.get(&format!("/api/accounts/{a}/fills"), &cookie).await.body;
     let cursors: Vec<_> = fills["fills"].as_array().unwrap().iter().map(|f| f["cursor"].clone()).collect();
     assert_eq!(cursors, [json!("30:0"), json!("20:1"), json!("20:0")]);
@@ -120,8 +127,8 @@ async fn a_failed_read_keeps_the_last_figures_and_another_signer_clears_them() {
     running.stop_after(&stand_in).await.unwrap();
 }
 
-/// The live feed opens with every account and the totals, then sends what changes: the account,
-/// its fills, and the totals. It closes once the session ends.
+/// The live feed opens with every account and the totals, then sends what changes: the account with
+/// its equity curve, its fills, and the totals. It closes once the session ends.
 #[tokio::test]
 async fn the_live_feed_follows_the_accounts() {
     let stand_in = StandIn::start().await;
@@ -143,10 +150,20 @@ async fn the_live_feed_follows_the_accounts() {
         i.accounts.get_mut(&a).unwrap()["equity"] = json!("1020");
         i.history.get_mut(&a).unwrap().insert(0, history_fill(&a, "40:0", 5_000, "sell", "1", "0"));
     });
-    let changed = feed.next_of("account").await;
-    assert_eq!(changed["account"]["figures"]["equity"], "1020");
-    let fills = feed.next_of("fills").await;
-    assert_eq!((&fills["address"], &fills["fills"][0]["cursor"]), (&json!(a), &json!("40:0")));
+    // One refresh may read the new equity and the next the new fill, so they may come in either tick.
+    // The stand-in's time stands still, so the curve's one point takes the new equity.
+    let (mut equity, mut fill) = (false, false);
+    while !(equity && fill) {
+        let message = feed.next().await.expect("the feed stays open");
+        match message["type"].as_str() {
+            Some("account") => {
+                let account = &message["account"];
+                equity |= account["figures"]["equity"] == "1020" && account["curve"][0]["equity"] == "1020";
+            }
+            Some("fills") => fill |= message["address"] == a && message["fills"][0]["cursor"] == "40:0",
+            _ => {}
+        }
+    }
     let totals = feed.next_of("totals").await;
     assert_eq!(totals["totals"]["equity"], "1020");
 

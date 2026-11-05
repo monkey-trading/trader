@@ -58,11 +58,15 @@ and one signed by another key stops the bot.
 - Every API route but the login needs the session; every request that changes state, and the live
   feed, needs the console's own `Origin`; every answer carries a strict Content-Security-Policy and
   the other security headers
-- A read API, per account and in total: balance, equity, margin and the margin level, positions,
-  resting orders, unrealised profit (equity less balance) and realised profit (over the account's
-  whole fill history, after profit fees), the latest fills, and the MONKEY entitlement, each from
-  the node's verified answers, read every `refresh_interval`; the vault's claimed amount needs a
-  chain read the bot does not make yet. A live WebSocket feed sends what changes, once a second
+- A read API, per account and in total: balance, equity, margin and the margin level, positions
+  with their market's mark, their unrealised profit as the engine values it, and where the account
+  closes out, resting orders, unrealised profit
+  (equity less balance) and realised profit (over the account's whole fill history, after profit
+  fees), the latest fills, and the MONKEY entitlement in token base units, each from the node's
+  verified answers, read every `refresh_interval`; the vault's claimed amount needs a chain read the
+  bot does not make yet. Each account's view carries its equity curve: the latest read of each
+  minute for the last 24 hours, in memory, so a restart starts it again. `GET /api/session` says whether the
+  session is live. A live WebSocket feed sends what changes, once a second
 - A control API that starts and stops an account or its strategy, sets the strategy's periods
   within the config's bounds, and flattens an account: it stops it, waits for the log to pass its
   last order, cancels its resting orders and closes every position. The account's own task acts on
@@ -105,8 +109,8 @@ and one signed by another key stops the bot.
 - `src/console/routes.rs`: the API's routes
 - `src/console/server.rs`: the state the routes share
 - `src/console/live.rs`: the live WebSocket feed
-- `src/console/board.rs`: the figures, account views and totals the API serves; `board/tests.rs`
-  tests them
+- `src/console/board.rs`: the figures, account views, totals and equity curves the API serves;
+  `board/tests.rs` tests them
 - `src/console/refresh.rs`: the reads of each account from the node, and its fill history;
   `refresh/tests.rs` tests the history's cursors
 - `src/console/assets.rs`: the embedded console app
@@ -119,8 +123,8 @@ and one signed by another key stops the bot.
 - `tests/console_access.rs`: the login, its rate limit, sessions, the `Origin` check, the security
   headers, that no answer carries a key or no route moves funds, the unbuilt page, and that no log
   line carries the password
-- `tests/console_reads.rs`: the figures against the node's answers, the fill history, failed reads,
-  and the live feed
+- `tests/console_reads.rs`: the figures against the node's answers, marks and close-outs, the fill
+  history, the equity curve, failed reads, and the live feed
 - `tests/console_controls.rs`: stopping and starting an account and its strategy, the periods'
   bounds, a restart, and the flatten
 - `tests/node_answers.rs`, `tests/stream.rs`, `tests/bot.rs`: the binary against the stand-in
@@ -160,8 +164,9 @@ know, and relative paths are read from the file's directory:
   bars), `qty` (the position size), `max_slippage_bps`; `[strategy.bounds]`: `fast` and `slow`,
   each `[lowest, highest]`, the periods the console may set
 - `[console]`: `bind` (default `0.0.0.0:8443`), `data_dir` (default `data`), `refresh_interval`
-  (default `5s`, at least a second), and `tls = { cert, key }`, PEM files to serve instead of the
-  generated certificate
+  (default `5s`, at least a second; each account's equity curve keeps the latest read of each
+  minute for the last 24 hours, in memory), and `tls = { cert, key }`, PEM files to serve instead of
+  the generated certificate
 - `[logging]`: `level`, a tracing filter directive
 
 `CONFIG_PATH`: the config file, when `--config` is not given. The keystore password variable is the

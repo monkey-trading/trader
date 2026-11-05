@@ -26,6 +26,9 @@ pub struct MarketView {
     #[serde(flatten)]
     pub spec: MarketSpec,
     pub mark: Option<Fixed>,
+    /// The FX index a market quoted in another currency than USD is valued at.
+    #[serde(default)]
+    pub fx_mark: Option<Fixed>,
 }
 
 /// One account as `GET /v1/accounts/{address}` shows it.
@@ -37,7 +40,7 @@ pub struct AccountView {
 }
 
 /// One account's figures as `GET /v1/accounts/{address}` gives them: its cash, its equity at the
-/// node's marks, and the margin its positions require.
+/// node's marks, the margin its positions require, and where each position closes out.
 #[derive(Debug, Deserialize)]
 pub struct AccountFigures {
     pub balance: Fixed,
@@ -45,6 +48,29 @@ pub struct AccountFigures {
     pub margin: Fixed,
     pub positions: BTreeMap<MarketId, Position>,
     pub orders: BTreeMap<OrderId, RestingOrder>,
+    #[serde(default)]
+    pub closeouts: Vec<PositionCloseout>,
+}
+
+/// Where the account closes out as one position's market moves, as the node works it out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PositionCloseout {
+    pub market: MarketId,
+    pub reach: Reach,
+    /// The market's price at which the account falls to its close-out level; set only for `at`.
+    pub price: Option<Fixed>,
+}
+
+/// How far a position's market is from closing the account out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Reach {
+    /// The account is below its close-out level at the marks already.
+    Due,
+    /// It closes out at `price`.
+    At,
+    /// No move in the node's range closes it out.
+    Beyond,
 }
 
 /// An account's cumulative MONKEY entitlement, as `GET /v1/accounts/{address}/emissions` gives it:

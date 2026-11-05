@@ -19,6 +19,7 @@ fn api_routes() -> Vec<(Method, String, Option<serde_json::Value>)> {
         (Method::GET, "/api/accounts".into(), None),
         (Method::GET, format!("/api/accounts/{a}"), None),
         (Method::GET, format!("/api/accounts/{a}/fills"), None),
+        (Method::GET, "/api/session".into(), None),
         (Method::GET, "/api/live".into(), None),
         (Method::POST, format!("/api/accounts/{a}/start"), None),
         (Method::POST, format!("/api/accounts/{a}/stop"), None),
@@ -54,11 +55,13 @@ async fn logs_in_with_the_printed_password_only() {
     }
     let cookie = cookie.unwrap();
     assert_eq!(running.get("/api/accounts", &cookie).await.status, 200);
+    assert_eq!(running.get("/api/session", &cookie).await.status, 204);
 
     let logout = running.post("/api/logout", &cookie).await;
     assert_eq!(logout.status, 204);
     assert!(logout.headers["set-cookie"].to_str().unwrap().contains("Max-Age=0"));
     assert_eq!(running.get("/api/accounts", &cookie).await.status, 401, "the session ended");
+    assert_eq!(running.get("/api/session", &cookie).await.status, 401);
     running.stop_after(&stand_in).await.unwrap();
 }
 
@@ -185,7 +188,7 @@ async fn no_route_returns_a_key_or_moves_funds() {
         api_routes().into_iter().filter(|(method, path, _)| method == Method::GET && path != "/api/live")
     {
         let answer = running.call(method, &path, None, Some(&cookie), None).await;
-        assert_eq!(answer.status, 200, "{path}");
+        assert!([200, 204].contains(&answer.status), "{path}: {answer:?}");
         assert!(!answer.text.to_lowercase().contains(&key), "{path} answered with the key");
     }
     let a = account();

@@ -58,6 +58,7 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/api/accounts/{address}/strategies/{id}/start", post(start_strategy))
         .route("/api/accounts/{address}/strategies/{id}/stop", post(stop_strategy))
         .route("/api/accounts/{address}/strategies/{id}/params", put(set_params))
+        .route("/api/session", get(session))
         .route("/api/logout", post(logout))
         .route(LIVE_PATH, get(live::live))
         .route_layer(from_fn_with_state(server.clone(), guard::require_session))
@@ -131,6 +132,11 @@ async fn fills(State(server): State<Arc<Server>>, Path(address): Path<String>) -
         Some(fills) => Json(json!({ "fills": *fills })).into_response(),
         None => no_account(),
     }
+}
+
+/// Whether the request's session is live: 204 when it is; the session check answers 401 when not.
+async fn session() -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 /// Lets the account's strategies place orders.

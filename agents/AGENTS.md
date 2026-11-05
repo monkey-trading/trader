@@ -59,8 +59,8 @@ list.
   with a per-client rate limit (`login.rs`); in-memory sessions in a `__Host-` cookie
   (`session.rs`); the request span, security headers, `Origin` check and session check
   (`guard.rs`); the API's routes (`routes.rs`) over shared state (`server.rs`); the live WebSocket
-  feed (`live.rs`); the figures, views and totals (`board.rs`) the refresher reads from the node
-  (`refresh.rs`); and the embedded app (`assets.rs`), which `build.rs` lists from `console/dist`.
+  feed (`live.rs`); the figures, views, totals and in-memory equity curves (`board.rs`) the
+  refresher reads from the node (`refresh.rs`); and the embedded app (`assets.rs`), which `build.rs` lists from `console/dist`.
   `files.rs` writes files only the bot's user can read. No route moves funds away from an account's
   own key or returns a key. `tests/` runs it against a local stand-in node (`tests/common/`) that
   signs its answers and frames and injects faults. Its `README.md` lists every file.
