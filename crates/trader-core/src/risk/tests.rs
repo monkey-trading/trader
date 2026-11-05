@@ -1,9 +1,9 @@
+use engine_core::types::Millis;
+
 use super::*;
 use crate::margin::tests::fx;
 
 const DAY: Millis = 86_400_000;
-
-use engine_core::types::Millis;
 
 fn tracker(limit: LossLimit) -> DayLoss {
     DayLoss::new(limit, None)
@@ -134,4 +134,27 @@ fn limits_out_of_range_are_refused() {
     assert_eq!(with(1, "1", LossLimit::EquityBps(0)).validate(), Err(RiskError::DailyLoss));
     assert_eq!(with(1, "1", LossLimit::EquityBps(10_001)).validate(), Err(RiskError::DailyLoss));
     assert_eq!(with(1_000, "1", LossLimit::EquityBps(10_000)).validate(), Ok(()));
+}
+
+/// A reading from before the current day leaves the state alone, even with an untripped state and a loss
+/// past the limit: the day is 2, a reading from day 1 sees 1 USD of 1,000 and then 900.
+#[test]
+fn a_reading_from_an_earlier_day_changes_nothing() {
+    let mut day =
+        DayLoss::new(LossLimit::Usd(fx("50")), Some(DayState { day: 2, start_equity: fx("1000"), tripped: false }));
+    assert_eq!(day.observe(DAY, fx("900")), DayStatus::Trading);
+    assert_eq!(day.state(), Some(DayState { day: 2, start_equity: fx("1000"), tripped: false }));
+}
+
+/// A stop is carried into the next day while the account still holds a position, and lifted by the first
+/// reading with the account flat.
+#[test]
+fn a_stop_is_carried_until_the_account_is_flat() {
+    let mut day = tracker(LossLimit::Usd(fx("50")));
+    day.observe_with(DAY - 2, fx("1000"), false);
+    assert_eq!(day.observe_with(DAY - 1, fx("900"), false), DayStatus::Stopped { newly: true });
+    assert_eq!(day.observe_with(DAY, fx("900"), false), DayStatus::Stopped { newly: false });
+    assert_eq!(day.observe_with(DAY + 5 * 3_600_000, fx("950"), false), DayStatus::Stopped { newly: false });
+    assert_eq!(day.observe_with(DAY + 6 * 3_600_000, fx("940"), true), DayStatus::Trading);
+    assert_eq!(day.state(), Some(DayState { day: 1, start_equity: fx("940"), tripped: false }));
 }

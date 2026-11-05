@@ -5,8 +5,10 @@
 use std::collections::BTreeMap;
 
 use engine_core::Fixed;
+use engine_core::account::Position;
 use engine_core::fixed::Rounding;
 use engine_core::market::MarketSpec;
+use engine_core::protocol::ProtocolVersion;
 use engine_core::types::{MarketId, Millis, Side};
 
 use crate::hours::is_open;
@@ -120,7 +122,8 @@ impl Controls {
     /// caught when it happens and not at the next bar. `None` when a holding cannot be valued.
     pub fn observe(&mut self, ts: Millis, account: &Account<'_>) -> Option<DayStatus> {
         let (equity, _) = equity_and_margin(account.balance, account.holdings)?;
-        Some(self.day.observe(ts, equity))
+        let flat = account.holdings.iter().all(|holding| holding.qty.is_zero());
+        Some(self.day.observe_with(ts, equity, flat))
     }
 
     /// Records a fill that moved the position in `market` from `before` to `after`: a position from
@@ -158,7 +161,8 @@ impl Controls {
         let Some((equity, _)) = equity_and_margin(account.balance, account.holdings) else {
             return Decision::Refused(Refusal::Unvalued);
         };
-        let stopped = matches!(self.day.observe(bar.ts, equity), DayStatus::Stopped { .. });
+        let flat = account.holdings.iter().all(|holding| holding.qty.is_zero());
+        let stopped = matches!(self.day.observe_with(bar.ts, equity, flat), DayStatus::Stopped { .. });
         if !is_open(&bar.spec.schedule, bar.ts) {
             return Decision::Refused(Refusal::MarketClosed);
         }
@@ -186,7 +190,18 @@ impl Controls {
             return Decision::Refused(Refusal::MinHold { until });
         }
         let adds = crosses || after.abs() > position.abs();
-        if adds && let Some(refusal) = self.refuse_adding(account, bar, equity, after, intent) {
+        // The profit a reversal's closing leg realises pays the engine's profit fee, whose rate the bot
+        // does not know, so that profit is not counted toward the margin buffer.
+        let fee_exposure = if crosses {
+            let held = Position {
+                qty: position,
+                entry: account.holdings.iter().find(|h| h.market == bar.market).map_or(bar.mark, |h| h.entry),
+            };
+            held.unrealised(bar.mark, ProtocolVersion::LATEST).max(Fixed::ZERO)
+        } else {
+            Fixed::ZERO
+        };
+        if adds && let Some(refusal) = self.refuse_adding(account, bar, equity - fee_exposure, after, intent) {
             // A reversal whose opening leg is refused still closes the side the strategy has left.
             if crosses && let Some(close) = order_for(Target::Flat, Fixed::ZERO, position, false) {
                 return Decision::Order(close);

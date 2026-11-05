@@ -1,7 +1,7 @@
 //! The bot's controls against the stand-in: the daily loss limit flattens the account and holds it
 //! stopped across a restart until the next UTC day, a halt in the market's hours and the first bar
 //! after it place no order, a position is held for the minimum, an account without cash opens
-//! nothing, a split moves the position, and a failed corporate action halts.
+//! nothing, a split and a failed corporate action halt.
 
 mod common;
 
@@ -76,6 +76,8 @@ async fn the_daily_loss_limit_flattens_and_holds_across_a_restart() {
         i.accounts.insert(account().to_string(), account_view("1000", position, json!({})));
         i.head_seq = 10;
         i.nonce = 3;
+        // The closes are declined: the account keeps its position until the last one lands.
+        i.settle = false;
     });
     let (stop, bot) =
         start(&stand_in, dir.path(), &[("daily_loss = { usd = \"100000\" }", "daily_loss = { usd = \"5\" }")]);
@@ -102,6 +104,7 @@ async fn the_daily_loss_limit_flattens_and_holds_across_a_restart() {
     );
 
     // The close lands, and is the bot's own fill; no bar after it orders, whatever the strategy says.
+    stand_in.with(|i| i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({}))));
     let seq = next_seq(&stand_in);
     stand_in.append((seq, 0), own_close(seq, T0 + MINUTE + 6_100, &body));
     for (_, minute, mid) in [(17, 2, "96"), (18, 3, "99"), (19, 4, "103"), (20, 5, "110")] {
@@ -269,6 +272,45 @@ async fn a_split_halts() {
     stand_in.append((seq, 0), command(seq, T0 + MINUTE, json!({ "type": "tick" }), json!([split])));
     let err = tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap_err();
     assert!(err.to_string().contains("does not follow a split"), "{err:#}");
+    // A restart will not warm up from prices before the split.
+    assert_eq!(day_file(dir.path())["split_at"], T0 + MINUTE);
+}
+
+/// A dividend for the account moves its cash without a fill, so the bot reads the account again; one for
+/// another account does not.
+#[tokio::test]
+async fn a_dividend_for_the_account_reads_it_again() {
+    let stand_in = StandIn::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    let (stop, bot) = start(&stand_in, dir.path(), &[]);
+    warm(&stand_in).await;
+    let dividend = |account: String, ts: i64| {
+        let event = json!({ "type": "corporate_dividend", "id": "d1", "market": 1, "account": account,
+            "quantity": "1", "amount": "5", "fx_mark": null });
+        (ts, json!([event]))
+    };
+    let append = |(ts, events): (i64, Value)| {
+        let seq = next_seq(&stand_in);
+        stand_in.append((seq, 0), command(seq, ts, json!({ "type": "tick" }), events));
+        seq
+    };
+    stand_in.applied((next_seq(&stand_in) - 1, 0)).await;
+    let reads = stand_in.with(|i| i.account_reads);
+    let seq = append(dividend(account().to_string(), T0 + 10_000));
+    stand_in.applied((seq, 0)).await;
+    assert_eq!(stand_in.with(|i| i.account_reads), reads + 1);
+    let seq = append(dividend("0x0000000000000000000000000000000000000001".into(), T0 + 11_000));
+    stand_in.applied((seq, 0)).await;
+    assert_eq!(stand_in.with(|i| i.account_reads), reads + 1, "another account's dividend reads nothing");
+    // The log passes the window orders signed before the start could enter it in, so the stop is quick.
+    append((T0 + 40_000, json!([])));
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
 }
 
 /// An account that holds a position in another market is refused at the start, and halts the bot when one

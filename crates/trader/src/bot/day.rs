@@ -20,11 +20,18 @@ use crate::bot::{Bot, Halt, REPLAY_LAG_MS};
 /// How long, in sequenced time, after a try at closing the position the daily loss limit tries again.
 const FLATTEN_RETRY_MS: Millis = 5_000;
 
-/// What the bot keeps across a restart: the day's loss, and when each position opened.
+/// What the bot keeps across a restart: the day's loss, when its position opened and on which side, and
+/// when a split halted it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Saved {
     pub(super) day: Option<DayState>,
     pub(super) opened: BTreeMap<MarketId, Millis>,
+    /// The side of the position `opened` belongs to: 1 long, -1 short, 0 none.
+    #[serde(default)]
+    pub(super) side: i64,
+    /// When the market split, if the bot halted at one: prices before it are in other units.
+    #[serde(default)]
+    pub(super) split_at: Option<Millis>,
 }
 
 /// The file holding one account's saved state.
@@ -122,11 +129,17 @@ impl Bot {
 
     /// Writes the saved state to its file when it changed. A failed write is an alert, and the state
     /// is written again at the next change.
-    async fn save_state(&mut self) {
-        let state = Saved { day: self.controls.day_state(), opened: self.controls.opened().clone() };
-        if state == self.saved_state {
+    pub(super) async fn save_state(&mut self) {
+        let (day, side) = (self.controls.day_state(), self.position.signum());
+        let saved = &self.saved_state;
+        if day == saved.day
+            && side == saved.side
+            && self.split_at == saved.split_at
+            && self.controls.opened() == &saved.opened
+        {
             return;
         }
+        let state = Saved { day, opened: self.controls.opened().clone(), side, split_at: self.split_at };
         match self.state_file.save(state.clone()).await {
             Ok(()) => {
                 self.saved_state = state;

@@ -440,3 +440,45 @@ fn a_market_quoted_in_another_currency_gets_no_order() {
         Decision::Refused(Refusal::Unvalued)
     );
 }
+
+/// A reversal's closing leg pays the profit fee on what it realises, so that profit does not count toward
+/// the buffer: long 1 from 90, marked at 100, has 10 of profit; the reversal to a short of 10 needs 20 of
+/// equity, so it passes on cash of 20 (30 less the profit) and not on a nano-USD less.
+#[test]
+fn a_reversal_does_not_count_the_profit_it_realises() {
+    let market = spec(1);
+    let mut controls = controls(10_000, Duration::ZERO);
+    let held = [holding(&market, "1", "90", "100")];
+    assert_eq!(
+        controls.decide(&account("20", &held), &bar(&market, "100", Target::Short)),
+        order(Side::Sell, "11", false)
+    );
+    assert_eq!(
+        controls.decide(&account("19.999999999", &held), &bar(&market, "100", Target::Short)),
+        order(Side::Sell, "1", true)
+    );
+    // A loss counts in full: long 1 from 110, marked at 100, has 10 less equity than cash.
+    let down = [holding(&market, "1", "110", "100")];
+    assert_eq!(
+        controls.decide(&account("30", &down), &bar(&market, "100", Target::Short)),
+        order(Side::Sell, "11", false)
+    );
+    assert_eq!(
+        controls.decide(&account("29.999999999", &down), &bar(&market, "100", Target::Short)),
+        order(Side::Sell, "1", true)
+    );
+}
+
+/// A stop is carried into the next UTC day while the position it called for closing is open.
+#[test]
+fn a_flatten_is_carried_past_midnight() {
+    let market = spec(1);
+    let mut controls = controls(0, Duration::ZERO);
+    let held = [holding(&market, "10", "100", "100")];
+    controls.observe(TS, &account("1000", &held));
+    let down = [holding(&market, "10", "100", "90")];
+    assert_eq!(controls.observe(TS + 1, &account("1000", &down)), Some(DayStatus::Stopped { newly: true }));
+    let next = BarTarget { ts: TS + DAY, ..bar(&market, "90", Target::Long) };
+    assert_eq!(controls.decide(&account("1000", &down), &next), Decision::Flatten);
+    assert_eq!(controls.decide(&account("900", &[]), &next), order(Side::Buy, "11.111111111", false));
+}

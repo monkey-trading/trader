@@ -52,7 +52,13 @@ list.
   sign (`fills.rs`), and on SIGINT or SIGTERM, once the log has passed those orders, cancels resting
   orders and optionally closes the position, exiting non-zero when it leaves either behind or
   cannot confirm it did not (`stop.rs`). A halt (an answer or frame signed by another key, a log
-  it cannot follow, someone else's fill) stops the bot and leaves the account as it is.
+  it cannot follow, someone else's fill, a split or a failed corporate action in the market, a
+  position in another market) stops the bot and leaves the account as it is. Each target passes
+  `trader-core`'s controls first (`controls/`): `day.rs` keeps the day's loss, a position's opening
+  time and a split's halt in a file under `state_dir`, reads the account's equity against the daily
+  loss limit, and closes the position when the limit stops the account; the account is read again
+  after each fill, every minute, and at each bar, and nothing is valued or ordered from a read that
+  is not at the log.
   `tests/` runs it against a local stand-in node (`tests/common/`) that signs its answers and
   frames and injects faults. Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, which the config tests load.
@@ -115,7 +121,7 @@ list.
   resolving them, resolves to a file inside the repository and, with a `#fragment`, to a heading
   in it, and the root `AGENTS.md` and `CLAUDE.md` are symlinks to `agents/AGENTS.md`;
   `check-agent-links-test.sh` runs it against a scratch repository.
-- **.gitignore** — `agents/.processes/`, `.claude/`, `/target/`, `console/node_modules/`,
+- **.gitignore** — `agents/.processes/`, `.claude/`, `/target/`, `/config/state/`, `console/node_modules/`,
   `console/dist/`, and `.env*`.
 
 ## Commands

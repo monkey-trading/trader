@@ -89,7 +89,7 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         }
         Err(e) => return Err(e.into()),
     };
-    let (now, view) = (view.time_ms, view.body);
+    let (now, account_seq, view) = (view.time_ms, view.head_seq, view.body);
     if let Some(other) = other_market(&view, market_id) {
         bail!(
             "{account} holds a position in market {other}: close it first, as this bot trades one market per account"
@@ -106,17 +106,27 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
     let saved = state_file.load().await?;
     let mut controls = Controls::new(cfg.risk.clone(), cfg.sizing.clone(), saved.day)?;
     controls.check_market(&market.spec).with_context(|| format!("sizing for {}", strategy_cfg.market))?;
-    // The opening time of a position the account no longer holds is no use.
-    controls
-        .restore_opened(saved.opened.into_iter().filter(|(id, _)| *id == market_id && !position.is_zero()).collect());
-    if let Some(mark) = market.mark {
-        // The day's opening equity is the account's now, unless a restart finds today's already kept.
+    // A position keeps the opening time saved for it, if it is on the side saved. One with none, as when
+    // a crash came between its fill and the save, is held from now: the hold is the conservative guess.
+    let opened = (!position.is_zero()).then(|| match saved.opened.get(&market_id) {
+        Some(at) if saved.side == position.signum() => *at,
+        _ => now,
+    });
+    controls.restore_opened(opened.map(|at| (market_id, at)).into_iter().collect());
+    // The day's opening equity is the account's now, unless a restart finds today's already kept; the
+    // markets and the account must have been read at the same point of the log to be valued together.
+    if let (Some(mark), true) = (market.mark, account_seq == head_seq) {
         let entry = held.map_or(Fixed::ZERO, |p| p.entry);
         let holding = held.and_then(|p| holding(&market.spec, market_id, p.qty, entry, mark));
         let holdings = holding.as_slice();
         controls.observe(now, &Account { balance: view.balance, holdings });
     }
-    let saved_state = Saved { day: controls.day_state(), opened: controls.opened().clone() };
+    let saved_state = Saved {
+        day: controls.day_state(),
+        opened: controls.opened().clone(),
+        side: position.signum(),
+        split_at: saved.split_at,
+    };
     state_file.save(saved_state.clone()).await.context("keeping the saved state")?;
     let bot = Bot {
         domain: eip712::domain(node_cfg.chain_id, node_cfg.vault),
@@ -142,6 +152,7 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         cash_alert: false,
         account_behind: false,
         read_retry_after: Millis::MIN,
+        split_at: saved.split_at,
         close_first: false,
         signed_orders: VecDeque::with_capacity(SIGNED_ORDERS),
         position,
@@ -188,7 +199,8 @@ impl Bot {
         }
         let bar_ms = self.bar_ms;
         let live_from = BarBuilder::new(bar_ms, Millis::MIN).window_start(exact_from);
-        let history_from = live_from - bar_ms * self.history_bars;
+        // History from before a split the bot halted at is in the units before it.
+        let history_from = (live_from - bar_ms * self.history_bars).max(self.split_at.unwrap_or(Millis::MIN));
         // The widest buckets that tile a bar, which the node keeps longest; every bar is whole minutes.
         let (resolution, _) =
             RESOLUTIONS.into_iter().find(|(_, width)| bar_ms % width == 0).expect("bars are whole minutes");

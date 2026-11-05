@@ -29,9 +29,9 @@ impl Config {
             bail!("account.key: a plain hex key is accepted only in a dev build; use a keystore");
         }
         let strategy = &self.strategy;
-        strategy.params.build().map_err(|e| anyhow::anyhow!("strategy: {e}"))?;
-        self.risk.validate().map_err(|e| anyhow::anyhow!("risk: {e}"))?;
-        self.sizing.check().map_err(|e| anyhow::anyhow!("sizing: {e}"))?;
+        strategy.params.build().map_err(|e| anyhow!("strategy: {e}"))?;
+        self.risk.validate().map_err(|e| anyhow!("risk: {e}"))?;
+        self.sizing.check().map_err(|e| anyhow!("sizing: {e}"))?;
         let bar = strategy.bar;
         ensure!(
             (MIN_BAR..=MAX_BAR).contains(&bar) && bar.as_millis().is_multiple_of(MIN_BAR.as_millis()),

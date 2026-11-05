@@ -33,8 +33,7 @@ answer that fails the check is an error, never data, and one signed by another k
   keeps it stopped until the next UTC day, across restarts), a margin buffer over the engine's
   requirement, positive cash, a minimum hold, and the market's trading hours. A market with hours
   is followed as the engine prices it, a halt or closure leaves no order, and the first bar after
-  one is a gap; a split moves the position, which is read again, and a failed corporate action
-  halts the bot
+  one is a gap; a split or a failed corporate action in the market halts the bot
 - Signed market orders toward the strategy's target, on the account's next nonce, quoted at the
   last mark; a declined order is logged with the node's reason and retried on the next bar, and a
   reversal the engine refuses whole is retried as a reduce-only close, then an opening order. No

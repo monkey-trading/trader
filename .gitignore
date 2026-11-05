@@ -9,3 +9,4 @@ agents/.processes/
 console/node_modules/
 console/dist/
 .env*
+/config/state/

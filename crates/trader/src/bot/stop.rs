@@ -10,7 +10,7 @@ use engine_core::command::{CancelAllRequest, CloseAllRequest, CloseEntry};
 use engine_core::eip712::{cancel_all_hash, close_all_hash};
 use engine_core::types::Millis;
 use tokio::time::{Instant, timeout_at};
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, info_span, warn};
 use trader_core::hours::is_open;
 
 use crate::bot::orders::{EXPIRES_IN_MS, log_order_events};
@@ -153,12 +153,18 @@ impl Bot {
         request.auth = Some(RequestAuth { nonce, expires_at, signature });
         self.order_expires_at = Some(expires_at);
         self.remember_signature(signature);
-        match self.node.close_all(&request).await {
-            Ok(answer) => log_order_events(&answer.body),
-            Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-            Err(e) => warn!("the close failed: {e}"),
+        // The expiry names the try, so the lines of a close and its answer join.
+        let span = info_span!("close", id = expires_at);
+        async {
+            match self.node.close_all(&request).await {
+                Ok(answer) => log_order_events(&answer.body),
+                Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
+                Err(e) => warn!("the close failed: {e}"),
+            }
+            Ok(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     /// Closes the position at the last mark, as the daily loss limit does at `ts`, unless the market

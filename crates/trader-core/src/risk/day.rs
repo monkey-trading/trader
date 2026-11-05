@@ -69,14 +69,23 @@ impl DayLoss {
         Self { limit, state: restored }
     }
 
-    /// Reads the account's equity at sequenced time `ts`. The first reading of a day sets its
-    /// opening equity; a loss from it of at least the limit, and more than nothing, stops the
-    /// account until the next day. A reading from before the current day, which commands in order
-    /// never give, changes nothing.
+    /// Reads the account's equity at sequenced time `ts`, with the account flat. See `observe_with`.
     pub fn observe(&mut self, ts: Millis, equity: Fixed) -> DayStatus {
+        self.observe_with(ts, equity, true)
+    }
+
+    /// Reads the account's equity at sequenced time `ts`; `flat` is whether it holds no position. The
+    /// first reading of a day sets its opening equity; a loss from it of at least the limit, and more
+    /// than nothing, stops the account until the next day, and the stop is carried into a new day for as
+    /// long as the account holds a position, so the close the limit called for is not forgotten. A
+    /// reading from before the current day, which commands in order never give, changes nothing.
+    pub fn observe_with(&mut self, ts: Millis, equity: Fixed, flat: bool) -> DayStatus {
         let day = ts.div_euclid(MS_PER_DAY);
         let state = match self.state {
-            Some(state) if state.day >= day => state,
+            Some(state) if state.day > day => {
+                return if state.tripped { DayStatus::Stopped { newly: false } } else { DayStatus::Trading };
+            }
+            Some(state) if state.day == day || (state.tripped && !flat) => state,
             _ => DayState { day, start_equity: equity, tripped: false },
         };
         let loss = state.start_equity - equity;

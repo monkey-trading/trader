@@ -14,6 +14,7 @@ mod stop;
 
 use std::collections::VecDeque;
 
+use anyhow::anyhow;
 use engine_core::Fixed;
 use engine_core::command::{AdminCommand, Command};
 use engine_core::eip712::{Eip712Domain, Signature};
@@ -40,6 +41,9 @@ pub(super) const REPLAY_LAG_MS: Millis = 30_000;
 
 /// How long, in sequenced time, between reads of the account while the last one was not at the log.
 const READ_RETRY_MS: Millis = 5_000;
+
+/// How long, in sequenced time, between reads of the account that was at the log.
+const READ_EVERY_MS: Millis = 60_000;
 
 /// Why the bot stopped on its own.
 #[derive(Debug, thiserror::Error)]
@@ -93,8 +97,11 @@ pub struct Bot {
     /// Whether the last read of the account was not at the log, or failed, so its balance and entry
     /// are not the position's: nothing is valued or ordered until a read agrees.
     account_behind: bool,
-    /// The earliest sequenced time the account is read again while it is behind.
+    /// The earliest sequenced time the account is read again: soon while it is behind the log, and
+    /// otherwise after `READ_EVERY_MS`, so a balance moved by a withdrawal or financing is found.
     read_retry_after: Millis,
+    /// When the market split, if the bot halted at one.
+    split_at: Option<Millis>,
     /// Whether the next reversal is only a close: the engine refused the last one whole.
     close_first: bool,
     /// The signatures of the last orders this process signed, to tell its fills from others': a
@@ -217,12 +224,14 @@ impl Bot {
                 Event::CorporateActionFailed { market, reason, .. } if *market == self.market => {
                     let reason =
                         format!("a corporate action failed for the market, which stops dealing in it: {reason}");
-                    return Err(Halt::Unfollowable(anyhow::anyhow!(reason)));
+                    return Err(Halt::Unfollowable(anyhow!(reason)));
                 }
                 // A split changes the units of every price the strategy has seen.
                 Event::CorporateSplit { market, .. } if *market == self.market => {
+                    self.split_at = Some(message.ts);
+                    self.save_state().await;
                     let reason = "the market split, which changes its units: the bot does not follow a split";
-                    return Err(Halt::Unfollowable(anyhow::anyhow!(reason)));
+                    return Err(Halt::Unfollowable(anyhow!(reason)));
                 }
                 _ => {}
             }
@@ -242,11 +251,13 @@ impl Bot {
         }
         let node_time = Millis::try_from(frame.time).unwrap_or(Millis::MAX);
         let lag = node_time.saturating_sub(message.ts);
-        if self.account_behind && message.ts >= self.read_retry_after {
-            self.read_retry_after = message.ts.saturating_add(READ_RETRY_MS);
+        let read = message.ts >= self.read_retry_after;
+        if read {
             self.refresh_balance().await?;
+            let wait = if self.account_behind { READ_RETRY_MS } else { READ_EVERY_MS };
+            self.read_retry_after = message.ts.saturating_add(wait);
         }
-        if moved.is_some() || filled {
+        if moved.is_some() || filled || read {
             self.check_day(message.ts).await?;
         }
         self.retry_flatten(message.ts, lag).await?;
@@ -288,9 +299,7 @@ impl Bot {
     /// Error cases:
     /// - an order call answered by another key than the signer
     async fn on_bar(&mut self, bar: Bar, ts: Millis, lag: Millis) -> Result<(), Halt> {
-        if self.account_behind {
-            self.refresh_balance().await?;
-        }
+        self.refresh_balance().await?;
         let gap = self.gaps.on_bar(&self.spec.schedule, bar.start, self.bar_ms);
         let target = if is_valid_close(bar.close) {
             self.strategy.on_close(bar.close)
@@ -300,8 +309,12 @@ impl Bot {
         };
         debug!(start = bar.start, close = %bar.close, ?target, gap, lag, "bar");
         let (Some(target), Some(mark)) = (target, self.mark) else { return Ok(()) };
-        if self.account_behind {
-            info!(?target, "the account read is not at the log: no order");
+        if self.account_behind || self.state_unsaved {
+            info!(
+                ?target,
+                behind = self.account_behind,
+                "the account read is not at the log, or the saved state is not written: no order"
+            );
             return Ok(());
         }
         let holding = holding(&self.spec, self.market, self.position, self.entry, mark);
