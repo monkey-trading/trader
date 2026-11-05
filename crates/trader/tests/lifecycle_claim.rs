@@ -90,12 +90,12 @@ async fn the_watch_claims_once_the_threshold_is_reached() {
     let lifecycle = Arc::new(trader::accounts::Lifecycle::connect(&s.cfg, |_| None).await.unwrap());
     let task = tokio::spawn(watch(lifecycle, vec![key], U256::from(2 * MONKEY), Duration::from_millis(20)));
     let path = emissions_path();
-    until("three checks", || s.node.with(|i| i.reads.get(&path).copied().unwrap_or_default()) >= 3).await;
+    until("three checks", || s.node.with(|i| i.lifecycle.reads.get(&path).copied().unwrap_or_default()) >= 3).await;
     assert!(s.chain.sent().is_empty(), "below the threshold");
     s.answer(&emissions_path(), 200, proof(3 * MONKEY, 3 * MONKEY, true));
     s.chain.sent_count(1).await;
-    let reads = s.node.with(|i| i.reads[&path]);
-    until("three more checks", || s.node.with(|i| i.reads[&path]) >= reads + 3).await;
+    let reads = s.node.with(|i| i.lifecycle.reads[&path]);
+    until("three more checks", || s.node.with(|i| i.lifecycle.reads[&path]) >= reads + 3).await;
     task.abort();
     assert_eq!(s.chain.sent().len(), 1, "claimed once");
 }
@@ -135,7 +135,7 @@ async fn a_claims_answer_from_another_signer_halts_the_bot() {
             account().to_string(),
             common::account_view("5", json!({}), json!({ "9": common::resting_order(9) })),
         );
-        i.other_signer_paths.insert(emissions_path());
+        i.lifecycle.other_signer.insert(emissions_path());
     });
     s.node.tick(common::T0 + common::MINUTE);
     let claims = "[claims]\nthreshold = \"1\"\ninterval = \"50ms\"\n";
@@ -158,7 +158,8 @@ async fn a_failing_claim_warns_once_and_resolves() {
     let lifecycle = Arc::new(trader::accounts::Lifecycle::connect(&s.cfg, |_| None).await.unwrap());
     let task = tokio::spawn(watch(lifecycle, vec![key], U256::from(1), Duration::from_millis(20)));
     let path = emissions_path();
-    until("three failed checks", || s.node.with(|i| i.reads.get(&path).copied().unwrap_or_default()) >= 3).await;
+    until("three failed checks", || s.node.with(|i| i.lifecycle.reads.get(&path).copied().unwrap_or_default()) >= 3)
+        .await;
     s.chain.with(|l| l.down = false);
     s.chain.sent_count(1).await;
     until("the warning to clear", || lines.text().contains("alert_resolved")).await;

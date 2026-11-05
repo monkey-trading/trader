@@ -287,5 +287,5 @@ fn payout(nonce: u64, amount: &str, expires_at: Option<u64>) -> Value {
 
 /// Waits until the bot has read `path` `count` times.
 async fn wait_reads(s: &Setup, path: &str, count: usize) {
-    until(path, || s.node.with(|i| i.reads.get(path).copied().unwrap_or_default()) >= count).await;
+    until(path, || s.node.with(|i| i.lifecycle.reads.get(path).copied().unwrap_or_default()) >= count).await;
 }

@@ -1,8 +1,9 @@
 //! Keeping the bot's requests under the node's limits, and its idea of the node's time.
 //!
 //! The pacer hands out the instant each request may go, so a burst of orders queues in the order it
-//! was asked for instead of failing with 429: one bucket for every request (the node's `per_ip`) and
-//! one per account for the requests that act for it (`per_account`). Each is a token bucket in
+//! was asked for instead of failing with 429: one bucket for every request (the node's `per_ip`), one
+//! per account for the requests that act for it (`per_account`), and one for declarations (the
+//! node's fresh-account budget for this client, `fresh_accounts`). Each is a token bucket in
 //! virtual-scheduling form, holding one request of its burst in reserve to absorb timing differences.
 //! A retry-later answer from the node holds every request back for the delay it names.
 
@@ -13,7 +14,7 @@ use std::time::Duration;
 use engine_core::types::AccountId;
 use tokio::time::Instant;
 
-use crate::config::{LimitsSection, RateSection};
+use crate::config::{LimitsSection, MinuteRateSection, RateSection};
 
 /// The longest a retry-later answer may hold the bot back, whatever the node says.
 const MAX_BACK_OFF: Duration = Duration::from_secs(60);
@@ -37,6 +38,7 @@ struct Shape {
 struct State {
     ip: Bucket,
     accounts: HashMap<AccountId, Bucket>,
+    setups: Bucket,
     blocked_until: Instant,
 }
 
@@ -44,14 +46,24 @@ struct State {
 pub struct Pacer {
     ip: Shape,
     account: Shape,
+    setup: Shape,
     state: Mutex<State>,
 }
 
 impl Shape {
     /// The bucket `rate` names, with one request of its burst kept in reserve.
     fn of(rate: RateSection) -> Self {
-        let cost = Duration::from_secs(1) / rate.per_second.max(1);
-        Self { cost, allowance: cost * rate.burst.saturating_sub(1).max(1) }
+        Self::with(Duration::from_secs(1) / rate.per_second.max(1), rate.burst)
+    }
+
+    /// The bucket a per-minute `rate` names, likewise.
+    fn per_minute(rate: MinuteRateSection) -> Self {
+        Self::with(Duration::from_secs(60) / rate.per_minute.max(1), rate.burst)
+    }
+
+    /// A bucket of requests that cost `cost` each, and `burst` at once with one kept in reserve.
+    fn with(cost: Duration, burst: u32) -> Self {
+        Self { cost, allowance: cost * burst.saturating_sub(1).max(1) }
     }
 
     /// Takes one request from `bucket` at `now`; the instant it may go.
@@ -68,7 +80,13 @@ impl Pacer {
         Self {
             ip: Shape::of(limits.per_ip),
             account: Shape::of(limits.per_account),
-            state: Mutex::new(State { ip: Bucket { tat: now }, accounts: HashMap::new(), blocked_until: now }),
+            setup: Shape::per_minute(limits.fresh_accounts),
+            state: Mutex::new(State {
+                ip: Bucket { tat: now },
+                accounts: HashMap::new(),
+                setups: Bucket { tat: now },
+                blocked_until: now,
+            }),
         }
     }
 
@@ -85,6 +103,13 @@ impl Pacer {
             at = at.max(self.account.take(bucket, now));
         }
         at.max(state.blocked_until)
+    }
+
+    /// Reserves the next declaration under the fresh-account budget, before its request is reserved
+    /// as any other; the instant it may go on to that.
+    pub fn reserve_setup(&self, now: Instant) -> Instant {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        self.setup.take(&mut state.setups, now)
     }
 
     /// Holds every later reservation back for `wait`, at most `MAX_BACK_OFF`.
@@ -144,7 +169,7 @@ mod tests {
 
     fn limits(per_second: u32, burst: u32) -> LimitsSection {
         let rate = RateSection { per_second, burst };
-        LimitsSection { per_ip: rate, per_account: rate, connections: 4 }
+        LimitsSection { per_ip: rate, per_account: rate, ..LimitsSection::default() }
     }
 
     /// A burst goes at once up to its allowance less the reserve, then at the refill rate, in the
@@ -171,6 +196,17 @@ mod tests {
         assert_eq!(first[0], now);
         assert!(first[2] > now + Duration::from_millis(400));
         assert_eq!(pacer.reserve(Some(b), now), now);
+    }
+
+    /// Declarations queue at the per-minute rate after their burst, apart from the other buckets.
+    #[test]
+    fn declarations_keep_to_the_fresh_account_budget() {
+        let now = Instant::now();
+        let fresh_accounts = MinuteRateSection { per_minute: 12, burst: 3 };
+        let pacer = Pacer::new(&LimitsSection { fresh_accounts, ..limits(1000, 1000) }, now);
+        let at: Vec<_> = (0..4).map(|_| pacer.reserve_setup(now).duration_since(now).as_secs()).collect();
+        assert_eq!(at, [0, 0, 5, 10]);
+        assert_eq!(pacer.reserve(Some(AccountId([1; 20])), now), now);
     }
 
     /// A retry-later answer holds back every later request, and never for more than the cap.

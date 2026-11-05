@@ -21,7 +21,7 @@ fn node(stand_in: &StandIn, limits: LimitsSection) -> Node {
 
 fn limits(per_second: u32, burst: u32) -> LimitsSection {
     let rate = RateSection { per_second, burst };
-    LimitsSection { per_ip: rate, per_account: rate, connections: 2 }
+    LimitsSection { per_ip: rate, per_account: rate, connections: 2, ..LimitsSection::default() }
 }
 
 /// Requests over the configured rate wait instead of failing, and share the pool's connections.

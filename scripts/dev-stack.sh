@@ -14,9 +14,10 @@
 # Run it (`dev-stack.sh [--chain]`) to keep a node up until interrupted, or source it for the
 # functions a scenario uses: dev_stack_start [--chain], dev_stack_stop, dev_stack_node_config,
 # dev_stack_chain_config, dev_stack_fund, dev_stack_declare, dev_stack_admin and, with --chain,
-# dev_stack_wallet. After a start these are set: dev_stack_api, dev_stack_signer, dev_stack_pin,
-# dev_stack_work and, with --chain, dev_stack_rpc (Anvil's URL), dev_stack_vault, dev_stack_usdc and
-# dev_stack_monkey (the vault's MONKEY token).
+# dev_stack_wallet. With --chain the deployer funds the house with 5,000,000 USDC through the vault
+# before the start returns. After a start these are set: dev_stack_api, dev_stack_signer,
+# dev_stack_pin, dev_stack_work and, with --chain, dev_stack_rpc (Anvil's URL), dev_stack_vault,
+# dev_stack_usdc and dev_stack_monkey (the vault's MONKEY token).
 #
 # Needs git, cargo, python3, curl and jq, and the public Roughtime servers the engine's dev config
 # names. --chain also needs anvil and cast at run time, and forge once per engine commit (to build
@@ -56,6 +57,8 @@ dev_stack_mock_signer="0x5975c152fE58cDcB7E25586A3c9b994A16dbB615"
 # The MONKEY period budget the vault is deployed with, which the node's emission schedule must match:
 # 1,000 MONKEY.
 dev_stack_period_budget="1000000000000000000000"
+# The house's capital, in USDC, which the deployer deposits through the vault.
+dev_stack_house_usdc=5000000
 
 dev_stack_fail() {
   echo "FAIL: $*" >&2
@@ -276,9 +279,31 @@ CONFIG
   dev_stack_pin="$(jq -r '.tls_public_key_sha256 | ltrimstr("0x")' <<< "$attestation")"
   [[ "$dev_stack_signer" =~ ^0x[0-9a-fA-F]{40}$ && "$dev_stack_pin" =~ ^[0-9a-f]{64}$ ]] \
     || dev_stack_fail "the attestation names no signer or TLS key hash"
-  if (( dev_stack_chain )) && [[ "$(tr A-F a-f <<< "$dev_stack_signer")" != "$(tr A-F a-f <<< "$dev_stack_mock_signer")" ]]; then
-    dev_stack_fail "the node's enclave signer $dev_stack_signer is not the vault's checkpoint signer $dev_stack_mock_signer"
+  if (( dev_stack_chain )); then
+    [[ "$(tr A-F a-f <<< "$dev_stack_signer")" == "$(tr A-F a-f <<< "$dev_stack_mock_signer")" ]] \
+      || dev_stack_fail "the node's enclave signer $dev_stack_signer is not the vault's checkpoint signer $dev_stack_mock_signer"
+    dev_stack_house_capital
   fi
+}
+
+# Funds the house with $dev_stack_house_usdc through the vault, as the engine's deposit scenario does:
+# under EVM custody genesis credits the house nothing, and without capital it takes no trade. Waits
+# until the node has credited it.
+dev_stack_house_capital() {
+  local units=$(( dev_stack_house_usdc * 1000000 )) nav=""
+  cast send --rpc-url "$dev_stack_rpc" --private-key "$dev_stack_deployer_key" "$dev_stack_usdc" \
+    'mint(address,uint256)' "$(cast wallet address --private-key "$dev_stack_deployer_key")" "$units" > /dev/null \
+    || dev_stack_fail "minting the house's USDC failed"
+  cast send --rpc-url "$dev_stack_rpc" --private-key "$dev_stack_deployer_key" "$dev_stack_usdc" \
+    'approve(address,uint256)' "$dev_stack_vault" "$units" > /dev/null || dev_stack_fail "approving the house's USDC failed"
+  cast send --rpc-url "$dev_stack_rpc" --private-key "$dev_stack_deployer_key" "$dev_stack_vault" \
+    'depositToHouse(uint256)' "$units" > /dev/null || dev_stack_fail "depositing the house's capital failed"
+  for _ in $(seq 1 300); do
+    nav="$(curl -sk --max-time 2 "$dev_stack_api/v1/house" | jq -r '.nav // "0"' 2>/dev/null || echo 0)"
+    [[ "$nav" == "$dev_stack_house_usdc" ]] && return 0
+    sleep 0.2
+  done
+  dev_stack_fail "the node did not credit the house's $dev_stack_house_usdc USDC (NAV $nav)"
 }
 
 # Starts Anvil and three local RPC proxies to it (custody.evm.providers needs three distinct URLs),

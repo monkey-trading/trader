@@ -180,6 +180,8 @@ fn strategy_values_are_checked() {
         ("stream_timeout = \"30s\"", "stream_timeout = \"0s\""),
         ("per_ip = { per_second = 50,", "per_ip = { per_second = 0,"),
         ("burst = 20 }", "burst = 0 }"),
+        ("per_minute = 600,", "per_minute = 0,"),
+        ("per_minute = 600, burst = 20", "per_minute = 600, burst = 0"),
         ("connections = 4", "connections = 0"),
         ("connections = 4", "connections = 17"),
     ];

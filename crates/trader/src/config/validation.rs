@@ -46,6 +46,8 @@ impl Config {
         for (name, rate) in [("per_ip", limits.per_ip), ("per_account", limits.per_account)] {
             ensure!(rate.per_second > 0 && rate.burst > 0, "node.limits.{name}: per_second and burst above zero");
         }
+        let fresh = limits.fresh_accounts;
+        ensure!(fresh.per_minute > 0 && fresh.burst > 0, "node.limits.fresh_accounts: per_minute and burst above zero");
         ensure!(
             (1..=MAX_CONNECTIONS).contains(&limits.connections),
             "node.limits.connections: from 1 to {MAX_CONNECTIONS}"

@@ -104,6 +104,11 @@ impl Node {
         self.clock.latest_ms(Instant::now())
     }
 
+    /// Waits for a declaration's turn under the node's fresh-account budget for this client.
+    pub async fn setup_turn(&self) {
+        sleep_until(self.pacer.reserve_setup(Instant::now())).await;
+    }
+
     /// How many requests were sent, and how many of them the node asked the bot to retry later.
     pub fn counts(&self) -> (u64, u64) {
         (self.requests.load(Ordering::Relaxed), self.retry_later.load(Ordering::Relaxed))
