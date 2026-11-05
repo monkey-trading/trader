@@ -33,24 +33,33 @@ list.
   the order that moves a position to its target (`strategy.rs`); `tests/` drives it from marks to
   orders. Its `README.md` lists every file.
 - **crates/trader/** — `trader`, the binary (`main.rs` over `lib.rs`): `trader run --config` trades
-  one account in one market. `config/` loads and checks the TOML config; `keys.rs` unlocks the
-  account key (a Web3 Secret Storage keystore, or a hex file in a dev build) into a signing key that
-  zeroes on drop, and refuses outside a dev build the keys the repository publishes; `node/` makes
-  REST calls over TLS pinned to the node's key hash (or publicly rooted), each under a fresh
-  challenge and verified with `engine_wire::verify_received`; `stream/` reads the public log over
-  one `signed=1` connection, verifying each frame with `FrameVerifier`, refusing gaps and resuming
-  after the last message. `bot/` reads the market and the account at startup; five seconds of log
-  after its index is exact it warms up from the node's log-derived marks history (`startup.rs`); it
-  follows the log
-  into bars (built from moves of the mark, as that history is) and decisions, and signs market
-  orders on the next nonce (`orders.rs`), none for a bar behind the node's time or before the log
-  has passed every order that could still enter it; it stops on a fill from an order it did not
-  sign (`fills.rs`), and on SIGINT or SIGTERM, once the log has passed those orders, cancels resting
-  orders and optionally closes the position, exiting non-zero when it leaves either behind or
-  cannot confirm it did not (`stop.rs`). A halt (an answer or frame signed by another key, a log
-  it cannot follow, someone else's fill) stops the bot and leaves the account as it is.
-  `tests/` runs it against a local stand-in node (`tests/common/`) that signs its answers and
-  frames and injects faults. Its `README.md` lists every file.
+  one or many accounts, each with its own markets and strategies, in one process; `trader addresses`
+  prints their addresses. `config/` loads and checks the TOML config (`[[account]]`, `[[account_dir]]`,
+  `[node.limits]`); `keys.rs` unlocks the account keys (a Web3 Secret Storage keystore, or a hex file
+  in a dev build) into signing keys that zero on drop, and refuses outside a dev build the keys the
+  repository publishes; `node/` makes REST calls over TLS pinned to the node's key hash (or publicly
+  rooted) on a small pool of kept-open connections (`pool.rs`), paced under the node's limits with a
+  retry-later hold, and tracks the node's time from its verified answers (`pace.rs`), each call under
+  a fresh challenge and verified with `engine_wire::verify_received`; `stream/` reads the public log
+  over one `signed=1` connection for all accounts, verifying each frame with `FrameVerifier`, refusing
+  gaps and resuming after the last message, with allocation-free views of its messages. `bot/` reads
+  the markets and accounts at startup (`startup.rs`); the `Fleet` (`fleet.rs`, no IO) follows the log
+  once: one index per market, one series of bars and averages per market and bar length shared by
+  every strategy on it, a decision per account when a bar completes, queued in bar order; five
+  seconds of log after a market's index is exact each series warms up from the node's log-derived
+  marks history (`warm.rs`); a fill from an order an account did not sign stops that account
+  (`fills.rs`). The `Runner` (`run.rs`, `orders.rs`) turns decisions into signed market orders, one
+  request out per account at a time, each account on its own nonce read again after a refusal, none
+  for a bar behind the node's time or before the log has passed every order of that account and
+  market that could still enter it; on SIGINT or SIGTERM, once the log has passed those orders, it
+  cancels resting orders and optionally closes positions account by account, exiting non-zero when
+  it leaves either behind or cannot confirm it did not (`stop.rs`). A halt (an answer or frame signed
+  by another key, a log it cannot follow) stops the bot and leaves the accounts as they are; an
+  account that cannot start or that fails stops alone. `tests/` runs it against a local stand-in node
+  (`tests/common/`) that signs its answers and frames, enforces a per-address limit and injects
+  faults, drives the fleet directly (`tests/fleet.rs`), checks that the hot path allocates nothing
+  (`tests/alloc.rs`), and holds an hour of a synthetic log through 1,000 accounts to time and memory
+  budgets (`tests/hot_path.rs`). Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, which the config tests load.
 - **console/** — the Vite, React and TypeScript app (`src/` with `main.tsx`, `App.tsx`,
   `styles.css`, and its tests; `index.html`, the page that mounts `src/main.tsx`;
@@ -67,7 +76,7 @@ list.
   private reporting address, response times, disclosure, safe harbour, scope), and Apache License
   2.0.
 - **.github/workflows/** — `ci.yaml`: fmt, the file line cap, clippy, tests, `cargo-deny`, the dev
-  scenario (`dev-trade-one`, which caches the engine's built binaries by the pinned commit), the
+  scenarios (`dev-scenarios`: `dev-trade-one` and `dev-trade-many`, which cache the engine's built binaries by the pinned commit), the
   console's audit, lint, type check, tests and build, the agent docs' links, the review-delta
   helper's test, the merge approval gate's test, and the CI scripts' test, on every push to `main`, every PR, and every
   merge group of the merge queue. On a PR, the first job, `changes`, sorts the changed files into
@@ -97,7 +106,9 @@ list.
   source, printing the bot's `[node]` config; sourced, it gives scenarios functions to start and
   stop it, fund and declare an account, and sign admin commands. `dev-trade-one.sh`, the dev
   scenario on it: one account trading BTC-USD for fifteen minutes, checked against its history and
-  emissions; `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
+  emissions; `dev-trade-many.sh`: twenty accounts in one process across BTC-USD and ETH-USD, checked
+  for one stream connection, no request refused for rate, and each account's fills against its
+  history; `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
   `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`

@@ -41,11 +41,11 @@ tls_key_sha256 = "{pin}"
 request_timeout = "2s"
 stream_timeout = "30s"
 
-[account]
+[[account]]
 key = {{ type = "hex_file", path = "account.hex" }}
 close_on_stop = true
 
-[strategy]
+[[account.strategy]]
 market = "BTC-USD"
 bar = "{bar}"
 fast = 1
@@ -63,9 +63,69 @@ max_slippage_bps = 25
     Config::load(&path).unwrap()
 }
 
+/// The secret of test account `n`, obviously fake: the first, `account()`'s, is `ACCOUNT_SECRET`.
+pub fn secret(n: u8) -> [u8; 32] {
+    if n == 0 { ACCOUNT_SECRET } else { [0x20 + n; 32] }
+}
+
+/// Test account `n`'s address.
+pub fn address(n: u8) -> AccountId {
+    eip712::address(SigningKey::from_slice(&secret(n)).unwrap().verifying_key())
+}
+
+/// A config for the stand-in with test accounts `accounts`, each trading BTC-USD in `bar` bars as
+/// `config`'s does and closing on stop, and `extra` TOML after the rest.
+pub fn config_many(stand_in: &StandIn, dir: &Path, bar: &str, accounts: &[u8], extra: &str) -> Config {
+    let mut text = format!(
+        r#"
+[node]
+url = "https://127.0.0.1:{port}"
+chain_id = {CHAIN_ID}
+vault = "0x{vault}"
+signer = "0x{signer}"
+tls_key_sha256 = "{pin}"
+request_timeout = "2s"
+stream_timeout = "30s"
+"#,
+        port = stand_in.addr.port(),
+        vault = hex::encode(VAULT),
+        signer = hex::encode(stand_in.signer()),
+        pin = hex::encode(stand_in.pin),
+    );
+    for &n in accounts {
+        std::fs::write(dir.join(format!("account{n}.hex")), hex::encode(secret(n))).unwrap();
+        text += &format!(
+            r#"
+[[account]]
+key = {{ type = "hex_file", path = "account{n}.hex" }}
+close_on_stop = true
+
+[[account.strategy]]
+market = "BTC-USD"
+bar = "{bar}"
+fast = 1
+slow = 2
+qty = "1"
+max_slippage_bps = 25
+"#
+        );
+    }
+    text += extra;
+    let path = dir.join("bot.toml");
+    std::fs::write(&path, text).unwrap();
+    Config::load(&path).unwrap()
+}
+
 /// Runs the bot until `stop`.
 pub async fn run(cfg: trader::config::Config, stop: impl Future<Output = ()> + Send + 'static) -> anyhow::Result<()> {
-    trader::bot::run(cfg, |_| None, stop).await
+    // `TRADER_TEST_LOG=info` (or `debug`) shows the bot's log in a failing test's output.
+    if let Ok(filter) = std::env::var("TRADER_TEST_LOG") {
+        let _ = tracing_subscriber::fmt().with_env_filter(filter).with_test_writer().try_init();
+    }
+    // A run that never ends fails its test instead of hanging the suite.
+    tokio::time::timeout(Duration::from_secs(120), trader::bot::run(cfg, |_| None, stop))
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("the bot did not finish within two minutes")))
 }
 
 /// The `n`th POST, from 1, once the stand-in has it.
@@ -138,7 +198,8 @@ pub fn check_order(body: &Value, client_id: i64, side: &str, qty: &str, quoted: 
     let order: OrderRequest = serde_json::from_value(body.clone()).unwrap();
     let auth = order.auth.clone().unwrap();
     assert_eq!(auth.nonce, nonce);
-    assert_eq!(auth.expires_at, T0 + 30_000, "the expiry counts from the node's signed time");
+    // The expiry counts from the node's signed time, counted on by the clock since the answer.
+    assert!((T0 + 30_000..T0 + 40_000).contains(&auth.expires_at), "{}", auth.expires_at);
     let hash = order_hash(&domain(), &order, auth.nonce, auth.expires_at);
     assert_eq!(recover(&hash, &auth.signature), Some(account()));
 }

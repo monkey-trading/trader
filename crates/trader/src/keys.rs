@@ -66,10 +66,11 @@ impl AccountKey {
         Ok(key)
     }
 
-    /// The key whose secret is `bytes`.
+    /// The key whose secret is `bytes`. Unlike `load`, it does not refuse the keys this repository
+    /// publishes: tests and benchmarks build many keys from counters.
     /// Error cases:
     /// - `bytes` is not 32 bytes of a valid secp256k1 secret key
-    fn from_secret(bytes: &[u8]) -> anyhow::Result<Self> {
+    pub fn from_secret(bytes: &[u8]) -> anyhow::Result<Self> {
         let key = SigningKey::from_slice(bytes).map_err(|_| anyhow!("not a valid secp256k1 secret key"))?;
         let address = eip712::address(key.verifying_key());
         Ok(Self { key, address })

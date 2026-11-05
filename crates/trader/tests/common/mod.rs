@@ -4,8 +4,10 @@
 #![allow(dead_code)]
 
 mod bot;
+mod messages;
 #[allow(unused_imports)]
 pub use bot::*;
+pub use messages::*;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
@@ -83,7 +85,16 @@ pub struct Inner {
     pub markets: Value,
     /// Account views by lower-case address; an absent one answers 404.
     pub accounts: BTreeMap<String, Value>,
+    /// The nonce an account starts at; each POST for an account moves its own on by one.
     pub nonce: u64,
+    pub nonces: BTreeMap<String, u64>,
+    /// A per-address limit as the node applies it, answering 429 with a `Retry-After` of one second,
+    /// unsigned, to a request over it: requests per second, and the burst.
+    pub limit: Option<(f64, f64)>,
+    pub tokens: Option<(f64, std::time::Instant)>,
+    /// How many requests the limit refused, and how many TLS connections the stand-in accepted.
+    pub rate_limited: usize,
+    pub tls_connections: usize,
     /// The marks history, served by window and page as the node serves it.
     pub marks: Vec<Value>,
     /// The most buckets one page holds, below the request's limit; and a `next` to answer with
@@ -170,13 +181,17 @@ impl StandIn {
             .route("/v1/positions/close-all", post(record))
             .route("/v1/stream", get(stream))
             .layer(from_fn_with_state(stand_in.clone(), sign_answers))
+            .layer(from_fn_with_state(stand_in.clone(), limit_ip))
             .with_state(stand_in.clone());
         let acceptor = TlsAcceptor::from(Arc::new(config));
+        let counted = Arc::clone(&stand_in);
         tokio::spawn(async move {
             loop {
                 let Ok((tcp, _)) = listener.accept().await else { return };
                 let (acceptor, router) = (acceptor.clone(), router.clone());
+                let counted = Arc::clone(&counted);
                 tokio::spawn(async move {
+                    counted.with(|i| i.tls_connections += 1);
                     let Ok(tls) = acceptor.accept(tcp).await else { return };
                     let service = TowerToHyperService::new(router);
                     let _ = hyper::server::conn::http1::Builder::new()
@@ -237,27 +252,25 @@ impl StandIn {
     }
 }
 
-/// A command message of the log, as the node streams it.
-pub fn command(seq: u64, ts: i64, cmd: Value, events: Value) -> Value {
-    json!({ "offset": format!("{seq}:0"), "type": "command", "seq": seq, "ts": ts, "cmd": cmd, "events": events })
-}
-
-/// A `Prices` command for `market` quoting `mid` from three venues stamped `ts`.
-pub fn prices(market: u32, mid: &str, ts: i64) -> Value {
-    let quote = |source: &str| json!({ "source": source, "mid": mid, "ts": ts });
-    json!({ "type": "prices", "market": market, "quotes": [quote("a"), quote("b"), quote("c")] })
-}
-
-/// BTC-USD as the dev config lists it, with its mark.
-pub fn btc_usd(mark: Option<&str>) -> Value {
-    json!({
-        "id": 1, "symbol": "BTC-USD", "asset_class": "crypto", "schedule": { "kind": "always_open" },
-        "margin_tiers": [{ "bps": 100 }], "spread_tiers": [{ "bps": 0 }],
-        "price_rules": { "max_age_ms": 1000, "max_divergence_bps": 25, "min_sources": 2 },
-        "max_slippage_bps": 25, "financing": { "benchmark": "SOFR", "markup_bps": 500, "day_basis": 365 },
-        "house_cap_bps": 3000, "house_cap_floor": "300000",
-        "open": true, "reduce_only": false, "mark": mark, "fx_mark": null, "stress_level": 0
-    })
+/// Refuses a request over the per-address limit, as the node does before it signs: 429, a
+/// `Retry-After`, and no signature.
+async fn limit_ip(State(s): State<Arc<StandIn>>, req: Request, next: Next) -> Response {
+    if req.uri().path() != "/v1/stream" {
+        let over = s.with(|i| {
+            let Some((rate, burst)) = i.limit else { return false };
+            let now = std::time::Instant::now();
+            let (tokens, last) = i.tokens.unwrap_or((burst, now));
+            let tokens = (tokens + now.duration_since(last).as_secs_f64() * rate).min(burst);
+            let over = tokens < 1.0;
+            i.tokens = Some((if over { tokens } else { tokens - 1.0 }, now));
+            i.rate_limited += usize::from(over);
+            over
+        });
+        if over {
+            return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "1")], "rate limited").into_response();
+        }
+    }
+    next.run(req).await
 }
 
 /// Signs each answer as the node does, or answers as `Inner::answers` says. The stream answers
@@ -342,10 +355,10 @@ async fn account_view_route(State(s): State<Arc<StandIn>>, Path(address): Path<S
     }
 }
 
-async fn nonce(State(s): State<Arc<StandIn>>) -> Response {
+async fn nonce(State(s): State<Arc<StandIn>>, Path(address): Path<String>) -> Response {
     let nonce = s.with(|i| {
         i.nonce_reads += 1;
-        i.nonce
+        i.nonces.get(&address.to_lowercase()).copied().unwrap_or(i.nonce)
     });
     axum::Json(json!({ "next_nonce": nonce })).into_response()
 }
@@ -380,8 +393,9 @@ async fn record(State(s): State<Arc<StandIn>>, uri: Uri, body: Bytes) -> Respons
                 _ => {}
             }
         }
+        let start = i.nonce;
+        *i.nonces.entry(account).or_insert(start) += 1;
         i.posts.push((uri.path().to_owned(), body));
-        i.nonce += 1;
         let reply = if status.is_some() {
             json!({ "error": "refused" })
         } else {

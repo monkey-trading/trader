@@ -1,4 +1,4 @@
-# An example config for `trader run --config <file>`: one account trading one market with an SMA
+# An example config for `trader run --config <file>`: accounts, each trading its markets with an SMA
 # crossover. Every section refuses keys it does not know. Relative paths are read from this file's
 # directory. `scripts/dev-stack.sh` prints the [node] values of a local dev node.
 
@@ -18,18 +18,32 @@ tls_key_sha256 = "00000000000000000000000000000000000000000000000000000000000000
 request_timeout = "10s"
 stream_timeout = "30s"
 
-[account]
+# The node's limits on this bot, which it paces its requests under so that a burst of orders queues
+# in bar order instead of failing with 429. Set them to the node's api.per_ip and api.per_account;
+# these are the engine's development config. `connections` is how many HTTP connections to the node
+# the bot keeps open, besides the one stream; the node caps connections per address
+# (api.max_connections_per_ip).
+[node.limits]
+per_ip = { per_second = 50, burst = 100 }
+per_account = { per_second = 10, burst = 20 }
+connections = 4
+
+# One account. Name as many [[account]] tables as there are keys; every account follows the same log
+# over the one stream connection. Each account lists the markets it trades, and a strategy in each.
+[[account]]
 # An encrypted Web3 Secret Storage keystore, as wallets export it, with its password from a file
 # (password = { file = "..." }) or an environment variable (password = { env = "..." }).
 # A dev build also takes { type = "hex_file", path = "..." }: a file holding the key in hex.
 key = { type = "keystore", path = "keys/account.json", password = { env = "TRADER_KEY_PASSWORD" } }
-# Whether stopping the bot closes the strategy's position. It always cancels resting orders. A stop
-# first waits for the log to pass any order that could still enter it, up to 35 s, then makes a few
-# calls of up to request_timeout each, and more while a position too large for one close stays
-# open, for up to a minute; give a supervisor's stop a longer grace period.
+# Whether stopping the bot closes the account's positions in its markets. It always cancels resting
+# orders. A stop first waits for the log to pass any order that could still enter it, up to 35 s,
+# then makes a few calls per account, paced under the limits above, and more while a position too
+# large for one close stays open, for up to a minute; give a supervisor's stop a longer grace period
+# the more accounts there are.
 close_on_stop = false
 
-[strategy]
+# The SMA crossover in one market; add a [[account.strategy]] table per market (at most one each).
+[[account.strategy]]
 # The market, by symbol: a USD market priced from spot quotes that never closes.
 market = "BTC-USD"
 # Bars of whole minutes, from 1m to 1d, aligned to the Unix epoch.
@@ -41,6 +55,21 @@ slow = 20
 qty = "0.01"
 # How far from the quoted mark a market order may fill, in bps.
 max_slippage_bps = 25
+
+# Every `.json` keystore in a directory is an account, all with this password source and these
+# strategies. The accounts trade independently: each has its own nonce, position and orders.
+# [[account_dir]]
+# path = "keys/fleet"
+# password = { file = "keys/fleet.password" }
+# close_on_stop = true
+#
+# [[account_dir.strategy]]
+# market = "ETH-USD"
+# bar = "5m"
+# fast = 5
+# slow = 20
+# qty = "0.1"
+# max_slippage_bps = 25
 
 [logging]
 level = "info"

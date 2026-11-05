@@ -8,30 +8,69 @@ use serde::{Deserialize, Deserializer};
 use tracing_subscriber::EnvFilter;
 use trader_core::strategy::SmaCrossover;
 
-use crate::config::{Config, KeySource, NodeUrl, TlsPin};
+use crate::config::{Config, KeySource, NodeUrl, StrategySection, TlsPin};
 
 /// The shortest bar: the marks history the bot warms up from is in one-minute buckets.
 const MIN_BAR: Duration = Duration::from_secs(60);
 /// The longest bar.
 const MAX_BAR: Duration = Duration::from_secs(24 * 60 * 60);
+/// The most markets one account trades.
+const MAX_STRATEGIES: usize = 16;
+/// The most HTTP connections the bot may hold open: well inside the node's per-address cap.
+const MAX_CONNECTIONS: usize = 16;
 /// The widest slippage bound an order may name: the whole price.
 const MAX_SLIPPAGE_BPS: i64 = 10_000;
 
 impl Config {
-    /// Checks the values serde cannot: the strategy's periods, bar length, size and slippage bound,
-    /// the log filter, and that a plain hex key appears only in a dev build (`dev_build`).
+    /// Checks the values serde cannot: that some account is named, each account's strategies, the
+    /// request limits, the log filter, and that a plain hex key appears only in a dev build
+    /// (`dev_build`).
     /// Error cases:
-    /// - a hex key file outside a dev build
-    /// - fast and slow periods `SmaCrossover` refuses
-    /// - a bar that is not whole minutes from one minute to one day
-    /// - a size that is not above zero and within the engine's input bound
-    /// - a slippage bound below zero or above 10,000 bps
-    /// - a log level that is not a tracing filter directive
+    /// - no account, or a hex key file outside a dev build
+    /// - a strategy that `validate_strategies` refuses
+    /// - a limit of zero, or connections outside 1 to `MAX_CONNECTIONS`
+    /// - a log level that is not a tracing filter directive, or a zero timeout
     pub(super) fn validate(&self, dev_build: bool) -> anyhow::Result<()> {
-        if matches!(self.account.key, KeySource::HexFile { .. }) && !dev_build {
-            bail!("account.key: a plain hex key is accepted only in a dev build; use a keystore");
+        ensure!(!self.account.is_empty() || !self.account_dir.is_empty(), "no [[account]] or [[account_dir]]");
+        for account in &self.account {
+            if matches!(account.key, KeySource::HexFile { .. }) && !dev_build {
+                bail!("account.key: a plain hex key is accepted only in a dev build; use a keystore");
+            }
+            validate_strategies(&account.strategy)?;
         }
-        let strategy = &self.strategy;
+        for dir in &self.account_dir {
+            validate_strategies(&dir.strategy)?;
+        }
+        let limits = &self.node.limits;
+        for (name, rate) in [("per_ip", limits.per_ip), ("per_account", limits.per_account)] {
+            ensure!(rate.per_second > 0 && rate.burst > 0, "node.limits.{name}: per_second and burst above zero");
+        }
+        ensure!(
+            (1..=MAX_CONNECTIONS).contains(&limits.connections),
+            "node.limits.connections: from 1 to {MAX_CONNECTIONS}"
+        );
+        EnvFilter::try_new(&self.logging.level).map_err(|e| anyhow!("logging.level: {e}"))?;
+        ensure!(!self.node.request_timeout.is_zero(), "node.request_timeout: above zero");
+        ensure!(!self.node.stream_timeout.is_zero(), "node.stream_timeout: above zero");
+        Ok(())
+    }
+}
+
+/// Checks one account's strategies: how many, and each one's values.
+/// Error cases:
+/// - none, more than `MAX_STRATEGIES`, or one market twice
+/// - fast and slow periods `SmaCrossover` refuses
+/// - a bar that is not whole minutes from one minute to one day
+/// - a size that is not above zero and within the engine's input bound
+/// - a slippage bound below zero or above 10,000 bps
+fn validate_strategies(strategies: &[StrategySection]) -> anyhow::Result<()> {
+    ensure!((1..=MAX_STRATEGIES).contains(&strategies.len()), "strategy: from 1 to {MAX_STRATEGIES} per account");
+    for (i, strategy) in strategies.iter().enumerate() {
+        ensure!(
+            strategies[..i].iter().all(|other| other.market != strategy.market),
+            "strategy.market: {} twice for one account",
+            strategy.market
+        );
         SmaCrossover::new(strategy.fast, strategy.slow).map_err(|e| anyhow!("strategy: {e}"))?;
         let bar = strategy.bar;
         ensure!(
@@ -47,11 +86,8 @@ impl Config {
             (0..=MAX_SLIPPAGE_BPS).contains(&strategy.max_slippage_bps),
             "strategy.max_slippage_bps: from 0 to {MAX_SLIPPAGE_BPS}"
         );
-        EnvFilter::try_new(&self.logging.level).map_err(|e| anyhow!("logging.level: {e}"))?;
-        ensure!(!self.node.request_timeout.is_zero(), "node.request_timeout: above zero");
-        ensure!(!self.node.stream_timeout.is_zero(), "node.stream_timeout: above zero");
-        Ok(())
     }
+    Ok(())
 }
 
 impl<'de> Deserialize<'de> for NodeUrl {

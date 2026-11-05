@@ -6,5 +6,6 @@
 
 pub mod bars;
 pub mod marks;
+pub mod series;
 pub mod sma;
 pub mod strategy;

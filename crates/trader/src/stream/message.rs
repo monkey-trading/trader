@@ -5,12 +5,14 @@ use std::fmt;
 use std::str::FromStr;
 
 use anyhow::Context;
+use engine_core::Fixed;
 use engine_core::command::Command;
 use engine_core::event::Event;
-use engine_core::price::SourceQuote;
 use engine_core::types::{MarketId, Millis};
-use serde::Deserialize;
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
+use trader_core::marks::IndexMarks;
 
 /// Where a message sits in the log: its seq, and its index among that seq's entries, the command
 /// being 0. Written `<seq>:<index>`.
@@ -26,6 +28,32 @@ pub struct Head<'a> {
     #[serde(rename = "type")]
     pub kind: &'a str,
     pub offset: Option<&'a str>,
+}
+
+/// A stream message read in one pass: its type and, for a command, the rest of what `CommandMessage`
+/// holds. A message of another type leaves the command's fields out.
+#[derive(Debug, Deserialize)]
+pub struct Envelope<'a> {
+    #[serde(rename = "type")]
+    pub kind: &'a str,
+    pub seq: Option<u64>,
+    pub ts: Option<Millis>,
+    #[serde(borrow)]
+    pub cmd: Option<&'a RawValue>,
+    #[serde(borrow)]
+    pub events: Option<&'a RawValue>,
+}
+
+impl<'a> Envelope<'a> {
+    /// The command message this envelope holds.
+    /// Error cases:
+    /// - a command with no seq, time or command
+    pub fn command(&self) -> anyhow::Result<CommandMessage<'a>> {
+        match (self.seq, self.ts, self.cmd) {
+            (Some(seq), Some(ts), Some(cmd)) => Ok(CommandMessage { seq, ts, cmd, events: self.events }),
+            _ => anyhow::bail!("a command message with no seq, time or command"),
+        }
+    }
 }
 
 /// A command message: its seq, sequenced time, command, and the events applying it produced.
@@ -47,10 +75,120 @@ pub struct CommandHead<'a> {
     pub market: Option<MarketId>,
 }
 
-/// A `Prices` command's quotes.
+/// What every event starts with that the bot looks at: its type and, for most, its account.
 #[derive(Debug, Deserialize)]
-pub struct Quotes {
-    pub quotes: Vec<SourceQuote>,
+pub struct EventHead<'a> {
+    #[serde(rename = "type")]
+    pub kind: &'a str,
+    pub account: Option<&'a str>,
+}
+
+/// A fill event, borrowed: the fields the bot follows.
+#[derive(Debug, Deserialize)]
+pub struct FillRef<'a> {
+    pub account: &'a str,
+    pub order_id: u64,
+    pub market: MarketId,
+    pub side: &'a str,
+    pub qty: &'a str,
+    pub price: &'a str,
+    pub realised_pnl: &'a str,
+    pub profit_fee: &'a str,
+    pub position: &'a str,
+    pub liquidation: bool,
+}
+
+/// An order command, borrowed: whose it is, and the signature it carries.
+#[derive(Debug, Deserialize)]
+pub struct OrderRef<'a> {
+    pub account: &'a str,
+    pub auth: Option<AuthRef<'a>>,
+}
+
+/// A request's signature, as text.
+#[derive(Debug, Deserialize)]
+pub struct AuthRef<'a> {
+    pub signature: &'a str,
+}
+
+/// One quote of a `Prices` command, borrowed.
+#[derive(Debug, Deserialize)]
+struct QuoteRef<'a> {
+    source: &'a str,
+    mid: &'a str,
+    ts: Millis,
+    contract: Option<&'a str>,
+}
+
+/// Reads the quotes of a `Prices` command into `marks` one by one, with no allocation but for a
+/// venue the book has not seen.
+/// Error cases:
+/// - a command that is not an object with a quotes array of venue, mid and time
+pub fn store_prices(cmd: &str, now: Millis, marks: &mut IndexMarks) -> anyhow::Result<()> {
+    struct PricesCmd<'m>(&'m mut IndexMarks, Millis);
+    struct Quotes<'m>(&'m mut IndexMarks, Millis);
+    impl<'de> Visitor<'de> for PricesCmd<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a prices command")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            while let Some(key) = map.next_key::<&str>()? {
+                if key == "quotes" {
+                    map.next_value_seed(Quotes(self.0, self.1))?;
+                } else {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+            Ok(())
+        }
+    }
+    impl<'de> DeserializeSeed<'de> for Quotes<'_> {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_seq(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Quotes<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("quotes")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            while let Some(quote) = seq.next_element::<QuoteRef<'de>>()? {
+                let mid: Fixed = quote.mid.parse().map_err(serde::de::Error::custom)?;
+                self.0.store_quote(self.1, quote.source, mid, quote.ts, quote.contract.is_some());
+            }
+            Ok(())
+        }
+    }
+    marks.begin(now);
+    let mut de = serde_json::Deserializer::from_str(cmd);
+    Deserializer::deserialize_map(&mut de, PricesCmd(marks, now)).context("a prices command")
+}
+
+/// Calls `f` with each event of `events` in turn, as borrowed text, with no allocation.
+/// Error cases:
+/// - `events` is not an array, or `f` fails
+pub fn for_each_event<'a>(
+    events: &'a RawValue,
+    mut f: impl FnMut(&'a RawValue) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    struct Each<'f, F>(&'f mut F);
+    impl<'de, F: FnMut(&'de RawValue) -> anyhow::Result<()>> Visitor<'de> for Each<'_, F> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an array of events")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            while let Some(event) = seq.next_element::<&'de RawValue>()? {
+                (self.0)(event).map_err(|e| serde::de::Error::custom(format!("{e:#}")))?;
+            }
+            Ok(())
+        }
+    }
+    let mut de = serde_json::Deserializer::from_str(events.get());
+    Deserializer::deserialize_seq(&mut de, Each(&mut f)).context("events")
 }
 
 impl Offset {
@@ -154,8 +292,17 @@ mod tests {
         assert_eq!((message.seq, message.ts), (7, 1000));
         let cmd = message.head().unwrap();
         assert_eq!((cmd.kind, cmd.market), ("prices", Some(1)));
-        let quotes: Quotes = serde_json::from_str(message.cmd.get()).unwrap();
-        assert_eq!(quotes.quotes[0].mid, "100000.5".parse().unwrap());
+        let mut marks = IndexMarks::new(engine_core::market::PriceRules {
+            max_age_ms: 1_000,
+            max_divergence_bps: 25,
+            min_sources: 1,
+        });
+        store_prices(message.cmd.get(), 1000, &mut marks).unwrap();
+        assert_eq!(marks.mark(2_001), None, "the book has not seen max_age_ms of the log yet");
+        assert_eq!(marks.mark(2_002), None, "the quote is 1002 ms old");
+        let mut marks2 = marks.clone();
+        marks2.begin(2_000);
+        assert!(marks.is_complete(2_001));
         assert!(message.events().unwrap().is_empty());
     }
 }

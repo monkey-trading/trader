@@ -11,11 +11,14 @@ log replays through it to the same decisions. Amounts are the engine's `Fixed`, 
 ## Features
 
 - The index mark of a USD market priced from spot quotes that never closes, derived from the log's
-  `Prices` commands with the engine's own `compute_index`, exact once the log has passed the
+  `Prices` commands as the engine's `compute_index` derives it (the same median, without
+  allocating, checked against it), exact once the log has passed the
   market's quote age limit
 - Bars of whole windows of sequenced time, aligned to the Unix epoch, closed by the first command
   past them
 - A simple moving average updated in constant time from a fixed window
+- A series of one market's bars at one bar length with an average of each period asked for, shared
+  by every strategy that reads it
 - An SMA crossover that targets long, short or flat, comparing the averages exactly
 - The market order, side, size and reduce-only flag, that takes a position to its target
 - No clocks, randomness, files, environment, or network: time and prices arrive as arguments
@@ -26,7 +29,8 @@ log replays through it to the same decisions. Amounts are the engine's `Fixed`, 
 - `src/marks.rs`: `IndexMarks`, a market's stored venue quotes and index mark
 - `src/bars.rs`: `Bar` and `BarBuilder`
 - `src/sma.rs`: `Sma`, the simple moving average, and its known-answer tests
-- `src/strategy.rs`: `SmaCrossover`, `Target`, and `order_for`
+- `src/series.rs`: `Series`, the bars and averages many strategies share
+- `src/strategy.rs`: `SmaCrossover`, `Target`, `crossover_target`, and `order_for`
 - `tests/sma_crossover.rs`: the strategy through the public API, from marks to orders, against
   answers worked out by hand
 

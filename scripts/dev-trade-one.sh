@@ -79,11 +79,11 @@ chmod 600 "$work/account.hex"
   dev_stack_node_config
   cat <<CONFIG
 
-[account]
+[[account]]
 key = { type = "hex_file", path = "account.hex" }
 close_on_stop = true
 
-[strategy]
+[[account.strategy]]
 market = "BTC-USD"
 bar = "1m"
 fast = 1
@@ -134,7 +134,7 @@ history_fills() {
   done
 }
 history_fills | sort -u > "$work/history-fills.txt"
-sed -nE 's/.*: (fill|order filled) .*order_id=([0-9]+) .*side=([A-Za-z]+) qty=([^ ]+) price=([^ ]+).*/\2 \3 \4 \5/p' \
+sed -nE 's/.*: (fill|order filled) .*order_id=([0-9]+) .*side="?([A-Za-z]+)"? qty="?([^ "]+)"? price="?([^ "]+)"?.*/\2 \3 \4 \5/p' \
   "$work/bot.log" | tr '[:upper:]' '[:lower:]' | sort -u > "$work/bot-fills.txt"
 diff "$work/history-fills.txt" "$work/bot-fills.txt" || fail "the bot's logged fills are not the history's"
 buys="$(grep -c ' buy ' "$work/history-fills.txt" || true)"

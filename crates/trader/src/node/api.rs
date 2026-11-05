@@ -114,20 +114,20 @@ impl Node {
     /// Error cases:
     /// - see `CallError`
     pub async fn place_order(&self, request: &OrderRequest) -> Result<Verified<Vec<Event>>, CallError> {
-        self.post("/v1/orders", request).await
+        self.post("/v1/orders", request, Some(request.account)).await
     }
 
     /// Cancels every resting order of a signed request's account.
     /// Error cases:
     /// - see `CallError`
     pub async fn cancel_all(&self, request: &CancelAllRequest) -> Result<Verified<Vec<Event>>, CallError> {
-        self.post("/v1/orders/cancel-all", request).await
+        self.post("/v1/orders/cancel-all", request, Some(request.account)).await
     }
 
     /// Closes the positions a signed request names.
     /// Error cases:
     /// - see `CallError`
     pub async fn close_all(&self, request: &CloseAllRequest) -> Result<Verified<Vec<Event>>, CallError> {
-        self.post("/v1/positions/close-all", request).await
+        self.post("/v1/positions/close-all", request, Some(request.account)).await
     }
 }

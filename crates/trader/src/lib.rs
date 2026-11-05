@@ -26,8 +26,14 @@ pub struct Cli {
 /// What the bot does.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Trades the configured account until stopped.
+    /// Trades the configured accounts until stopped.
     Run {
+        /// The config file.
+        #[arg(short, long, env = "CONFIG_PATH")]
+        config: PathBuf,
+    },
+    /// Prints the address of every account the config names, to fund and declare them.
+    Addresses {
         /// The config file.
         #[arg(short, long, env = "CONFIG_PATH")]
         config: PathBuf,
@@ -48,6 +54,16 @@ pub fn run() -> anyhow::Result<()> {
             runtime.block_on(async {
                 let stop = bot::stop_signal()?;
                 bot::run(cfg, |name| std::env::var(name).ok(), stop).await
+            })
+        }
+        Command::Addresses { config } => {
+            let cfg = Config::load(&config)?;
+            let runtime = tokio::runtime::Runtime::new().context("the async runtime")?;
+            runtime.block_on(async {
+                for address in bot::addresses(&cfg, |name| std::env::var(name).ok()).await? {
+                    println!("{address}");
+                }
+                Ok(())
             })
         }
     }
@@ -74,6 +90,14 @@ mod tests {
         assert_eq!(err.to_string(), format!("trader {}\n", env!("CARGO_PKG_VERSION")));
     }
 
+    /// `addresses` takes its config the same way.
+    #[test]
+    fn addresses_takes_a_config_file() {
+        let cli = Cli::try_parse_from(["trader", "addresses", "-c", "bot.toml"]).unwrap();
+        let Command::Addresses { config } = cli.command else { panic!("addresses is addresses") };
+        assert_eq!(config, std::path::Path::new("bot.toml"));
+    }
+
     /// An unknown argument is refused, never ignored.
     #[test]
     fn unknown_argument_is_refused() {
@@ -86,7 +110,7 @@ mod tests {
     fn run_takes_a_config_file() {
         for flag in ["-c", "--config"] {
             let cli = Cli::try_parse_from(["trader", "run", flag, "bot.toml"]).unwrap();
-            let Command::Run { config } = cli.command;
+            let Command::Run { config } = cli.command else { panic!("run is a run") };
             assert_eq!(config, std::path::Path::new("bot.toml"));
         }
     }
