@@ -65,7 +65,15 @@ No version has been tagged yet; until one is, build the binary or the image as
 
 ### The config directory
 
-Make a directory, `/etc/trader` below, that only the user the bot runs as can read, and put in it:
+The bot runs as its own user, `trader` below, which reads its config from `/etc/trader` and keeps
+each account's state, such as the day's loss, in `/var/lib/trader`:
+
+```bash
+sudo useradd --system --no-create-home trader
+sudo install -d -m 700 -o trader -g trader /etc/trader /var/lib/trader
+```
+
+Put in `/etc/trader`:
 
 - `trader.toml`, from [`config/example.toml`](config/example.toml), with the node's `url`,
   `chain_id` and `vault`. [`config/README.md`](config/README.md) documents every key.
@@ -78,6 +86,7 @@ Make a directory, `/etc/trader` below, that only the user the bot runs as can re
 [account]
 key = { type = "keystore", path = "keys/account.json", password = { file = "keys/account.password" } }
 close_on_stop = true
+state_dir = "/var/lib/trader"
 ```
 
 On SIGINT or SIGTERM the bot cancels the account's resting orders and, with `close_on_stop`,
@@ -89,8 +98,9 @@ failure resumes trading without that look.
 ### Docker
 
 ```bash
-docker run --name trader --network host --user "$(id -u):$(id -g)" --stop-timeout 120 \
-  --volume /etc/trader:/config:ro ghcr.io/monkey-trading/trader:<tag>
+docker run --name trader --network host --user "$(id -u trader):$(id -g trader)" --stop-timeout 120 \
+  --volume /etc/trader:/config:ro --volume /var/lib/trader:/var/lib/trader \
+  ghcr.io/monkey-trading/trader:<tag>
 ```
 
 The image runs `trader run --config /config/trader.toml`. Host networking keeps the metrics
@@ -105,7 +115,7 @@ sha256sum --check --ignore-missing SHA256SUMS
 sudo install -m 755 trader-linux-amd64 /usr/local/bin/trader
 ```
 
-Then run it as its own user with a unit such as `/etc/systemd/system/trader.service`, and
+Then run it with a unit such as `/etc/systemd/system/trader.service`, and
 `sudo systemctl enable --now trader`:
 
 ```ini
@@ -116,6 +126,7 @@ After=network-online.target
 
 [Service]
 User=trader
+StateDirectory=trader
 ExecStart=/usr/local/bin/trader run --config /etc/trader/trader.toml
 TimeoutStopSec=120
 NoNewPrivileges=true
