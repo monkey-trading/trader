@@ -176,11 +176,6 @@ impl Fleet {
         if acc.failed.is_some() {
             return;
         }
-        // A target restored after a wait for a read can be past the lag orders may go at: not decided.
-        if self.log_ts.saturating_sub(w.ts) > REPLAY_LAG_MS {
-            debug!(account = %acc.address, market, "the target is history by now: no order");
-            return;
-        }
         // The account's limits are checked against the positions the log gives, so an order of another
         // of its markets that is queued, or may not be in the log yet, is waited for: the target is
         // decided again when that order is answered or its fill is read.
