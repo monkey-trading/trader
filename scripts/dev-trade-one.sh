@@ -72,7 +72,7 @@ start_ms=$(( $(now_ms) / 1000 * 1000 + 10000 ))
 start_at="$(python3 -c 'import datetime, sys; print(datetime.datetime.fromtimestamp(int(sys.argv[1]) / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$start_ms")"
 dev_stack_admin init-emissions --start "$start_at" --period-budget 1000000000000000000000
 
-step "write the bot's config: BTC-USD, 1m bars, fast 1 over slow 2, 0.5 BTC a side, close on stop"
+step "write the bot's config: BTC-USD, 1m bars, fast 1 over slow 2, 50,000 USD a side, close on stop"
 printf '%s\n' "$key" > "$work/account.hex"
 chmod 600 "$work/account.hex"
 {
@@ -86,10 +86,22 @@ close_on_stop = true
 [strategy]
 market = "BTC-USD"
 bar = "1m"
+kind = "sma_crossover"
 fast = 1
 slow = 2
-qty = "0.5"
 max_slippage_bps = 25
+
+[sizing]
+by = "fixed_notional"
+notional = "50000"
+max_leverage = "5"
+
+[risk]
+max_open_positions = 1
+max_total_notional = "200000"
+daily_loss = { usd = "100000" }
+margin_buffer_bps = 10000
+min_hold = "0s"
 
 [logging]
 level = "info"

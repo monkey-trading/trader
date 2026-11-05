@@ -8,8 +8,10 @@ use engine_core::Fixed;
 use engine_core::auth::RequestAuth;
 use engine_core::command::{CancelAllRequest, CloseAllRequest, CloseEntry};
 use engine_core::eip712::{cancel_all_hash, close_all_hash};
+use engine_core::types::Millis;
 use tokio::time::{Instant, timeout_at};
-use tracing::{error, info, warn};
+use tracing::{Instrument, debug, error, info, info_span, warn};
+use trader_core::hours::is_open;
 
 use crate::bot::orders::{EXPIRES_IN_MS, log_order_events};
 use crate::bot::{Bot, Halt};
@@ -135,7 +137,7 @@ impl Bot {
     /// `quoted`. A failed close is logged: the account read that follows shows what it did.
     /// Error cases:
     /// - an answer signed by another key than the signer
-    async fn close_position(&self, held: Fixed, quoted: Fixed) -> Result<(), Halt> {
+    pub(super) async fn close_position(&mut self, held: Fixed, quoted: Fixed) -> Result<(), Halt> {
         let account = self.key.address();
         info!(position = %held, %quoted, "closing the position");
         let Some((nonce, now)) = self.next_nonce().await? else { return Ok(()) };
@@ -147,13 +149,45 @@ impl Bot {
             auth: None,
         };
         let hash = close_all_hash(&self.domain, &request, nonce, expires_at);
-        request.auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
-        match self.node.close_all(&request).await {
-            Ok(answer) => log_order_events(&answer.body),
-            Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
-            Err(e) => warn!("the close failed: {e}"),
+        let signature = self.key.sign(&hash);
+        request.auth = Some(RequestAuth { nonce, expires_at, signature });
+        self.order_expires_at = Some(expires_at);
+        self.remember_signature(signature);
+        // The expiry names the try, so the lines of a close and its answer join.
+        let span = info_span!("close", id = expires_at);
+        async {
+            match self.node.close_all(&request).await {
+                Ok(answer) => log_order_events(&answer.body),
+                Err(CallError::WrongSigner { .. }) => return Err(Halt::WrongSigner),
+                Err(e) => warn!("the close failed: {e}"),
+            }
+            Ok(())
         }
-        Ok(())
+        .instrument(span)
+        .await
+    }
+
+    /// Closes the position at the last mark, as the daily loss limit does at `ts`, unless the market
+    /// is shut, or an order signed earlier may still enter the log and move the position.
+    /// Error cases:
+    /// - an answer signed by another key than the signer
+    pub(super) async fn flatten(&mut self, ts: Millis) -> Result<(), Halt> {
+        if self.position.is_zero() {
+            return Ok(());
+        }
+        if !is_open(&self.spec.schedule, ts) {
+            debug!("the market is shut: the position is closed when it opens");
+            return Ok(());
+        }
+        if let Some(reason) = self.order_in_flight(ts) {
+            debug!("{reason}: the position is closed once it cannot");
+            return Ok(());
+        }
+        let Some(quoted) = self.mark else {
+            warn!("no mark to quote the close at");
+            return Ok(());
+        };
+        self.close_position(self.position, quoted).await
     }
 
     /// The market's mark as the node gives it now, if it gives one.

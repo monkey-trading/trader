@@ -12,8 +12,7 @@ use common::{
     warm,
 };
 use engine_core::command::{AdminCommand, Command};
-use engine_core::market::{MarketSpec, PriceRules};
-use engine_core::session::Schedule;
+use engine_core::market::{MarketSpec, PriceRules, QuoteCurrency};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
@@ -52,11 +51,11 @@ async fn relistings_change_the_rules_or_halt() {
     assert_eq!((path.as_str(), &first["client_id"]), ("/v1/orders", &json!(T0 + 2 * MINUTE)), "{first}");
 
     stand_in.with(|i| i.time_ms = (T0 + 10 * MINUTE) as u64);
-    let weekly = MarketSpec { schedule: weekly(), ..btc_spec() };
-    stand_in.append((18, 0), relisting(18, T0 + 5 * MINUTE + 1, weekly.clone(), false));
-    stand_in.append((19, 0), relisting(19, T0 + 5 * MINUTE + 2, weekly, true));
+    let yen = MarketSpec { quote_currency: QuoteCurrency::Jpy { fx_market: 9 }, ..btc_spec() };
+    stand_in.append((18, 0), relisting(18, T0 + 5 * MINUTE + 1, yen.clone(), false));
+    stand_in.append((19, 0), relisting(19, T0 + 5 * MINUTE + 2, yen, true));
     let err = tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap_err();
-    assert!(err.to_string().contains("never closes"), "{err:#}");
+    assert!(err.to_string().contains("not a USD market priced from spot quotes"), "{err:#}");
     // The halt leaves the account as it is: its resting order stays.
     let posts = stand_in.with(|i| i.posts.clone());
     assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/orders"]);
@@ -278,11 +277,6 @@ fn btc_spec() -> MarketSpec {
     serde_json::from_value(view).unwrap()
 }
 
-/// A weekly schedule with no open window.
-fn weekly() -> Schedule {
-    serde_json::from_value(json!({ "kind": "weekly", "tz": "America/New_York", "windows": [] })).unwrap()
-}
-
 /// An admin command at `seq` listing `spec`, applied or rejected.
 fn relisting(seq: u64, ts: i64, spec: MarketSpec, applied: bool) -> Value {
     let cmd = serde_json::to_value(Command::Admin(AdminCommand::UpsertMarket(spec))).unwrap();
@@ -317,4 +311,23 @@ async fn order_then_stop(stand_in: &Arc<StandIn>) -> (JoinHandle<anyhow::Result<
     assert_eq!(path, "/v1/orders");
     stop.send(()).unwrap();
     (bot, dir)
+}
+
+/// A relisting that leaves the market's own leverage at or below the cap halts the bot: the cap was
+/// chosen below the old market's.
+#[tokio::test]
+async fn a_relisting_that_lowers_the_markets_leverage_halts() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), std::future::pending()));
+    let tiers = vec![engine_core::market::Tier { up_to: None, bps: 1000 }];
+    stand_in.append((11, 0), relisting(11, T0 + 1, MarketSpec { margin_tiers: tiers, ..btc_spec() }, true));
+    stand_in.tick(T0 + 40_000);
+    let err = tokio::time::timeout(Duration::from_secs(40), bot).await.unwrap().unwrap().unwrap_err();
+    assert!(format!("{err:#}").contains("not below the market's own"), "{err:#}");
 }

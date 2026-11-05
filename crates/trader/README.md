@@ -3,7 +3,7 @@
 ## Overview
 
 The monkeytrading bot's binary. `trader run --config <file>` trades one account in one market with
-an SMA crossover against a monkeytrading node. Every answer the node signs and every frame of its
+one of six strategies against a monkeytrading node. Every answer the node signs and every frame of its
 public log stream is checked against the configured enclave signer before the bot acts on it; an
 answer that fails the check is an error, never data, and one signed by another key stops the bot.
 
@@ -28,6 +28,14 @@ answer that fails the check is an error, never data, and one signed by another k
   window, and the moves the bot saw since follow
 - Bars built only from moves of the mark, as the node's marks history records them, so bars warmed
   up from the history and bars built live agree
+- Each target passes the account's controls before it becomes an order: its size from the sizing,
+  the risk limits (open positions, total notional, and a daily loss that flattens the account and
+  keeps it stopped until the next UTC day, across restarts), a margin buffer over the engine's
+  requirement, positive cash, a minimum hold, and the market's trading hours. A market with hours
+  is followed as the engine prices it, a halt or closure leaves no order, and the first bar after
+  one is a gap; a split or a failed corporate action in the market halts the bot, and a warm-up
+  starts after the last step in the history of 40% down or 67% up, which only a split makes. A split
+  smaller than 2-for-1, or one while the bot is stopped, is not seen
 - Signed market orders toward the strategy's target, on the account's next nonce, quoted at the
   last mark; a declined order is logged with the node's reason and retried on the next bar, and a
   reversal the engine refuses whole is retried as a reduce-only close, then an opening order. No
@@ -64,6 +72,7 @@ answer that fails the check is an error, never data, and one signed by another k
 - `src/bot/startup.rs`: the startup reads, the warm-up from the marks history, and the stop signals
 - `src/bot/fills.rs`: the account's fills, the balance read after them, and the check that they
   are the bot's own
+- `src/bot/day.rs`: the day's loss kept in a file, and the reading of equity against the daily limit
 - `src/bot/orders.rs`: the signed market order
 - `src/bot/stop.rs`: the stop: the wait for the log, the signed cancel and close, and the check
 - `tests/common/mod.rs`: a local stand-in node that signs its answers and frames, with injected
@@ -73,6 +82,10 @@ answer that fails the check is an error, never data, and one signed by another k
 - `tests/node_answers.rs`, `tests/stream.rs`, `tests/bot.rs`: the binary against the stand-in
 - `tests/bot_halts.rs`: the bot against the stand-in when its market is relisted, the log cannot be
   read, the node changes signer, or a stop cannot leave the account as it should
+- `tests/bot_controls.rs`: the daily loss limit, a market's halt, the minimum hold, cash and the margin
+  buffer
+- `tests/bot_state.rs`: a split, a failed corporate action, a dividend, a position in another market,
+  a read behind the log, a state file that cannot be written, and what a restart keeps
 - `tests/bot_orders.rs`: the bot's orders when one is refused, goes unanswered, or is a reversal the
   engine refuses whole, and when someone else trades the account
 - `tests/bot_warm_up.rs`: the warm-up from the marks history, which moves of the mark make bars,
@@ -85,7 +98,7 @@ cargo run -p trader -- run --config config/example.toml
 ```
 
 `scripts/dev-stack.sh` runs a local node and prints its `[node]` section; `scripts/dev-trade-one.sh`
-runs the bot against it end to end.
+runs the bot against it end to end, and `scripts/dev-strategies.sh` runs each strategy on its own account.
 
 ## Configuration
 
@@ -97,9 +110,13 @@ know, and relative paths are read from the file's directory:
   node's TLS key hash to pin; without it the certificate must chain to a public root),
   `request_timeout` and `stream_timeout`
 - `[account]`: `key`, a keystore with its password from a file or an environment variable, or in a
-  dev build a hex key file; `close_on_stop`
-- `[strategy]`: `market` (a symbol), `bar` (whole minutes, 1m to 1d), `fast` and `slow` (periods in
-  bars), `qty` (the position size), `max_slippage_bps`
+  dev build a hex key file; `close_on_stop`; `state_dir`, where the day's loss is kept
+- `[strategy]`: `market` (a symbol), `bar` (whole minutes, 1m to 1d), `max_slippage_bps`, and the
+  strategy by `kind` with its parameters (see `trader-core`)
+- `[sizing]`: `by` (`fixed_notional` with `notional`, or `equity_fraction` with `bps`) and
+  `max_leverage`, which must be below the market's own
+- `[risk]`: `max_open_positions`, `max_total_notional`, `daily_loss`, `margin_buffer_bps` and
+  `min_hold`
 - `[logging]`: `level`, a tracing filter directive
 
 `CONFIG_PATH`: the config file, when `--config` is not given. The keystore password variable is the
@@ -109,7 +126,8 @@ one the config names.
 
 ```bash
 cargo test -p trader
-./scripts/dev-trade-one.sh   # the dev scenario, about seventeen minutes
+./scripts/dev-trade-one.sh   # a dev scenario, about seventeen minutes
+./scripts/dev-strategies.sh  # another, about twenty minutes
 ```
 
 ## Authors

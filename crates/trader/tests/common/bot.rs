@@ -27,8 +27,13 @@ pub fn domain() -> eip712::Eip712Domain {
 }
 
 /// A config for the stand-in, with the test account's key in a hex file in `dir`: BTC-USD, `bar`
-/// bars, a one-bar average over a two-bar one, one unit a side, closing on stop.
+/// bars, a one-bar average over a two-bar one, 100 USD a side, closing on stop.
 pub fn config(stand_in: &StandIn, dir: &Path, bar: &str) -> Config {
+    config_with(stand_in, dir, bar, &[])
+}
+
+/// `config` with each `(from, to)` replacing the first `from` in the config's text.
+pub fn config_with(stand_in: &StandIn, dir: &Path, bar: &str, edits: &[(&str, &str)]) -> Config {
     std::fs::write(dir.join("account.hex"), hex::encode(ACCOUNT_SECRET)).unwrap();
     let text = format!(
         r#"
@@ -48,16 +53,32 @@ close_on_stop = true
 [strategy]
 market = "BTC-USD"
 bar = "{bar}"
+kind = "sma_crossover"
 fast = 1
 slow = 2
-qty = "1"
 max_slippage_bps = 25
+
+[sizing]
+by = "fixed_notional"
+notional = "100"
+max_leverage = "50"
+
+[risk]
+max_open_positions = 1
+max_total_notional = "100000"
+daily_loss = {{ usd = "100000" }}
+margin_buffer_bps = 0
+min_hold = "0s"
 "#,
         port = stand_in.addr.port(),
         vault = hex::encode(VAULT),
         signer = hex::encode(stand_in.signer()),
         pin = hex::encode(stand_in.pin),
     );
+    let text = edits.iter().fold(text, |text, (from, to)| {
+        assert!(text.contains(from), "{from:?} is not in the config");
+        text.replacen(from, to, 1)
+    });
     let path = dir.join("bot.toml");
     std::fs::write(&path, text).unwrap();
     Config::load(&path).unwrap()

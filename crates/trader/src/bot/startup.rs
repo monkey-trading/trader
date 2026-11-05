@@ -11,10 +11,14 @@ use engine_wire::Deployment;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{info, warn};
 use trader_core::bars::BarBuilder;
+use trader_core::controls::{Account, Controls};
+use trader_core::hours::GapTracker;
 use trader_core::marks::IndexMarks;
-use trader_core::strategy::SmaCrossover;
+use trader_core::strategies::{after_unit_break, is_valid_close};
 
-use crate::bot::{Bot, Halt, orders, supported};
+use crate::bot::day::{Saved, StateFile, holding};
+use crate::bot::fills::other_market;
+use crate::bot::{Bot, Halt, bar_fits, orders, supported};
 use crate::config::Config;
 use crate::keys::AccountKey;
 use crate::node::api::MarkBucket;
@@ -85,29 +89,76 @@ pub(super) async fn start(cfg: &Config, key: AccountKey) -> anyhow::Result<(Bot,
         }
         Err(e) => return Err(e.into()),
     };
-    let (now, view) = (view.time_ms, view.body);
-    let position = view.positions.get(&market_id).map_or(Fixed::ZERO, |p| p.qty);
+    let (now, account_seq, view) = (view.time_ms, view.head_seq, view.body);
+    if let Some(other) = other_market(&view, market_id) {
+        bail!(
+            "{account} holds a position in market {other}: close it first, as this bot trades one market per account"
+        );
+    }
+    let held = view.positions.get(&market_id);
+    let position = held.map_or(Fixed::ZERO, |p| p.qty);
     info!(%account, market = market_id, %position, balance = %view.balance, head_seq, "account read");
 
     let bar_ms = Millis::try_from(strategy_cfg.bar.as_millis()).context("bar length")?;
     let now = Millis::try_from(now).context("node time")?;
+    bar_fits(&market.spec, bar_ms, now)?;
+    let strategy = strategy_cfg.params.build()?;
+    let state_file = StateFile::new(&cfg.account.state_dir, account);
+    let saved = state_file.load().await?;
+    let mut controls = Controls::new(cfg.risk.clone(), cfg.sizing.clone(), saved.day)?;
+    controls.check_market(&market.spec).with_context(|| format!("sizing for {}", strategy_cfg.market))?;
+    // A position keeps the opening time saved for it, if it is on the side and at the entry saved. One with none, as when
+    // a crash came between its fill and the save, is held from now: the hold is the conservative guess.
+    let opened = (!position.is_zero()).then(|| match saved.opened.get(&market_id) {
+        Some(at) if saved.side == position.signum() && held.is_some_and(|p| p.entry == saved.entry) => *at,
+        _ => now,
+    });
+    controls.restore_opened(opened.map(|at| (market_id, at)).into_iter().collect());
+    // The day's opening equity is the account's now, unless a restart finds today's already kept; the
+    // markets and the account must have been read at the same point of the log to be valued together.
+    if let (Some(mark), true) = (market.mark, account_seq == head_seq) {
+        let entry = held.map_or(Fixed::ZERO, |p| p.entry);
+        let holding = held.and_then(|p| holding(&market.spec, market_id, p.qty, entry, mark));
+        let holdings = holding.as_slice();
+        controls.observe(now, &Account { balance: view.balance, holdings });
+    }
+    let saved_state = Saved {
+        day: controls.day_state(),
+        opened: controls.opened().clone(),
+        side: position.signum(),
+        entry: held.map_or(Fixed::ZERO, |p| p.entry),
+        split_at: saved.split_at,
+    };
+    state_file.save(saved_state.clone()).await.context("keeping the saved state")?;
     let bot = Bot {
         domain: eip712::domain(node_cfg.chain_id, node_cfg.vault),
         node,
         key,
         market: market_id,
-        qty: strategy_cfg.qty,
+        marks: IndexMarks::scheduled(market.spec.price_rules, market.spec.schedule.clone()),
+        spec: market.spec,
         max_slippage_bps: strategy_cfg.max_slippage_bps,
         close_on_stop: cfg.account.close_on_stop,
-        marks: IndexMarks::new(market.spec.price_rules),
         bar_ms,
-        history_bars: i64::try_from(strategy_cfg.slow).context("slow period")?,
+        history_bars: i64::try_from(strategy_cfg.params.warm_up_bars()).context("warm-up bars")?,
         bars: None,
         warm_up_after: Millis::MIN,
-        strategy: SmaCrossover::new(strategy_cfg.fast, strategy_cfg.slow)?,
+        strategy,
+        controls,
+        gaps: GapTracker::new(),
+        state_file,
+        saved_state,
+        state_unsaved: false,
+        loss_alert: false,
+        flatten_after: Millis::MIN,
+        cash_alert: false,
+        account_behind: false,
+        read_retry_after: Millis::MIN,
+        split_at: saved.split_at,
         close_first: false,
         signed_orders: VecDeque::with_capacity(SIGNED_ORDERS),
         position,
+        entry: held.map_or(Fixed::ZERO, |p| p.entry),
         balance: view.balance,
         mark: market.mark,
         exact_mark: None,
@@ -150,7 +201,8 @@ impl Bot {
         }
         let bar_ms = self.bar_ms;
         let live_from = BarBuilder::new(bar_ms, Millis::MIN).window_start(exact_from);
-        let history_from = live_from - bar_ms * self.history_bars;
+        // History from before a split the bot halted at is in the units before it.
+        let history_from = (live_from - bar_ms * self.history_bars).max(self.split_at.unwrap_or(Millis::MIN));
         // The widest buckets that tile a bar, which the node keeps longest; every bar is whole minutes.
         let (resolution, _) =
             RESOLUTIONS.into_iter().find(|(_, width)| bar_ms % width == 0).expect("bars are whole minutes");
@@ -167,15 +219,20 @@ impl Bot {
             buckets.iter().partition(|bucket| bucket.provenance == LOG_DERIVED);
         let mut history = BarBuilder::new(bar_ms, Millis::MIN);
         let mut bars = 0;
-        let past = logged.iter().filter(|bucket| bucket.ts < live_from).map(|bucket| (bucket.ts, Some(bucket.close)));
+        // Only the history since the last split-sized step counts: before it, prices are in other units.
+        let before: Vec<&&MarkBucket> = logged.iter().filter(|bucket| bucket.ts < live_from).collect();
+        let closes: Vec<Fixed> = before.iter().map(|bucket| bucket.close).collect();
+        let past = before[after_unit_break(&closes)..].iter().map(|bucket| (bucket.ts, Some(bucket.close)));
         for (at, close) in past.chain([(live_from, None)]) {
             if let Some(bar) = history.on_command(at, close) {
-                self.strategy.on_close(bar.close);
+                self.gaps.on_bar(&self.spec.schedule, bar.start, bar_ms);
+                if is_valid_close(bar.close) {
+                    self.strategy.on_close(bar.close);
+                }
                 bars += 1;
             }
         }
-        let (fast, slow) = self.strategy.averages();
-        info!(bars, seeded = seeded.len(), resolution, live_from, ?fast, ?slow, "warmed up from the marks history");
+        info!(bars, seeded = seeded.len(), resolution, live_from, "warmed up from the marks history");
         // With no exact value yet, moves start from the node's last mark in the history.
         if self.exact_mark.is_none() {
             self.exact_mark = logged.last().map(|bucket| bucket.close);

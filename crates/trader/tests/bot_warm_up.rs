@@ -41,7 +41,7 @@ async fn warms_up_from_the_marks_history() {
     stand_in.append((11, 0), command(11, T0, prices(1, "99", T0), json!([])));
     stand_in.append((12, 0), command(12, T0 + 1_001, prices(1, "99", T0 + 1_001), json!([])));
     stand_in.append((13, 0), command(13, T0 + 2 * MINUTE, prices(1, "98", T0 + 2 * MINUTE), json!([])));
-    check_order(&order(&stand_in, 1).await, T0, "sell", "1", "98", false, 0);
+    check_order(&order(&stand_in, 1).await, T0, "sell", "1.020408163", "98", false, 0);
     stand_in.with(|i| i.time_ms = (T0 + 10 * MINUTE) as u64);
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
@@ -181,10 +181,10 @@ async fn the_first_exact_mark_is_not_a_move() {
     for (seq, ts, mid) in commands {
         stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
     }
-    // Closes 100, 99, then minute 2's 101: long, a buy of 2 from short 1.
+    // Closes 100, 99, then minute 2's 101: long, a buy of 1.990099009 from short 1, closing it and opening 100 USD at 101.
     let first = order(&stand_in, 1).await;
     let fields = (first["client_id"].as_i64(), first["side"].as_str(), first["qty"].as_str());
-    assert_eq!(fields, (Some(T0 + 2 * MINUTE), Some("buy"), Some("2")), "{first}");
+    assert_eq!(fields, (Some(T0 + 2 * MINUTE), Some("buy"), Some("1.990099009")), "{first}");
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
 }

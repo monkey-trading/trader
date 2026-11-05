@@ -16,9 +16,15 @@ use crate::config::{KeySource, PasswordSource};
 
 /// The accounts whose private keys this repository publishes, for its dev scenario and its tests.
 /// Anyone can sign for them, so only a dev build takes them.
-const PUBLISHED_ACCOUNTS: [&str; 8] = [
-    // scripts/dev-trade-one.sh: Anvil's account 1.
+const PUBLISHED_ACCOUNTS: [&str; 14] = [
+    // scripts/dev-trade-one.sh: Anvil's account 1, and scripts/dev-strategies.sh: Anvil's accounts 1 to 7.
     "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+    "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+    "0x90f79bf6eb2c4f870365e785982e1f101e93b906",
+    "0x15d34aaf54267db7d7c367839aaf71a00a2c6a65",
+    "0x9965507d1a55bcc2695c58ba16fb37d819b0a4dc",
+    "0x976ea74026e726554db657fa54763abd0c3a0aa9",
+    "0x14dc79964da2c08b23698b3d3cc7ca32193d9955",
     // scripts/dev-stack.sh: the engine's dev operator key, 32 bytes of 0x42.
     "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
     // The tests' keys: 32 bytes of 0x11, 0x51 and 0x52, the secrets 1 and 0x123456789abc, and the

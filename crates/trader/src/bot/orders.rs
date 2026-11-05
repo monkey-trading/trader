@@ -3,7 +3,7 @@
 
 use engine_core::auth::RequestAuth;
 use engine_core::command::{OrderKind, OrderRequest};
-use engine_core::eip712::order_hash;
+use engine_core::eip712::{Signature, order_hash};
 use engine_core::event::{Event, Reject};
 use engine_core::types::Millis;
 use tracing::{Instrument, info, info_span, warn};
@@ -57,10 +57,7 @@ impl Bot {
             request.auth = Some(RequestAuth { nonce, expires_at, signature });
             // Signed, the order can enter the log until it expires, whatever its answer says.
             self.order_expires_at = Some(expires_at);
-            if self.signed_orders.len() == SIGNED_ORDERS {
-                self.signed_orders.pop_front();
-            }
-            self.signed_orders.push_back(signature);
+            self.remember_signature(signature);
             self.close_first = false;
             info!(side = ?intent.side, qty = %intent.qty, %quoted, reduce_only = intent.reduce_only, nonce, expires_at, "placing a market order");
             match self.node.place_order(&request).await {
@@ -79,6 +76,23 @@ impl Bot {
         }
         .instrument(span)
         .await
+    }
+
+    /// Remembers `signature` as one this process signed, to tell its fills from others'.
+    pub(super) fn remember_signature(&mut self, signature: Signature) {
+        if self.signed_orders.len() == SIGNED_ORDERS {
+            self.signed_orders.pop_front();
+        }
+        self.signed_orders.push_back(signature);
+    }
+
+    /// Why no order is signed for the command at `ts`, if an earlier one may still enter the log and
+    /// move the position: this process's last, or one an earlier process signed before this start.
+    pub(super) fn order_in_flight(&self, ts: Millis) -> Option<&'static str> {
+        if self.order_expires_at.is_some_and(|expires_at| ts <= expires_at) {
+            return Some("the last order may still enter the log");
+        }
+        (ts <= self.trading_from).then_some("an order signed before this start may still enter the log")
     }
 
     /// The account, verified.

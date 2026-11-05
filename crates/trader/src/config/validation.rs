@@ -3,10 +3,8 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, ensure};
-use engine_core::Fixed;
 use serde::{Deserialize, Deserializer};
 use tracing_subscriber::EnvFilter;
-use trader_core::strategy::SmaCrossover;
 
 use crate::config::{Config, KeySource, NodeUrl, TlsPin};
 
@@ -18,13 +16,12 @@ const MAX_BAR: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_SLIPPAGE_BPS: i64 = 10_000;
 
 impl Config {
-    /// Checks the values serde cannot: the strategy's periods, bar length, size and slippage bound,
-    /// the log filter, and that a plain hex key appears only in a dev build (`dev_build`).
+    /// Checks the values serde cannot: the strategy's parameters, bar length and slippage bound, the
+    /// risk limits, the log filter, and that a plain hex key appears only in a dev build (`dev_build`).
     /// Error cases:
     /// - a hex key file outside a dev build
-    /// - fast and slow periods `SmaCrossover` refuses
+    /// - a strategy parameter its strategy refuses, or a risk limit or sizing figure out of range
     /// - a bar that is not whole minutes from one minute to one day
-    /// - a size that is not above zero and within the engine's input bound
     /// - a slippage bound below zero or above 10,000 bps
     /// - a log level that is not a tracing filter directive
     pub(super) fn validate(&self, dev_build: bool) -> anyhow::Result<()> {
@@ -32,16 +29,13 @@ impl Config {
             bail!("account.key: a plain hex key is accepted only in a dev build; use a keystore");
         }
         let strategy = &self.strategy;
-        SmaCrossover::new(strategy.fast, strategy.slow).map_err(|e| anyhow!("strategy: {e}"))?;
+        strategy.params.build().map_err(|e| anyhow!("strategy: {e}"))?;
+        self.risk.validate().map_err(|e| anyhow!("risk: {e}"))?;
+        self.sizing.check().map_err(|e| anyhow!("sizing: {e}"))?;
         let bar = strategy.bar;
         ensure!(
             (MIN_BAR..=MAX_BAR).contains(&bar) && bar.as_millis().is_multiple_of(MIN_BAR.as_millis()),
             "strategy.bar: whole minutes from 1m to 1d, not {bar:?}"
-        );
-        ensure!(
-            strategy.qty > Fixed::ZERO && strategy.qty.is_valid_input(),
-            "strategy.qty: above zero and at most {}",
-            Fixed::MAX_INPUT
         );
         ensure!(
             (0..=MAX_SLIPPAGE_BPS).contains(&strategy.max_slippage_bps),
