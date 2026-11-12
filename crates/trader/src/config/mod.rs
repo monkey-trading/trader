@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use engine_core::Fixed;
 use engine_core::types::AccountId;
 use serde::Deserialize;
 use trader_core::risk::RiskParams;
