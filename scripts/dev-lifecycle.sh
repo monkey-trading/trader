@@ -99,12 +99,26 @@ close_on_stop = true
 [[account.strategy]]
 market = "BTC-USD"
 bar = "1m"
+kind = "sma_crossover"
 fast = 1
 slow = 2
-qty = "0.01"
 max_slippage_bps = 25
 CONFIG
   done
+  cat <<CONFIG
+
+[sizing]
+by = "fixed_notional"
+notional = "500"
+max_leverage = "5"
+
+[risk]
+max_open_positions = 1
+max_total_notional = "1000"
+daily_loss = { usd = "1000" }
+margin_buffer_bps = 10000
+min_hold = "0s"
+CONFIG
   printf '%s\n' "$funding_key" > "$work/funding.hex"
   cat <<CONFIG
 
