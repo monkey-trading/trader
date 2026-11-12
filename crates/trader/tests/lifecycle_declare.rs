@@ -192,7 +192,7 @@ async fn an_account_that_cannot_be_used_is_reported_and_the_others_carry_on() {
     let entry = |file: &str| {
         format!(
             "[[account]]\nkey = {{ type = \"hex_file\", path = \"{file}\" }}\n[[account.strategy]]\n\
-             market = \"BTC-USD\"\nbar = \"1m\"\nfast = 1\nslow = 2\nqty = \"1\"\nmax_slippage_bps = 25\n"
+             market = \"BTC-USD\"\nbar = \"1m\"\nkind = \"sma_crossover\"\nfast = 1\nslow = 2\nmax_slippage_bps = 25\n"
         )
     };
     let extra = format!("{}{}", entry("missing.hex"), entry("account.hex"));
@@ -258,7 +258,7 @@ async fn a_declaration_that_cannot_be_read_fails_its_account_alone() {
     let other = common::lifecycle::funding_wallet();
     s.answer(&format!("/v1/accounts/{}/eligibility", AccountId(other.into_array())), 200, declared("professional"));
     let entry = "[[account]]\nkey = { type = \"hex_file\", path = \"funding.hex\" }\n[[account.strategy]]\n\
-                 market = \"BTC-USD\"\nbar = \"1m\"\nfast = 1\nslow = 2\nqty = \"1\"\nmax_slippage_bps = 25\n";
+                 market = \"BTC-USD\"\nbar = \"1m\"\nkind = \"sma_crossover\"\nfast = 1\nslow = 2\nmax_slippage_bps = 25\n";
     let cfg = common::lifecycle::config(&s.node, &[s.chain.url()], s.dir.path(), false, entry);
     let declare = Action::Declare { class: Class::Professional, confirm: vec![] };
     let mut out = Vec::new();

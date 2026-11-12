@@ -155,10 +155,22 @@ key = {{ type = "hex_file", path = "account.hex" }}
 [[account.strategy]]
 market = "BTC-USD"
 bar = "1m"
+kind = "sma_crossover"
 fast = 1
 slow = 2
-qty = "1"
 max_slippage_bps = 25
+
+[sizing]
+by = "fixed_notional"
+notional = "100"
+max_leverage = "50"
+
+[risk]
+max_open_positions = 1
+max_total_notional = "100000"
+daily_loss = {{ usd = "100000" }}
+margin_buffer_bps = 0
+min_hold = "0s"
 
 [chain]
 rpc = [{rpc}]
