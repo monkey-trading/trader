@@ -183,6 +183,26 @@ async fn the_command_declares_only_for_confirmed_accounts() {
     assert_eq!(s.posts("/v1/eligibility").len(), 1);
 }
 
+/// An account `--confirm` names is confirmed whatever its first eligibility read says: the
+/// declaration reads it again before it signs.
+#[tokio::test]
+async fn an_account_named_by_confirm_is_declared_though_its_first_read_failed() {
+    let s = Setup::start(false).await;
+    s.chain.with(|l| l.down = true);
+    s.node.with(|i| {
+        i.lifecycle.first.insert(eligibility_path(), [(500, json!({ "error": "internal error" }))].into());
+        i.replies.push_back(attested("professional"));
+    });
+    s.answer(&eligibility_path(), 200, declared_none());
+    let declare = Action::Declare { class: Class::Professional, confirm: vec![account()] };
+    let cfg = common::lifecycle::config(&s.node, &[s.chain.url()], s.dir.path(), false, "");
+    let mut out = Vec::new();
+    within(cli::run(cfg, vec![], declare, |_| None, false, &mut out)).await.unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains(&format!("{}: declared Professional", account())), "{out}");
+    assert_eq!(s.posts("/v1/eligibility").len(), 1);
+}
+
 /// An account whose key does not unlock, or that is listed twice, is reported under its key's path
 /// and fails the command, and the others carry on; an account named alone is acted for without them.
 #[tokio::test]

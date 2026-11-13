@@ -3,7 +3,7 @@
 
 pub mod chain;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -212,6 +212,10 @@ pub fn deposit_record(tx: B256, amount: &str, uncredited: Option<&str>) -> Value
 pub struct Canned {
     pub answers: BTreeMap<String, (u16, Value)>,
     pub reads: BTreeMap<String, usize>,
+    /// The query string of each read of a path, in order.
+    pub queries: BTreeMap<String, Vec<String>>,
+    /// Answers given to the first reads of a path, before `answers` takes over.
+    pub first: BTreeMap<String, VecDeque<(u16, Value)>>,
 }
 
 /// The lifecycle's routes: its POSTs, recorded and answered as orders are, and every path no other
@@ -228,7 +232,9 @@ pub fn routes() -> Router<Arc<StandIn>> {
 async fn canned(State(s): State<Arc<StandIn>>, uri: Uri) -> Response {
     let answer = s.with(|i| {
         *i.lifecycle.reads.entry(uri.path().to_owned()).or_default() += 1;
-        i.lifecycle.answers.get(uri.path()).cloned()
+        i.lifecycle.queries.entry(uri.path().to_owned()).or_default().push(uri.query().unwrap_or_default().to_owned());
+        let first = i.lifecycle.first.get_mut(uri.path()).and_then(VecDeque::pop_front);
+        first.or_else(|| i.lifecycle.answers.get(uri.path()).cloned())
     });
     match answer {
         Some((status, body)) => (StatusCode::from_u16(status).unwrap(), axum::Json(body)).into_response(),

@@ -186,6 +186,22 @@ impl Node {
         Err(too_long(account, "withdrawal queue"))
     }
 
+    /// `account`'s request `requested_seq` in the withdrawal queue, `None` once it is no longer
+    /// queued: one entry read, whatever the queue's length.
+    /// Error cases:
+    /// - see `CallError`
+    pub async fn queued_withdrawal(
+        &self,
+        account: AccountId,
+        requested_seq: u64,
+    ) -> Result<Option<QueuedWithdrawal>, CallError> {
+        // The page starts at the first request from `requested_seq` on, whoever's it is.
+        let cursor = requested_seq.checked_sub(1).map(|seq| format!("&after={seq}")).unwrap_or_default();
+        let path = format!("/v1/accounts/{account}/withdrawals?limit=1{cursor}");
+        let page: QueuePage = self.get(&path).await?.body;
+        Ok(page.queue.into_iter().find(|queued| queued.requested_seq == requested_seq))
+    }
+
     /// `account`'s unpaid payouts, every page.
     /// Error cases:
     /// - see `CallError`

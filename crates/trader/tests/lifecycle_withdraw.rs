@@ -74,6 +74,24 @@ async fn a_withdrawal_is_requested_approved_and_paid_to_the_account() {
     );
 }
 
+/// Each poll of a queued withdrawal reads the request's own queue entry, one entry from just before
+/// its seq, never a page of the account's share of the queue.
+#[tokio::test]
+async fn a_queued_withdrawal_is_polled_by_its_own_entry() {
+    let s = Setup::start(false).await;
+    s.node.with(|i| i.replies.push_back(queued_reply()));
+    s.answer(&queue_path(), 200, queue(&[12]));
+    s.answer(&payouts_path(), 200, payouts(vec![]));
+    let approve = async {
+        wait_reads(&s, &queue_path(), 3).await;
+        s.answer(&queue_path(), 200, queue(&[]));
+    };
+    let (paid, ()) = tokio::join!(s.lifecycle.withdraw(&s.key, Some("50".parse().unwrap())), approve);
+    assert_eq!(paid.unwrap(), vec![]);
+    let queries = s.node.with(|i| i.lifecycle.queries[&queue_path()].clone());
+    assert!(queries.len() >= 3 && queries.iter().all(|q| q == "limit=1&after=11"), "{queries:?}");
+}
+
 /// An authorization that expired unpaid is replaced on the account's signed request, and the new
 /// one is paid.
 #[tokio::test]
@@ -229,14 +247,58 @@ async fn an_unreplaced_authorization_is_asked_for_again() {
     assert_eq!(s.posts(&path).len(), 2);
 }
 
+/// A reissue request that is not answered does not end the withdrawal: the payouts that are ready
+/// are paid, and it is asked again later.
+#[tokio::test]
+async fn a_reissue_that_is_not_answered_is_asked_again() {
+    let s = Setup::start(false).await;
+    let expired = NOW_S - 3_600;
+    s.answer(
+        &payouts_path(),
+        200,
+        payouts(vec![payout(5, "50", Some(expired)), payout(6, "20", Some(NOW_S + 86_400))]),
+    );
+    s.node.with(|i| i.post_delay = Some(Duration::from_secs(3)));
+    let path = format!("/v1/accounts/{}/withdrawals/5/reissue", account());
+    let reissue = async {
+        until("the first reissue", || !s.posts(&path).is_empty()).await;
+        s.node.with(|i| i.post_delay = None);
+        until("a second reissue", || s.posts(&path).len() >= 2).await;
+        s.answer(&payouts_path(), 200, payouts(vec![payout(5, "50", Some(NOW_S + 86_400))]));
+    };
+    let (paid, ()) = tokio::join!(within(s.lifecycle.withdraw(&s.key, None)), reissue);
+    assert_eq!(paid.unwrap().len(), 2, "the ready payout and the replaced one");
+}
+
+/// A payment whose block is undone is not reported paid: the vault is read again before the
+/// command ends, and the payout paid again.
+#[tokio::test]
+async fn a_payment_the_chain_undid_is_paid_again() {
+    let s = Setup::start(false).await;
+    s.answer(&payouts_path(), 200, payouts(vec![payout(5, "50", Some(NOW_S + 86_400))]));
+    s.chain.with(|l| l.undo_payments = 1);
+    let paid = within(s.lifecycle.withdraw(&s.key, None)).await.unwrap();
+    let sent = s.chain.sent();
+    assert_eq!(sent.len(), 2, "paid again");
+    assert_eq!(paid, vec![Paid { nonce: 5, amount: "50".parse().unwrap(), tx: sent[1].hash }]);
+    assert_eq!(s.chain.with(|l| l.usdc.get(&wallet()).copied()), Some(usdc(50)), "once in the chain");
+}
+
 /// A payout the vault refuses as paid already, by whoever sent it, is not an error.
 #[tokio::test]
 async fn a_payout_the_vault_refuses_as_paid_is_left() {
     let s = Setup::start(false).await;
     s.answer(&payouts_path(), 200, payouts(vec![payout(5, "50", Some(NOW_S + 86_400))]));
-    s.chain.with(|l| l.reverts.insert(Vault::withdrawCall::SELECTOR, Vault::WithdrawalAlreadyPaid {}.abi_encode()));
+    s.chain.with(|l| {
+        l.reverts.insert(Vault::withdrawCall::SELECTOR, Vault::WithdrawalAlreadyPaid {}.abi_encode());
+        l.used_nonces.insert((wallet(), 5));
+        l.unused_reads = 1;
+    });
     assert_eq!(s.lifecycle.withdraw(&s.key, None).await.unwrap(), vec![]);
-    s.chain.with(|l| l.reverts.insert(Vault::withdrawCall::SELECTOR, Vault::WithdrawalsPaused {}.abi_encode()));
+    s.chain.with(|l| {
+        l.reverts.insert(Vault::withdrawCall::SELECTOR, Vault::WithdrawalsPaused {}.abi_encode());
+        l.used_nonces.clear();
+    });
     let err = s.lifecycle.withdraw(&s.key, None).await.unwrap_err();
     assert!(format!("{err:#}").contains("WithdrawalsPaused"), "{err:#}");
     assert!(s.chain.sent().is_empty());
@@ -248,7 +310,11 @@ async fn a_payout_the_vault_refuses_as_paid_is_left() {
 async fn a_payment_another_sender_made_first_is_left() {
     let s = Setup::start(false).await;
     s.answer(&payouts_path(), 200, payouts(vec![payout(5, "50", Some(NOW_S + 86_400))]));
-    s.chain.with(|l| l.revert_on_chain = Some(Vault::WithdrawalAlreadyPaid {}.abi_encode()));
+    s.chain.with(|l| {
+        l.revert_on_chain = Some(Vault::WithdrawalAlreadyPaid {}.abi_encode());
+        l.used_nonces.insert((wallet(), 5));
+        l.unused_reads = 1;
+    });
     assert_eq!(within(s.lifecycle.withdraw(&s.key, None)).await.unwrap(), vec![]);
     assert_eq!(s.chain.sent().len(), 1, "mined, and reverted");
 }
