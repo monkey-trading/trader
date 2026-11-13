@@ -267,6 +267,9 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `tests/many_accounts.rs`: several accounts against the stand-in: one stream connection, each
   account's nonce, orders queued under a limit, accounts that fail alone
 - `tests/fleet.rs`: the fleet driven message by message: what accounts share and what is their own
+- `tests/fleet_waits.rs`: a target that waits for a read is decided whatever log time passes
+- `tests/bot_closes.rs`: the daily loss limit's close against the stand-in: it waits while its account is
+  behind the log, and a rejected request frees the markets it named
 - `tests/alloc.rs`: the counting-allocator test of the hot path
 - `tests/hot_path.rs`: the benchmark and its budgets
 - `tests/common/messages.rs`: the messages and market listings the stand-in and the tests build

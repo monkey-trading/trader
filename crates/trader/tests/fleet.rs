@@ -459,10 +459,9 @@ fn a_target_that_waits_across_midnight_cannot_trip_the_day_before() {
     settle(&mut fleet);
     fleet.observe_account(0, fleet.log_ts);
     // Two bars close just before midnight and give a long target, which waits: its read does not land.
-    let mut seq = seq;
-    for ts in [MIDNIGHT - 2 * MINUTE, MIDNIGHT - MINUTE] {
+    for (i, ts) in [MIDNIGHT - 2 * MINUTE, MIDNIGHT - MINUTE].into_iter().enumerate() {
+        let seq = seq + i as u64;
         apply(&mut fleet, seq, ts, &prices(seq, ts, 1, "101"));
-        seq += 1;
     }
     let wanted = fleet.assignments[0].wanted.expect("a target waits");
     assert!(wanted.ts < MIDNIGHT);
