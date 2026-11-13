@@ -444,3 +444,54 @@ fn a_newer_bar_whose_target_waits_drops_the_older_order() {
     assert!(fleet.assignments[0].pending.is_none(), "the older bar's order is not left to be sent");
     assert_eq!(fleet.assignments[0].wanted.map(|w| w.bar_start), Some(T0 + 2 * MINUTE));
 }
+
+/// A target decided from a read that lands after UTC midnight is not charged to the day before: the
+/// equity is observed at the log's time first, which opens the new day, and the older bar's reading
+/// changes nothing.
+#[test]
+fn a_target_that_waits_across_midnight_cannot_trip_the_day_before() {
+    const MIDNIGHT: i64 = T0 + 16 * 60 * MINUTE;
+    let mut fleet = Fleet::new(&markets(1), vec![account(0, vec![strategy(1, MINUTE)])], T0).unwrap();
+    fleet.accounts[0].controls = controls_losing_at("50");
+    let seq = warm(&mut fleet, &[1], "100");
+    // A first read opens the day at 1,000.
+    fleet.want_read(0);
+    settle(&mut fleet);
+    fleet.observe_account(0, fleet.log_ts);
+    // Two bars close just before midnight and give a long target, which waits: its read does not land.
+    let mut seq = seq;
+    for ts in [MIDNIGHT - 2 * MINUTE, MIDNIGHT - MINUTE] {
+        apply(&mut fleet, seq, ts, &prices(seq, ts, 1, "101"));
+        seq += 1;
+    }
+    let wanted = fleet.assignments[0].wanted.expect("a target waits");
+    assert!(wanted.ts < MIDNIGHT);
+    fleet.reads.clear();
+    fleet.accounts[0].read_wanted = false;
+    // The read lands after midnight, on an account that has lost 100 since.
+    fleet.log_ts = MIDNIGHT + MINUTE;
+    let view = trader::node::api::AccountView {
+        balance: "900".parse().unwrap(),
+        positions: Default::default(),
+        orders: Default::default(),
+    };
+    assert!(fleet.apply_view(0, &view));
+    fleet.decide_account(0);
+    assert!(fleet.flattens.is_empty() && !fleet.accounts[0].controls.is_stopped(), "no stop");
+    assert!(fleet.assignments[0].pending.is_some(), "the target is decided on the new day");
+}
+
+/// Controls with the usual sizing and a daily loss limit of `usd` dollars.
+fn controls_losing_at(usd: &str) -> trader_core::controls::Controls {
+    let sizing = serde_json::json!({ "by": "fixed_notional", "notional": "100", "max_leverage": "50" });
+    let risk = serde_json::json!({
+        "max_open_positions": 16, "max_total_notional": "1000000", "daily_loss": { "usd": usd },
+        "margin_buffer_bps": 0, "min_hold": "0s"
+    });
+    trader_core::controls::Controls::new(
+        serde_json::from_value(risk).unwrap(),
+        serde_json::from_value(sizing).unwrap(),
+        None,
+    )
+    .unwrap()
+}

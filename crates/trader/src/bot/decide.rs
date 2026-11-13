@@ -190,8 +190,11 @@ impl Fleet {
         entry.read_after = log_ts.saturating_add(READ_RETRY_MS);
     }
 
-    /// Decides each target `account` wants, from the read of it that has just been taken.
+    /// Decides each target `account` wants, from the read of it that has just been taken. Its equity is
+    /// observed at the log's time first, so a target that waited across UTC midnight is not charged to
+    /// the day before with the new day's equity.
     pub fn decide_account(&mut self, account: u32) {
+        self.observe_account(account, self.log_ts);
         for a in self.accounts[account as usize].assignments.clone() {
             if let Some(wanted) = self.assignments[a as usize].wanted.take() {
                 self.decide_one(a, wanted);
