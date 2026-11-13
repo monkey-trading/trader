@@ -151,6 +151,35 @@ async fn a_landed_deposit_is_not_sent_again_while_its_receipt_lags() {
     assert_eq!(s.chain.with(|l| l.usdc[&VAULT]), usdc(100));
 }
 
+/// The guard reads the vault at the hash of the block the nonce was seen spent in, never at its
+/// number, which another endpoint may hold another block under: each pinned read names a block the
+/// endpoint gave.
+#[tokio::test]
+async fn the_guard_reads_the_vault_at_the_hash_of_the_block_the_nonce_was_seen_spent_in() {
+    let s = Setup::start(false).await;
+    s.chain.with(|l| {
+        l.usdc.insert(wallet(), usdc(500));
+        l.allowance.insert((wallet(), VAULT), usdc(100));
+        l.hide_receipts = true;
+    });
+    s.answer(&history_path(), 200, json!({ "events": [], "next": null }));
+    let deposit = within(s.lifecycle.deposit(&s.key, "100".parse().unwrap(), Source::Account));
+    let (deposited, tx) = tokio::join!(deposit, credit(&s, 1, None));
+    assert_eq!(deposited.unwrap(), Deposited::Credited { tx });
+    let (pinned, served) = s.chain.with(|l| (l.pinned.clone(), l.served.clone()));
+    let reads: Vec<_> = pinned.iter().filter(|(method, _)| method == "eth_call").collect();
+    assert!(!reads.is_empty() && !served.is_empty(), "the guard read the vault at a block: {pinned:?}");
+    for (method, block) in &pinned {
+        let named = block.as_str().unwrap_or_default();
+        // A block number is a short quantity; a hash is 32 bytes, bare or as an object.
+        let hash: B256 = named
+            .parse()
+            .or_else(|_| serde_json::from_value(block["blockHash"].clone()))
+            .unwrap_or_else(|_| panic!("{method} names block {block}, not a hash"));
+        assert!(served.contains(&hash), "{method} names {hash}, which no endpoint gave");
+    }
+}
+
 /// A deposit whose nonce another transaction took, as when the block that held it is undone, with
 /// nothing of it in the vault, is signed again once, and goes in once.
 #[tokio::test]

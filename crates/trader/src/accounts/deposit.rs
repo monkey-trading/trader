@@ -17,7 +17,7 @@ use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::accounts::{Lifecycle, usdc_units};
 use crate::chain::contracts::{ERC20, Vault};
-use crate::chain::{Call, Sent};
+use crate::chain::{Call, Sent, Spent};
 use crate::keys::AccountKey;
 use crate::node::CallError;
 use crate::node::accounts::DepositRecord;
@@ -79,8 +79,8 @@ impl Lifecycle {
             // Where the vault's deposits stand before this one is signed: what the guard looks through.
             let chain = self.chain()?;
             let since = (chain.view(self.vault, Vault::depositCountCall {}).await?, chain.block_number().await?);
-            let guard = |block, signed| -> BoxFuture<'_, anyhow::Result<Option<B256>>> {
-                Box::pin(self.landed_deposit(since, block, (wallet, from, units), signed))
+            let guard = |spent, signed| -> BoxFuture<'_, anyhow::Result<Option<B256>>> {
+                Box::pin(self.landed_deposit(since, spent, (wallet, from, units), signed))
             };
             let tx = match chain.send_guarded(payer, &call, &guard).await? {
                 Sent::Mined(receipt) => {
@@ -96,7 +96,7 @@ impl Lifecycle {
     }
 
     /// Which of the transactions `signed` landed the deposit `deposit` names (account, payer and
-    /// amount), by the vault's state at `block`: among the deposits from the vault's deposit count
+    /// amount), by the vault's state at the block `spent`, read by its hash: among the deposits from the vault's deposit count
     /// and block `since`, one from the payer of the amount whose event names the account and one of
     /// those transactions. `None` when the vault holds none from the payer of the amount, or each
     /// it holds is another's by its event.
@@ -105,23 +105,23 @@ impl Lifecycle {
     async fn landed_deposit(
         &self,
         since: (U256, u64),
-        block: u64,
+        spent: Spent,
         deposit: (Address, Address, U256),
         signed: Vec<B256>,
     ) -> anyhow::Result<Option<B256>> {
         let ((first, from_block), (wallet, payer, units)) = (since, deposit);
         let chain = self.chain()?;
-        let count = chain.view_at(self.vault, Vault::depositCountCall {}, block).await?;
+        let count = chain.view_at(self.vault, Vault::depositCountCall {}, spent.hash).await?;
         let mut id = first;
         while id < count {
-            let record = chain.view_at(self.vault, Vault::depositRecordsCall { id }, block).await?;
+            let record = chain.view_at(self.vault, Vault::depositRecordsCall { id }, spent.hash).await?;
             if record.payer == payer && U256::from(record.amount) == units {
                 let filter = Filter::new()
                     .address(self.vault)
                     .event_signature(Vault::Deposited::SIGNATURE_HASH)
                     .topic1(B256::from(id))
                     .from_block(from_block)
-                    .to_block(block);
+                    .to_block(spent.number);
                 let logs = chain.logs(&filter).await?;
                 let log = logs.first().with_context(|| format!("deposit {id}'s event was not read"))?;
                 let event =
