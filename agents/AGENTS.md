@@ -99,12 +99,21 @@ list.
   own key or returns a key. Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, with a `[console]` section and a
   strategy's `bounds`, which the config tests load.
-- **console/** — the Vite, React and TypeScript app (`src/` with `main.tsx`, `App.tsx`,
-  `styles.css`, and its tests; `index.html`, the page that mounts `src/main.tsx`;
-  `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`,
-  `tsconfig.json`; Node.js from `.nvmrc`, exact versions pinned by `.npmrc` and
-  `package-lock.json`). `npm run build` writes the gitignored `dist/`, which the `trader` binary
-  embeds when built after it.
+- **console/** — the Vite, React and TypeScript app. `src/main.tsx` mounts `App.tsx` (the page frame,
+  login or the signed-in pages) over the stores it creates; `src/api/` holds the client with every
+  route (`client.ts`), the parsers that check each body and feed message (`parsers.ts`,
+  `types.ts`), the book of accounts and its pure steps (`live-state.ts`), the live store that owns the
+  one WebSocket, opens on the bot's snapshot and reads fills, the whole equity curve and a control's
+  result from REST (`live-store.ts`, its types in `live-types.ts`, `feed.ts`), and the session
+  (`session-store.ts`); `src/lib/` holds pure helpers (exact decimals, formatting, market names,
+  routes, curve layout, parameter checks, reconnect delay); `src/pages/` has the login, overview and
+  account pages; `src/components/` the shared components and the app context; `src/test-harness.tsx`
+  mounts the app over stand-in calls for the component tests (`App.test.tsx`, `controls.test.tsx`).
+  `stub/` is a stand-in console API with three accounts (`npm run stub`), and `browser-test/run.mjs`
+  the Playwright test run against it or a bot's console from outside the repository. Config:
+  `index.html`, `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`, `tsconfig.json`;
+  Node.js from `.nvmrc`, exact versions pinned by `.npmrc` and `package-lock.json`. `npm run build`
+  writes the gitignored `dist/`, which the `trader` binary embeds when built after it.
 - **Cargo.toml** — workspace manifest, shared dependencies, and the Cargo profiles (release keeps
   overflow checks on); `Cargo.lock` is committed.
 - **rust-toolchain.toml** — the one stable toolchain for local builds and CI.
@@ -162,7 +171,10 @@ list.
   `dev-console-api.sh`, the console's scenario: the bot with the console app embedded and two
   accounts, its printed fingerprint and password, refusals without the session or from a foreign
   `Origin`, a stop through the console that stops one account's strategy while the other trades, and
-  the API's figures against the node's answers; `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
+  the API's figures against the node's answers; `dev-console.sh`, the console app's scenario on the
+  real server: three accounts trading, then the browser test signs in, checks each account against the
+  API, stops and starts a strategy, flattens an account, and checks phone width and the keyboard (run
+  by hand: it needs Playwright in a scratch directory); `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
   `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
@@ -204,7 +216,9 @@ Run from the repo root:
 - Supply chain: `cargo deny check` (CI runs it; install `cargo-deny` to run it locally)
 - Console, from `console/` (Node.js from `.nvmrc`): `npm ci`, then `npm run lint`,
   `npm run typecheck`, `npm test`, `npm run build`; `npm audit --audit-level=high`; `npm run dev`
-  serves it on loopback
+  serves it on loopback, `npm run stub` runs the stand-in API; the browser test:
+  `CONSOLE_URL=… CONSOLE_PASSWORD=… PLAYWRIGHT_DIR=<scratch dir with playwright 1.64.0> node browser-test/run.mjs`,
+  or against the real server: `PLAYWRIGHT_DIR=<scratch dir> ./scripts/dev-console.sh` (about five minutes)
 - CI scripts test: `./scripts/ci-test.sh` (needs `jq` and `yq`); the dev stack's: `./scripts/dev-stack-test.sh`
   (needs `git`)
 - Merge approval gate tests: `scripts/check-merge-approved-test.sh` (stubs the GitHub API; needs
