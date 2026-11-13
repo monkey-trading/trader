@@ -11,6 +11,8 @@ export interface Action {
   readonly error: string | null;
   /** What the bot said about an attempt that worked, until the next one starts. */
   readonly warning: string | null;
+  /** Whether the last attempt worked, until the next one starts. */
+  readonly done: boolean;
   /** Starts `call` unless one is already in flight. */
   readonly run: (call: () => Promise<Outcome<Warned | null>>) => void;
 }
@@ -21,6 +23,7 @@ export function useAction(address: string): Action {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
   // Two clicks in one tick both see pending=false in state; the ref closes that gap.
   const inFlight = useRef(false);
 
@@ -32,12 +35,14 @@ export function useAction(address: string): Action {
     setPending(true);
     setError(null);
     setWarning(null);
+    setDone(false);
     void call().then((outcome) => {
       inFlight.current = false;
       setPending(false);
       switch (outcome.status) {
         case "ok":
           setWarning(outcome.value?.warning ?? null);
+          setDone(true);
           void live.refresh(address);
           break;
         case "unauthenticated":
@@ -50,5 +55,5 @@ export function useAction(address: string): Action {
       }
     });
   };
-  return { pending, error, warning, run };
+  return { pending, error, warning, done, run };
 }

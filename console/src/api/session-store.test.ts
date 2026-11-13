@@ -37,6 +37,19 @@ describe("SessionStore", () => {
     expect(store.getSnapshot()).toBe("authenticated");
   });
 
+  it("ignores a check that began before a login and ends after it", async () => {
+    let answer: (outcome: typeof ok | { status: "unauthenticated"; code: null }) => void = () => undefined;
+    const store = storeWith({
+      session: () => new Promise((resolve) => { answer = resolve; }),
+      login: () => Promise.resolve(ok),
+    });
+    const check = store.check();
+    await store.login("a");
+    answer({ status: "unauthenticated", code: null });
+    await check;
+    expect(store.getSnapshot()).toBe("authenticated");
+  });
+
   it("stays signed in when the bot did not end the session, and says why", async () => {
     const store = storeWith({
       login: () => Promise.resolve(ok),

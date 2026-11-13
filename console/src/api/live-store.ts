@@ -2,45 +2,29 @@
 import { reconnectDelay } from "@/lib/backoff";
 
 import type { Outcome } from "./client";
+import { CURVE_RETRY_MS, CURVE_TRIES, ReadFailures } from "./read-failures";
+import { FEED_SILENCE_MS, Silence } from "./silence";
 import { EMPTY_BOOK, identityOf, keyOf, withAccount, withCurve, withFills, withMessage, type Book } from "./live-state";
-import type { Connection, FeedSocket, LiveDeps, LiveSnapshot } from "./live-types";
+import { INITIAL_SNAPSHOT, type Connection, type FeedSocket, type LiveDeps, type LiveSnapshot } from "./live-types";
 import { parseWith, readLiveMessage } from "./parsers";
 
-const INITIAL: LiveSnapshot = {
-  connection: "stopped",
-  dropped: 0,
-  loaded: false,
-  accounts: [],
-  totals: null,
-  curves: new Map(),
-  fills: new Map(),
-  fillFailures: new Map(),
-  curveFailures: new Map(),
-};
-
 /** Holds the book of accounts and keeps it current from the feed. */
-/** How many times an account's full curve is read before the console stops trying until the next feed snapshot. */
-const CURVE_TRIES = 3;
-/** How long after a failed read of the full curve it is tried again. */
-const CURVE_RETRY_MS = 5000;
-
 export class LiveStore {
   private readonly deps: LiveDeps;
-  private snapshot: LiveSnapshot = INITIAL;
+  private snapshot: LiveSnapshot = INITIAL_SNAPSHOT;
   private book: Book = EMPTY_BOOK;
   private connection: Connection = "stopped";
   private dropped = 0;
   private loaded = false;
-  private failures: ReadonlyMap<string, string> = new Map();
-  /** Why each tracked account's full curve could not be read, and how many tries it has had since it last was. */
-  private curveFailures: ReadonlyMap<string, string> = new Map();
-  private readonly curveTries = new Map<string, number>();
+  private readonly failures = new ReadFailures();
   private readonly listeners = new Set<() => void>();
   private readonly tracked = new Map<string, number>();
   /** Per account, how many feed messages have set its view or its fills; a read that began before one is stale. */
   private readonly viewVersions = new Map<string, number>();
   private readonly fillVersions = new Map<string, number>();
   private socket: FeedSocket | null = null;
+  /** The wait for the feed's next message. */
+  private readonly silence: Silence;
   private attempt = 0;
   /** Bumped on every connection start, stop and failure, so a late event of an old one is ignored. */
   private epoch = 0;
@@ -49,6 +33,7 @@ export class LiveStore {
 
   constructor(deps: LiveDeps) {
     this.deps = deps;
+    this.silence = new Silence(deps.timeout);
   }
 
   /** Subscribes `listener` to published snapshots; returns the unsubscriber. */
@@ -107,17 +92,13 @@ export class LiveStore {
         (this.viewVersions.get(key) ?? 0) === version
           ? withAccount(this.book, outcome.value)
           : withCurve(this.book, key, outcome.value.curve);
-      this.curveFailures = new Map([...this.curveFailures].filter(([failed]) => failed !== key));
-      this.curveTries.delete(key);
+      this.failures.clearCurve(key);
       this.publish();
     } else if (outcome.status === "unauthenticated") {
       this.endSession();
     } else {
       // The account read alone brings the whole curve: say it is missing, and try again a few times.
-      this.curveFailures = new Map(this.curveFailures).set(key, outcome.message);
-      const tries = (this.curveTries.get(key) ?? 0) + 1;
-      this.curveTries.set(key, tries);
-      if (tries < CURVE_TRIES) {
+      if (this.failures.failCurve(key, outcome.message) < CURVE_TRIES) {
         this.deps.timeout(() => {
           if (epoch === this.epoch && this.tracked.has(address)) {
             void this.refresh(address);
@@ -128,7 +109,25 @@ export class LiveStore {
     }
   }
 
+  /**
+   * Waits for the feed's next message. The bot reads every account at its refresh interval and pushes each read, so
+   * a feed that says nothing for a minute while accounts report has gone quiet without closing, as a half-open
+   * connection does: it is treated as lost, and the console connects again.
+   */
+  private armSilence(epoch: number): void {
+    if ([...this.book.accounts.values()].some((account) => account.figures !== null)) {
+      this.silence.restart(FEED_SILENCE_MS, () => {
+        if (epoch === this.epoch) {
+          void this.lostFeed();
+        }
+      });
+    } else {
+      this.silence.clear();
+    }
+  }
+
   private stop(): void {
+    this.silence.clear();
     this.epoch += 1;
     this.cancelRetry?.();
     this.cancelRetry = null;
@@ -136,9 +135,7 @@ export class LiveStore {
     this.socket = null;
     this.book = EMPTY_BOOK;
     this.loaded = false;
-    this.failures = new Map();
-    this.curveFailures = new Map();
-    this.curveTries.clear();
+    this.failures.reset();
     this.viewVersions.clear();
     this.fillVersions.clear();
     this.connection = "stopped";
@@ -181,6 +178,7 @@ export class LiveStore {
     const epoch = this.epoch;
     this.socket?.close();
     this.socket = null;
+    this.silence.clear();
     this.connection = "reconnecting";
     this.publish();
     const session: Outcome<null> = await this.deps.api.session();
@@ -218,9 +216,13 @@ export class LiveStore {
     if (message.type === "account") {
       this.bump(this.viewVersions, identityOf(message.account));
     } else if (message.type === "fills") {
-      this.bump(this.fillVersions, keyOf(message.address));
+      const key = keyOf(message.address);
+      this.bump(this.fillVersions, key);
+      // Fills that arrived whole are read: an earlier failed read of them no longer stands.
+      this.failures.clearFills(key);
     }
     this.book = withMessage(this.book, message);
+    this.armSilence(epoch);
     if (message.type === "snapshot") {
       this.loaded = true;
       this.attempt = 0;
@@ -260,12 +262,12 @@ export class LiveStore {
     }
     if (outcome.status === "ok") {
       this.book = withFills(this.book, address, outcome.value);
-      this.failures = new Map([...this.failures].filter(([failed]) => failed !== key));
+      this.failures.clearFills(key);
     } else if (outcome.status === "unauthenticated") {
       this.endSession();
       return;
     } else {
-      this.failures = new Map(this.failures).set(key, outcome.message);
+      this.failures.failFills(key, outcome.message);
     }
     this.publish();
   }
@@ -285,8 +287,8 @@ export class LiveStore {
         totals: this.book.totals,
         curves: this.book.curves,
         fills: this.book.fills,
-        fillFailures: this.failures,
-        curveFailures: this.curveFailures,
+        fillFailures: this.failures.fills,
+        curveFailures: this.failures.curves,
       };
       for (const listener of this.listeners) {
         listener();

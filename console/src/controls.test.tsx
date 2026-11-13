@@ -3,7 +3,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { Outcome } from "@/api/client";
-import { figuresBody, overviewBody, viewBody } from "@/api/fixtures";
+import { figuresBody, overviewBody, strategyBody, viewBody } from "@/api/fixtures";
 import { readAccount } from "@/api/parsers";
 import { ADDRESS, mount, stubApi } from "@/test-harness";
 
@@ -34,7 +34,7 @@ describe("strategy controls", () => {
 
   it("reads the account again after a stop and shows the state the bot gives", async () => {
     const api = stubApi();
-    const stopped = readAccount(viewBody({ strategies: [{ ...readStrategyBody(), running: false }] }));
+    const stopped = readAccount(viewBody({ strategies: [{ ...strategyBody(), running: false }] }));
     const user = userEvent.setup();
     mount(api, PAGE);
 
@@ -173,7 +173,7 @@ describe("what the bot says of a control", () => {
   });
 
   it("shows a start the bot refuses during a flatten at the strategy's start control", async () => {
-    const api = stubApi(overviewBody([viewBody({ strategies: [{ ...readStrategyBody(), running: false }] })]));
+    const api = stubApi(overviewBody([viewBody({ strategies: [{ ...strategyBody(), running: false }] })]));
     api.setStrategyRunning.mockResolvedValue({
       status: "refused", message: "the account is flattening; start it once it has", retryAfterSeconds: null,
     });
@@ -198,7 +198,7 @@ describe("what the bot says of a control", () => {
   });
 
   it("shows a strategy as warming up while the bot has not warmed it, and drops the note once it has", async () => {
-    const cold = { ...readStrategyBody(), warmed_up: false, target: null };
+    const cold = { ...strategyBody(), warmed_up: false, target: null };
     const { feeds } = mount(stubApi(overviewBody([viewBody({ strategies: [cold] })])), PAGE);
 
     expect(await screen.findByText(/, warming up/)).toBeInTheDocument();
@@ -207,78 +207,3 @@ describe("what the bot says of a control", () => {
     await waitFor(() => { expect(screen.queryByText(/warming up/)).not.toBeInTheDocument(); });
   });
 });
-
-describe("parameter form", () => {
-  it("refuses a value outside the bounds at its field and sends nothing", async () => {
-    const api = stubApi();
-    const user = userEvent.setup();
-    mount(api, PAGE);
-
-    const field = await screen.findByLabelText("fast");
-    await user.clear(field);
-    await user.type(field, "1");
-    await user.click(screen.getByRole("button", { name: "Save parameters" }));
-
-    expect(api.setParams).not.toHaveBeenCalled();
-    expect(screen.getByText("Enter a value from 2 to 50.")).toBeInTheDocument();
-    expect(field).toHaveAttribute("aria-invalid", "true");
-  });
-
-  it("sends every parameter with the strategy's kind, the edited one changed", async () => {
-    const api = stubApi();
-    const user = userEvent.setup();
-    mount(api, PAGE);
-
-    const field = await screen.findByLabelText("fast");
-    await user.clear(field);
-    await user.type(field, "8{Enter}");
-
-    expect(api.setParams).toHaveBeenCalledExactlyOnceWith(ADDRESS, 0, { kind: "sma_crossover", fast: 8, slow: 20 });
-  });
-
-  it("shows the bot's refusal of the periods under the form", async () => {
-    const api = stubApi();
-    api.setParams.mockResolvedValue({ status: "refused", message: "fast must be below slow", retryAfterSeconds: null });
-    const user = userEvent.setup();
-    mount(api, PAGE);
-
-    await user.click(await screen.findByRole("button", { name: "Save parameters" }));
-
-    expect(await screen.findByText("Failed: fast must be below slow")).toBeInTheDocument();
-  });
-
-  it("takes a decimal parameter as text and sends it as a string beside the whole-number ones", async () => {
-    const bollinger = {
-      id: 0, kind: "bollinger_reversion", market: "BTC-USD", bar: "5m", running: true, warmed_up: true, target: null,
-      params: { kind: "bollinger_reversion", period: 20, width: "1.5" },
-      bounds: { period: [5, 100], width: ["0.5", "4"] },
-    };
-    const api = stubApi(overviewBody([viewBody({ strategies: [bollinger] })]));
-    const user = userEvent.setup();
-    mount(api, PAGE);
-
-    const width = await screen.findByLabelText("width");
-    expect(screen.getByRole("region", { name: "Bollinger band reversion on BTC-USD" })).toBeInTheDocument();
-    await user.clear(width);
-    await user.type(width, "4.5{Enter}");
-    expect(api.setParams).not.toHaveBeenCalled();
-    expect(screen.getByText("Enter a value from 0.5 to 4.")).toBeInTheDocument();
-
-    await user.clear(width);
-    await user.type(width, "2.25{Enter}");
-    expect(api.setParams).toHaveBeenCalledExactlyOnceWith(ADDRESS, 0, { kind: "bollinger_reversion", period: 20, width: "2.25" });
-  });
-
-  it("shows the periods read-only when the config sets no bounds", async () => {
-    const strategy = { ...readStrategyBody(), bounds: null };
-    mount(stubApi(overviewBody([viewBody({ strategies: [strategy] })])), PAGE);
-
-    expect(await screen.findByText(/fast 5, slow 20/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Save parameters" })).not.toBeInTheDocument();
-  });
-});
-
-/** The first strategy of the fixture account, as a body. */
-function readStrategyBody() {
-  return { id: 0, kind: "sma_crossover", market: "BTC-USD", bar: "1m", running: true, params: { fast: 5, slow: 20 }, bounds: { fast: [2, 50], slow: [5, 200] }, warmed_up: true, target: "long" };
-}

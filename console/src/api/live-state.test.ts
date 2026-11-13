@@ -36,6 +36,19 @@ describe("withSnapshot", () => {
     expect(book.accounts.get(ADDRESS)?.state).toBe("running");
   });
 
+  it("replaces the entry that could not start with the full read of it, never adding or taking another's place", () => {
+    const refused = (address: string, code: string) =>
+      viewBody({ address, code, halt: code, figures: null, strategies: [], state: "halted" });
+    const book = withSnapshot(EMPTY_BOOK, overview(refused(OTHER, "no_balance"), viewBody(), refused(ADDRESS.replace("1", "2"), "no_balance")));
+    const third = readLiveMessage({ type: "account", account: { ...refused(ADDRESS.replace("1", "2"), "no_balance"), halt: "read again" } });
+    const next = withMessage(book, third);
+    expect([...next.accounts.keys()]).toEqual(["failed:0", ADDRESS, "failed:2"]);
+    expect([...next.accounts.values()].map((a) => a.halt)).toEqual(["no_balance", null, "read again"]);
+    // A failed entry the snapshot did not list is not added.
+    const stranger = readLiveMessage({ type: "account", account: refused("0x3333333333333333333333333333333333333333", "no_balance") });
+    expect(withMessage(book, stranger).accounts.size).toBe(3);
+  });
+
   it("keeps the fills of an account that stays", () => {
     const held = withMessage(withSnapshot(EMPTY_BOOK, overview(viewBody())), { type: "fills", address: ADDRESS, fills: fills(1) });
     expect(withSnapshot(held, overview(viewBody())).fills.get(ADDRESS)).toHaveLength(1);

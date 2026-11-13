@@ -17,6 +17,7 @@ function FlattenControl({ address, action }: { readonly address: string; readonl
   const [confirming, setConfirming] = useState(false);
   const ask = useRef<HTMLButtonElement>(null);
   const confirm = useRef<HTMLButtonElement>(null);
+  const status = useRef<HTMLParagraphElement>(null);
 
   if (!confirming) {
     return (
@@ -34,7 +35,7 @@ function FlattenControl({ address, action }: { readonly address: string; readonl
         >
           {action.pending ? "Flattening…" : "Flatten account"}
         </button>
-        <ActionError error={action.error} warning={action.warning} />
+        <ActionError error={action.error} warning={action.warning} done={action.done} statusRef={status} />
       </div>
     );
   }
@@ -50,6 +51,8 @@ function FlattenControl({ address, action }: { readonly address: string; readonl
           onClick={() => {
             action.run(() => api.flatten(address));
             setConfirming(false);
+            // The confirm button goes with this render; focus stays on the status line, which says how it ended.
+            requestAnimationFrame(() => status.current?.focus());
           }}
         >
           Confirm flatten
@@ -79,7 +82,7 @@ export function AccountControls({ account, address }: { readonly account: Accoun
     return (
       <div>
         <p className="text-sm text-muted">{WAITING[account.state]}</p>
-        <ActionError error={flatten.error} warning={flatten.warning} />
+        <ActionError error={flatten.error} warning={flatten.warning} done={flatten.done} />
       </div>
     );
   }

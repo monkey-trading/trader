@@ -104,7 +104,8 @@ list.
   route (`client.ts`), the parsers that check each body and feed message (`parsers.ts`,
   `types.ts`), the book of accounts and its pure steps (`live-state.ts`), the live store that owns the
   one WebSocket, opens on the bot's snapshot and reads fills, the whole equity curve and a control's
-  result from REST (`live-store.ts`, its types in `live-types.ts`, `feed.ts`), and the session
+  result from REST (`live-store.ts`, its types in `live-types.ts`, `feed.ts`, the reasons its reads failed in
+  `read-failures.ts`, the wait for a silent feed in `silence.ts`, and its test harness in `live-store-harness.ts`), and the session
   (`session-store.ts`); `src/lib/` holds pure helpers (exact decimals, formatting, market names,
   routes, curve layout, parameter checks, reconnect delay); `src/pages/` has the login, overview and
   account pages; `src/components/` the shared components and the app context; `src/test-harness.tsx`

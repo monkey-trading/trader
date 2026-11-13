@@ -18,6 +18,8 @@ export type LogoutResult =
 export class SessionStore {
   private readonly api: Api;
   private status: SessionStatus = "checking";
+  /** Moves on at each login, sign out and expiry, so a check that began before one is not taken as its news. */
+  private transitions = 0;
   private readonly listeners = new Set<() => void>();
 
   constructor(api: Api) {
@@ -37,14 +39,18 @@ export class SessionStore {
 
   /** Asks the bot whether the cookie is still good. */
   async check(): Promise<void> {
+    const before = this.transitions;
     const outcome = await this.api.session();
-    this.set(outcome.status === "ok" ? "authenticated" : "anonymous");
+    if (this.transitions === before) {
+      this.set(outcome.status === "ok" ? "authenticated" : "anonymous");
+    }
   }
 
   /** Signs in with `password`; a wrong or rate-limited attempt is a value for the form. */
   async login(password: string): Promise<LoginResult> {
     const outcome = await this.api.login(password);
     if (outcome.status === "ok") {
+      this.transitions += 1;
       this.set("authenticated");
       return { status: "signed-in" };
     }
@@ -58,6 +64,7 @@ export class SessionStore {
   async logout(): Promise<LogoutResult> {
     const outcome = await this.api.logout();
     if (outcome.status === "ok" || outcome.status === "unauthenticated") {
+      this.transitions += 1;
       this.set("anonymous");
       return { status: "signed-out" };
     }
@@ -66,6 +73,7 @@ export class SessionStore {
 
   /** Marks the session gone, after the bot answered 401. */
   expire(): void {
+    this.transitions += 1;
     this.set("anonymous");
   }
 

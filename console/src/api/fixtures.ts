@@ -95,3 +95,8 @@ export function fillBody(overrides: Record<string, unknown> = {}): Record<string
     liquidation: false, symbol: "BTC-USD", ...overrides,
   };
 }
+
+/** The first strategy of the fixture account, as a body. */
+export function strategyBody() {
+  return { id: 0, kind: "sma_crossover", market: "BTC-USD", bar: "1m", running: true, params: { fast: 5, slow: 20 }, bounds: { fast: [2, 50], slow: [5, 200] }, warmed_up: true, target: "long" };
+}

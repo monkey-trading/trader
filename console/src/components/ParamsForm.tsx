@@ -41,6 +41,17 @@ export function ParamsForm({ address, strategyId, kind, params }: ParamsFormProp
     const checked = checkParams(editable.map((param) => ({ name: param.name, kind: param.kind, draft: drafts[param.name] ?? "", bounds: param.bounds })));
     if (checked.status === "invalid") {
       setProblems(checked.problems);
+      // Focus goes to the first field that is wrong, whose help line, linked to it, says why.
+      const first = editable.find((param) => checked.problems[param.name] !== undefined);
+      const form = event.currentTarget;
+      if (first !== undefined) {
+        requestAnimationFrame(() => {
+          const field = form.elements.namedItem(`${prefix}-${first.name}`);
+          if (field instanceof HTMLElement) {
+            field.focus();
+          }
+        });
+      }
       return;
     }
     setProblems({});
@@ -82,8 +93,8 @@ export function ParamsForm({ address, strategyId, kind, params }: ParamsFormProp
         <button type="submit" className={BUTTON_CLASS} disabled={action.pending}>
           {action.pending ? "Saving…" : "Save parameters"}
         </button>
-        <p aria-live="polite" className="min-h-5 text-sm text-loss">
-          {action.error === null ? "" : `Failed: ${action.error}`}
+        <p aria-live="polite" className={`min-h-5 text-sm ${action.error === null ? "text-muted" : "text-loss"}`}>
+          {action.error !== null ? `Failed: ${action.error}` : action.done ? "Saved." : ""}
         </p>
       </div>
     </form>

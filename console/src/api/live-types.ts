@@ -49,3 +49,15 @@ export interface LiveDeps {
   readonly onUnauthenticated: () => void;
 }
 
+/** What a store that has not started shows. */
+export const INITIAL_SNAPSHOT: LiveSnapshot = {
+  connection: "stopped",
+  dropped: 0,
+  loaded: false,
+  accounts: [],
+  totals: null,
+  curves: new Map(),
+  fills: new Map(),
+  fillFailures: new Map(),
+  curveFailures: new Map(),
+};

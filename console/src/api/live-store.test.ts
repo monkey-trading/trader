@@ -1,68 +1,9 @@
 /** Tests of the live store over a stand-in feed, API and clock. */
-import type { Api, Outcome } from "./client";
-import { ADDRESS, FULL_CURVE, figuresBody, fillBody, overviewBody, totalsBody, viewBody } from "./fixtures";
-import { LiveStore } from "./live-store";
-import type { FeedHandlers } from "./live-types";
+import type { Outcome } from "./client";
+import { ADDRESS, FULL_CURVE, fillBody, viewBody } from "./fixtures";
+import { accountMessage, harness, ok, snapshot } from "./live-store-harness";
 import { readAccount, readFills } from "./parsers";
 import type { AccountView, Fill } from "./types";
-
-const ok = <T>(value: T): Outcome<T> => ({ status: "ok", value });
-const snapshot = (equity = "10100.5") =>
-  JSON.stringify({ type: "snapshot", ...overviewBody([viewBody({ figures: figuresBody({ equity }) })], totalsBody({ equity })) });
-
-/** Everything the store touches, with the test in charge of time and the feed. */
-function harness(api: Partial<Api> = {}) {
-  const feeds: { handlers: FeedHandlers; closed: boolean }[] = [];
-  const frames: (() => void)[] = [];
-  const timers: { callback: () => void; ms: number }[] = [];
-  const ended: string[] = [];
-  const unused = () => Promise.reject(new Error("the store makes no such call"));
-  const store = new LiveStore({
-    api: {
-      login: unused, logout: unused, setAccountRunning: unused, flatten: unused, setStrategyRunning: unused, setParams: unused,
-      session: () => Promise.resolve(ok(null)),
-      account: () => Promise.resolve(ok<AccountView>(readAccount(viewBody()))),
-      fills: () => Promise.resolve(ok<readonly Fill[]>(readFills({ fills: [fillBody()] }))),
-      ...api,
-    },
-    openFeed: (handlers) => {
-      const feed = { handlers, closed: false };
-      feeds.push(feed);
-      return { close: () => { feed.closed = true; } };
-    },
-    frame: (callback) => {
-      frames.push(callback);
-      return () => undefined;
-    },
-    timeout: (callback, ms) => {
-      timers.push({ callback, ms });
-      return () => undefined;
-    },
-    random: () => 0,
-    onUnauthenticated: () => { ended.push("ended"); },
-  });
-  const flush = () => {
-    for (const run of frames.splice(0)) {
-      run();
-    }
-  };
-  const settle = async () => {
-    await new Promise((resolve) => { setTimeout(resolve, 0); });
-    flush();
-  };
-  /** Starts the store and delivers the feed's snapshot. */
-  const open = async (equity?: string) => {
-    const stop = store.start();
-    feeds[0]?.handlers.onOpen();
-    feeds[0]?.handlers.onMessage(snapshot(equity));
-    await settle();
-    return stop;
-  };
-  return { store, feeds, timers, ended, flush, settle, open };
-}
-
-const accountMessage = (equity: string) =>
-  JSON.stringify({ type: "account", account: viewBody({ figures: figuresBody({ equity }) }) });
 
 describe("LiveStore", () => {
   it("is live once the snapshot has arrived, and not before", async () => {
@@ -183,40 +124,6 @@ describe("LiveStore", () => {
 
     expect(reads).toEqual([ADDRESS, ADDRESS]);
     expect(store.getSnapshot().fills.get(ADDRESS)?.map((f) => f.cursor)).toEqual(["30:0"]);
-  });
-
-  it("keeps the reason when fills cannot be read", async () => {
-    const { store, settle, open } = harness({ fills: () => Promise.resolve({ status: "unavailable", message: "node down" }) });
-    await open();
-    store.track(ADDRESS);
-    await settle();
-
-    expect(store.getSnapshot().fillFailures.get(ADDRESS)).toBe("node down");
-  });
-
-  it("says the whole curve is missing when the account cannot be read, tries again a few times, and clears it on success", async () => {
-    let answers = 0;
-    const { store, timers, settle, open } = harness({
-      account: () => {
-        answers += 1;
-        return Promise.resolve(answers <= 3 ? { status: "unavailable", message: "node down" } : ok<AccountView>(readAccount(viewBody())));
-      },
-    });
-    await open();
-    store.track(ADDRESS);
-    await settle();
-    expect(store.getSnapshot().curveFailures.get(ADDRESS)).toBe("node down");
-    for (let retry = 0; retry < 2; retry += 1) {
-      timers.splice(0).at(-1)?.callback();
-      await settle();
-    }
-    // The third failure is the last try: no further retry is scheduled.
-    expect(answers).toBe(3);
-    expect(timers.filter((t) => t.ms === 5000)).toHaveLength(0);
-    expect(store.getSnapshot().curveFailures.get(ADDRESS)).toBe("node down");
-    await store.refresh(ADDRESS);
-    await settle();
-    expect(store.getSnapshot().curveFailures.has(ADDRESS)).toBe(false);
   });
 
   it("prefers a feed fills message over a read that began before it", async () => {

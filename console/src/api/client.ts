@@ -29,6 +29,8 @@ export interface Warned {
  * not a failure; the answer's message is shown as a warning.
  */
 const FLATTENED_STOP_UNSAVED = "flattened_stop_unsaved";
+/** The bot's code for a stop that holds but could not be saved. */
+const STOP_UNSAVED = "stop_unsaved";
 
 /** The calls the stores and pages make. A control answers `null`, or a warning about what it did. */
 export interface Api {
@@ -152,9 +154,9 @@ async function call<T>(
 /** Reads no body: the session, login, logout and control answers are 204s with nothing the console uses. */
 const nothing = (): null => null;
 
-/** A flatten that ran but answered 500 with the bot's warning is a success that carries the warning. */
-function flattenOutcome(outcome: Outcome<Warned | null>): Outcome<Warned | null> {
-  return outcome.status === "unavailable" && outcome.code === FLATTENED_STOP_UNSAVED
+/** A flatten, or a stop, that took effect but answered 500 because it could not be saved is a success that carries the warning. */
+function savedOutcome(outcome: Outcome<Warned | null>, code: string): Outcome<Warned | null> {
+  return outcome.status === "unavailable" && outcome.code === code
     ? { status: "ok", value: { warning: outcome.message } }
     : outcome;
 }
@@ -176,9 +178,15 @@ export function createApi(fetchFn: Fetch, deadlineMs?: number): Api {
     logout: () => call(fetchFn, "POST", routes.logout, {}, nothing, deadlineMs),
     account: (address) => call(fetchFn, "GET", routes.account(address), undefined, readAccount, deadlineMs),
     fills: (address) => call(fetchFn, "GET", routes.fills(address), undefined, readFills, deadlineMs),
-    setAccountRunning: (address, running) => control("POST", routes.accountRun(address, running ? "start" : "stop"), {}),
-    flatten: async (address) => flattenOutcome(await control("POST", routes.flatten(address), {}, FLATTEN_DEADLINE_MS)),
-    setStrategyRunning: (address, id, running) => control("POST", routes.strategyRun(address, id, running ? "start" : "stop"), {}),
+    setAccountRunning: async (address, running) =>
+      running
+        ? control("POST", routes.accountRun(address, "start"), {})
+        : savedOutcome(await control("POST", routes.accountRun(address, "stop"), {}), STOP_UNSAVED),
+    flatten: async (address) => savedOutcome(await control("POST", routes.flatten(address), {}, FLATTEN_DEADLINE_MS), FLATTENED_STOP_UNSAVED),
+    setStrategyRunning: async (address, id, running) =>
+      running
+        ? control("POST", routes.strategyRun(address, id, "start"), {})
+        : savedOutcome(await control("POST", routes.strategyRun(address, id, "stop"), {}), STOP_UNSAVED),
     setParams: (address, id, params) => control("PUT", routes.strategyParams(address, id), params),
   };
 }

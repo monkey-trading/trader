@@ -86,9 +86,31 @@ export function withSnapshot(book: Book, overview: Overview): Book {
   return next;
 }
 
-/** Takes one account's view, which replaces what the book held of it; an account the book never listed is added last. */
-export function withAccount(book: Book, account: AccountView): Book {
+/**
+ * The key the book holds `account` under. An account that trades or has no address has a key of its own. One
+ * that could not start is held by its place in the snapshot, so a read of it is matched to the listed entry with
+ * its address and code; none listed, none to replace.
+ */
+function keyHeld(book: Book, account: AccountView): string | null {
   const key = identityOf(account);
+  if (!key.startsWith("failed:")) {
+    return key;
+  }
+  const same = [...book.accounts].find(
+    ([held, view]) => held.startsWith("failed:") && view.address?.toLowerCase() === account.address?.toLowerCase() && view.code === account.code,
+  );
+  return same?.[0] ?? null;
+}
+
+/**
+ * Takes one account's view, which replaces what the book held of it; an account that trades and the book never
+ * listed is added last, and an entry that could not start is never added to what the snapshot listed.
+ */
+export function withAccount(book: Book, account: AccountView): Book {
+  const key = keyHeld(book, account);
+  if (key === null) {
+    return book;
+  }
   return withCurve({ ...book, accounts: new Map(book.accounts).set(key, account) }, key, account.curve);
 }
 

@@ -126,6 +126,16 @@ describe("createApi", () => {
     expect(await createApi(fetchFn).flatten("0xabc")).toEqual({ status: "ok", value: { warning: message } });
   });
 
+  it("reads a stop with the code stop_unsaved as done, with a warning, and a start with that code as a failure", async () => {
+    const { fetchFn } = fakeFetch(500, { error: "the stop holds, but was not saved", code: "stop_unsaved" });
+    const api = createApi(fetchFn);
+    const warned = { status: "ok", value: { warning: "the stop holds, but was not saved" } };
+    expect(await api.setAccountRunning("0xabc", false)).toEqual(warned);
+    expect(await api.setStrategyRunning("0xabc", 0, false)).toEqual(warned);
+    expect((await api.setAccountRunning("0xabc", true)).status).toBe("unavailable");
+    expect((await api.setStrategyRunning("0xabc", 0, true)).status).toBe("unavailable");
+  });
+
   it("keeps any other 500 of a flatten, and that code on any other control, a failure, whatever the words", async () => {
     const { fetchFn } = fakeFetch(500, { error: "the account is flattened; the stop holds, but was not saved" });
     expect(await createApi(fetchFn).flatten("0xabc")).toEqual({
