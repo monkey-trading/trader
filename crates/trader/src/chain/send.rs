@@ -14,9 +14,8 @@ use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy_eips::BlockNumberOrTag;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256};
-use alloy_provider::Provider;
-use alloy_provider::transport::RpcError;
 use alloy_rpc_types_eth::{BlockId, TransactionReceipt};
+use alloy_transport::RpcError;
 use futures_util::future::BoxFuture;
 use tokio::time::{Instant, sleep};
 use tracing::{debug, info, warn};
@@ -132,8 +131,8 @@ impl Chain {
         // receipt wait, holds every later nonce: nothing is sent beside it.
         let (mined, pending) = self
             .read(|endpoint| async move {
-                let mined = endpoint.get_transaction_count(from).latest().await?;
-                Ok((mined, endpoint.get_transaction_count(from).pending().await?))
+                let mined = endpoint.get_transaction_count(from, BlockId::latest()).await?;
+                Ok((mined, endpoint.get_transaction_count(from, BlockId::pending()).await?))
             })
             .await
             .map_err(|e| not_sent(format!("its nonce: {e}")))?;
@@ -149,7 +148,7 @@ impl Chain {
             // Estimated on each attempt: one signed again runs on the state that spent the last nonce.
             let gas_limit = self.gas_limit(from, call).await?;
             let nonce = self
-                .read(|endpoint| async move { endpoint.get_transaction_count(from).pending().await })
+                .read(|endpoint| async move { endpoint.get_transaction_count(from, BlockId::pending()).await })
                 .await
                 .map_err(|e| not_sent(format!("its nonce: {e}")))?;
             let tx = TxEip1559 {
@@ -329,7 +328,7 @@ impl Chain {
                 let hash = block
                     .map(|block| block.header.hash)
                     .ok_or_else(|| RpcError::local_usage_str("the latest block is not held"))?;
-                let count = endpoint.get_transaction_count(from).block_id(BlockId::hash(hash)).await?;
+                let count = endpoint.get_transaction_count(from, BlockId::hash(hash)).await?;
                 Ok((Spent { number, hash }, count))
             })
             .await;
@@ -385,7 +384,7 @@ impl Chain {
         match self
             .read(|endpoint| {
                 let replay = replay.clone();
-                async move { endpoint.call(replay).block(block).await }
+                async move { endpoint.call_at(replay, block).await }
             })
             .await
         {

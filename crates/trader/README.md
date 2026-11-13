@@ -196,6 +196,7 @@ MONKEY, and withdraws, every payout going to the account's own address.
   records, the MONKEY entitlement, withdrawals, payouts and their reissue
 - `src/node/tls.rs`: the pinned or publicly rooted TLS connections
 - `src/chain/mod.rs`: `Chain`, its endpoints and reads
+- `src/chain/rpc.rs`: the JSON-RPC calls the bot makes of an endpoint
 - `src/chain/send.rs`: the transactions the bot sends, followed to their receipts
 - `src/chain/contracts.rs`: the vault's and the token's bindings, and revert reasons
 - `abi/`: the entries of the vault's and OpenZeppelin `ERC20`'s ABIs the bot uses, generated from
