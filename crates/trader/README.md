@@ -183,7 +183,10 @@ MONKEY, and withdraws, every payout going to the account's own address.
   The figures are read in the background while the console is watching, at most a quarter of
   `per_ip`, accounts never read or changed by a job first, and answered from the last reads. A key
   sends one transaction at a time, and one deposit from the funding key at a time sets and spends its
-  allowance. A request may name 500 accounts (32 KiB). No route moves funds away from an account's own
+  allowance. A request may name every account the bot has (4 MiB). Four jobs hold a place at once, only while they
+  sign, send or follow a transaction or ask the node, so jobs that wait for a credit or a payout do not queue
+  the short ones behind them. A transaction still pending when its job ended is followed to its receipt for an
+  hour, and its row shows how it came out. No route moves funds away from an account's own
   key or returns a key
 - The console app's build, `console/dist`, embedded at compile time and served at `/`, with any
   page path routed to its `index.html`; a binary built without it serves a page saying so
@@ -213,6 +216,7 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `src/chain/rpc.rs`: the JSON-RPC calls the bot makes of an endpoint
 - `src/chain/send.rs`: the transactions the bot sends, one per key at a time, followed to their receipts
 - `src/chain/progress.rs`: where a task's transactions report their steps while a call is running
+- `src/chain/idle.rs`: the place a task holds while its work runs and gives up while it only waits for the node
 - `src/chain/contracts.rs`: the vault's and the token's bindings, and revert reasons
 - `abi/`: the entries of the vault's and OpenZeppelin `ERC20`'s ABIs the bot uses, generated from
   the pinned engine commit's build; `scripts/dev-stack.sh --chain` checks they still match it
@@ -258,7 +262,7 @@ MONKEY, and withdraws, every payout going to the account's own address.
   size, and the `Origin` and session checks
 - `src/console/routes.rs`: the API's routes
 - `src/console/funding/`: the funding of the accounts, their status reads and the jobs that declare,
-  deposit, claim and withdraw for them (`mod.rs`), the jobs' states and transactions (`jobs.rs`), the
+  deposit, claim and withdraw for them (`mod.rs`), the jobs' states and transactions (`jobs.rs`), a transaction followed to its receipt after its job ended, the
   figures as the console reads them (`view.rs`) and the routes (`routes.rs`)
 - `src/console/server.rs`: the state the routes share
 - `src/console/live.rs`: the live WebSocket feed
@@ -279,11 +283,13 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `tests/console_logs.rs`: that no log line carries the password
 - `tests/console_funding.rs`: the funding routes against the stand-in node and chain: every account
   with a key listed, a bot with none funded, a declaration's statement and signer, refusals that start
-  nothing, the largest request, that no request names a destination, and the halt on an answer another
+  nothing, a selection of a fleet over 500 accounts, that no request names a destination, and the halt on an answer another
   key signed
 - `tests/console_funding_jobs.rs`: the funding jobs: a busy account, a failed job's reason and
   transactions, a deposit's transactions, jobs the funding key pays taking turns, a replaced
   transaction, a withdrawal left in the queue, and the jobs a stop or halt ends
+- `tests/console_funding_waits.rs`: jobs that only wait for the node leaving their places to the others, and a
+  transaction followed to its receipt after the receipt wait
 - `tests/console_reads.rs`: the figures against the node's answers, marks and close-outs, the fill
   history, the equity curve, failed reads, and the live feed
 - `tests/console_controls.rs`: stopping and starting an account and its strategy, parameters within

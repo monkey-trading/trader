@@ -136,9 +136,20 @@ for account in "${accounts[@]}"; do
   [[ "$(node_get "/v1/accounts/$account" | jq -r '.balance | tonumber | floor')" -ge 100000 ]] || fail "$account was not credited"
 done
 
-step "write the bot's config: all three accounts, with a console on a free loopback port"
-console_port="$(dev_stack_free_port)"
-console="https://127.0.0.1:$console_port"
+step "write the bot's config: all three accounts; its console's port is picked at each start"
+# Writes the bot's config: the base file and its console on `$console_port`.
+write_bot_config() {
+  {
+    cat "$work/bot-base.toml"
+    cat <<CONFIG
+
+[console]
+bind = "127.0.0.1:$console_port"
+data_dir = "console-data"
+refresh_interval = "2s"
+CONFIG
+  } > "$work/bot.toml"
+}
 {
   dev_stack_node_config
   for i in "${!keys[@]}"; do
@@ -161,25 +172,33 @@ CONFIG
   trading_sections
   cat <<CONFIG
 
-[console]
-bind = "127.0.0.1:$console_port"
-data_dir = "console-data"
-refresh_interval = "2s"
-
 [logging]
 level = "info"
 CONFIG
-} > "$work/bot.toml"
+} > "$work/bot-base.toml"
 
 step "run the bot for ${trade_seconds}s"
-"$trader" run --config "$work/bot.toml" > "$work/bot.log" 2>&1 &
-bot_pid=$!
-for _ in $(seq 1 100); do
-  grep -q 'console listening' "$work/bot.log" && break
-  kill -0 "$bot_pid" 2>/dev/null || fail "the bot exited at startup"
-  sleep 0.2
-done
-grep -q 'console listening' "$work/bot.log" || fail "the console never listened"
+# Starts the bot on a newly picked console port and waits for its console; a start that loses the port
+# to another process is run again on a new one.
+start_bot() {
+  console_port="$(dev_stack_free_port)"
+  console="https://127.0.0.1:$console_port"
+  write_bot_config
+  "$trader" run --config "$work/bot.toml" > "$work/bot.log" 2>&1 &
+  bot_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q 'console listening' "$work/bot.log" && return 0
+    if ! kill -0 "$bot_pid" 2>/dev/null; then
+      wait "$bot_pid" 2>/dev/null || true
+      bot_pid=""
+      if dev_stack_lost_port "$work/bot.log"; then dev_stack_port_lost=1; return 0; fi
+      fail "the bot exited at startup"
+    fi
+    sleep 0.2
+  done
+  fail "the console never listened"
+}
+dev_stack_attempts start_bot
 
 step "the printed fingerprint is the served certificate's, and the password logs in"
 printed_fingerprint="$(sed -nE 's/^console certificate .*SHA-256 fingerprint ([0-9A-F:]+)$/\1/p' "$work/bot.log")"
@@ -220,14 +239,23 @@ CONSOLE_URL="$console" CONSOLE_PASSWORD="$password" PLAYWRIGHT_DIR="$PLAYWRIGHT_
   node "$root/console/browser-test/run.mjs" || fail "the browser test failed"
 
 step "the dev server's proxy reaches the bot's console: login and session through it"
-dev_port="$(dev_stack_free_port)"
-(cd "$root/console" && CONSOLE_BOT_URL="$console" exec node node_modules/vite/bin/vite.js --port "$dev_port" --strictPort --host 127.0.0.1 > "$work/vite.log" 2>&1) &
-vite_pid=$!
-for _ in $(seq 1 100); do
-  curl -s -o /dev/null "http://127.0.0.1:$dev_port/" && break
-  kill -0 "$vite_pid" 2>/dev/null || fail "the dev server exited: $(tail -n 5 "$work/vite.log")"
-  sleep 0.2
-done
+# Starts the dev server on a newly picked port, as start_bot does.
+start_vite() {
+  dev_port="$(dev_stack_free_port)"
+  (cd "$root/console" && CONSOLE_BOT_URL="$console" exec node node_modules/vite/bin/vite.js --port "$dev_port" --strictPort --host 127.0.0.1 > "$work/vite.log" 2>&1) &
+  vite_pid=$!
+  for _ in $(seq 1 100); do
+    curl -s -o /dev/null "http://127.0.0.1:$dev_port/" && return 0
+    if ! kill -0 "$vite_pid" 2>/dev/null; then
+      wait "$vite_pid" 2>/dev/null || true
+      vite_pid=""
+      if dev_stack_lost_port "$work/vite.log"; then dev_stack_port_lost=1; return 0; fi
+      fail "the dev server exited: $(tail -n 5 "$work/vite.log")"
+    fi
+    sleep 0.2
+  done
+}
+dev_stack_attempts start_vite
 dev="http://127.0.0.1:$dev_port"
 status="$(curl -s -o /dev/null -w '%{http_code}' -c "$work/dev-cookies" -H "Origin: $dev" -H 'content-type: application/json' \
   -d "{\"password\":\"$password\"}" "$dev/api/login")"

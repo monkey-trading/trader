@@ -11,7 +11,8 @@ use common::{
 };
 use hyper::Method;
 use serde_json::json;
-use tokio::sync::oneshot;
+use std::sync::Arc;
+use tokio::sync::{Notify, oneshot};
 
 /// An order the node refuses for its nonce never entered the log, as when another request of the
 /// account took the nonce: its target is decided again on the node's next nonce, once for its bar, and
@@ -63,13 +64,17 @@ async fn an_order_refused_for_its_nonce_after_a_parameter_change_is_not_decided_
     let stand_in = StandIn::start().await;
     seed(&stand_in);
     let dir = tempfile::tempdir().unwrap();
-    let running = Running::start(console_config(&stand_in, dir.path(), BOUNDS)).await;
+    let mut cfg = console_config(&stand_in, dir.path(), BOUNDS);
+    // The order's answer waits for the test, which releases it once the parameters have changed: the bot
+    // waits for it far longer than a loaded machine takes to answer the change.
+    cfg.node.request_timeout = Duration::from_secs(20);
+    let running = Running::start(cfg).await;
     let cookie = running.session().await;
     until_started(&running, &cookie).await;
     within(warm(&stand_in)).await;
-    // The order's answer, a refusal of its nonce, takes a second, within the bot's wait for it.
+    let release = Arc::new(Notify::new());
     stand_in.with(|i| {
-        i.post_delay = Some(Duration::from_secs(1));
+        i.post_gate = Some(Arc::clone(&release));
         i.statuses.push_back(409);
     });
     for (seq, minute, mid) in [(14, 1, "101"), (15, 2, "102")] {
@@ -86,7 +91,8 @@ async fn an_order_refused_for_its_nonce_after_a_parameter_change_is_not_decided_
     let path = format!("/api/accounts/{}/strategies/0/params", account());
     let params = json!({ "kind": "sma_crossover", "fast": 2, "slow": 3 });
     assert_eq!(running.call(Method::PUT, &path, SAME, Some(&cookie), Some(params)).await.status, 204);
-    // The refusal comes, and the series warms up again from the marks history: no order follows.
+    // The refusal comes only now, and the series warms up again from the marks history: no order follows.
+    release.notify_one();
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(posted(), 1, "the old parameters' target is not ordered again");
     running.stop_after(&stand_in).await.unwrap();

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
 /// A stand-in with BTC-USD, a funded account for each of `accounts`, and the marks history.
-async fn node(accounts: &[u8]) -> std::sync::Arc<StandIn> {
+async fn node(accounts: &[u16]) -> std::sync::Arc<StandIn> {
     let stand_in = StandIn::start().await;
     stand_in.with(|i| {
         i.markets = json!([btc_usd(Some("99"))]);
@@ -91,7 +91,7 @@ async fn accounts_share_a_stream_and_order_on_their_own_nonces() {
     go_long(&stand_in).await;
     wait_for_orders(&stand_in, 3).await;
     let placed = orders(&stand_in);
-    let by_account = |n: u8| placed.iter().find(|(account, ..)| *account == address(n).to_string()).unwrap();
+    let by_account = |n: u16| placed.iter().find(|(account, ..)| *account == address(n).to_string()).unwrap();
     assert_eq!([0, 1, 2].map(|n| (by_account(n).1, by_account(n).2)), [(0, true), (5, true), (0, true)]);
     assert_eq!(
         placed.iter().map(|(account, ..)| account.clone()).collect::<Vec<_>>(),
@@ -122,7 +122,7 @@ async fn accounts_share_a_stream_and_order_on_their_own_nonces() {
 /// never has to refuse one.
 #[tokio::test]
 async fn a_burst_of_orders_queues_under_the_nodes_limit() {
-    let accounts: Vec<u8> = (0..12).collect();
+    let accounts: Vec<u16> = (0..12).collect();
     let stand_in = node(&accounts).await;
     // The node allows 20 requests a second and a burst of 5, and so does the bot's config.
     stand_in.with(|i| i.limit = Some((20.0, 5.0)));

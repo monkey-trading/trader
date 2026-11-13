@@ -225,7 +225,7 @@ impl Lifecycle {
     /// The chain, for an action that reads it.
     /// Error cases:
     /// - the config has no `[chain]` section
-    fn chain(&self) -> anyhow::Result<&Chain> {
+    pub(crate) fn chain(&self) -> anyhow::Result<&Chain> {
         self.chain.as_ref().context("the config has no [chain] section, which this action needs")
     }
 

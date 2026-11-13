@@ -72,7 +72,7 @@ pub fn router(server: Arc<Server>) -> Router {
         .fallback(assets::serve)
         // `read_body` enforces each route's own limit before an extractor sees the body.
         .layer(DefaultBodyLimit::max(MAX_BODY.max(funding::MAX_BODY)))
-        .layer(from_fn(guard::read_body))
+        .layer(from_fn_with_state(server.clone(), guard::read_body))
         .layer(from_fn(guard::check_origin))
         .layer(from_fn(guard::headers))
         .layer(from_fn_with_state(server.clone(), guard::span))

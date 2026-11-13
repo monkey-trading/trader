@@ -219,6 +219,26 @@ impl Chain {
         unreachable!("the last attempt returns")
     }
 
+    /// Follows the transaction `tx`, sent earlier, for up to `wait`, sending nothing: how it came out
+    /// once an endpoint holds its receipt, or `None` when none does in time. For a transaction whose
+    /// call failed with `NoReceipt`, which may still be mined.
+    pub async fn settle(&self, tx: B256, wait: Duration) -> Option<Progress> {
+        let deadline = Instant::now() + wait;
+        loop {
+            if let Lookup::Found(_, receipt) = self.lookup(&[tx]).await {
+                if let Some(block) = receipt.block_number {
+                    self.floor.fetch_max(block, Ordering::Relaxed);
+                }
+                info!(tx = %tx, block = receipt.block_number, "a transaction past its receipt wait is mined");
+                return Some(if receipt.status() { Progress::Mined { tx } } else { Progress::Reverted { tx } });
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            sleep(self.poll_interval).await;
+        }
+    }
+
     /// The gas limit for `call` from `from`: its estimate, with headroom.
     /// Error cases:
     /// - the call would revert (`WouldRevert`), or no estimate is read (`NotSent`)

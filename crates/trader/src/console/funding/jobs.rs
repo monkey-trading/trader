@@ -142,6 +142,12 @@ impl Jobs {
         }
     }
 
+    /// The transactions job `id` sent that are still shown as sent.
+    pub fn unsettled(&self, id: u64) -> Vec<B256> {
+        let Some(job) = self.jobs.iter().find(|j| j.id == id) else { return Vec::new() };
+        job.txs.iter().filter(|t| t.state == TxState::Sent).filter_map(|t| t.hash.parse().ok()).collect()
+    }
+
     /// Whether job `id` has ended.
     pub fn is_over(&self, id: u64) -> bool {
         self.jobs.iter().find(|j| j.id == id).is_none_or(|j| j.state.ended())

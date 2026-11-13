@@ -10,6 +10,7 @@
 //! config, and no transport error is printed as it is.
 
 pub mod contracts;
+pub mod idle;
 pub mod progress;
 mod rpc;
 mod send;

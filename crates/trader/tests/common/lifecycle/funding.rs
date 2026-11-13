@@ -25,14 +25,26 @@ pub struct Funded {
 }
 
 /// The `[chain]` section on `chain`, with the funding key when `funding`, and the console.
-fn chain_section(chain: &ChainStandIn, funding: bool) -> String {
+fn chain_section(chain: &ChainStandIn, funding: bool, waits: Waits) -> String {
     let funding = if funding { "[funding]\nkey = { type = \"hex_file\", path = \"funding.hex\" }\n" } else { "" };
     format!(
-        "\n[chain]\nrpc = [\"{}\"]\nrpc_timeout = \"2s\"\nreceipt_timeout = \"5s\"\nsettle_timeout = \"3s\"\n\
+        "\n[chain]\nrpc = [\"{}\"]\nrpc_timeout = \"2s\"\nreceipt_timeout = \"{}\"\nsettle_timeout = \"{}\"\n\
          poll_interval = \"20ms\"\n{funding}{CONSOLE}",
-        chain.url()
+        chain.url(),
+        waits.receipt,
+        waits.settle
     )
 }
+
+/// How long the bot waits for a transaction's receipt and for the node to settle what it sent.
+#[derive(Clone, Copy)]
+pub struct Waits {
+    pub receipt: &'static str,
+    pub settle: &'static str,
+}
+
+/// The waits most tests use.
+pub const WAITS: Waits = Waits { receipt: "5s", settle: "3s" };
 
 /// The bot with accounts 0 and 1, the funding key when `funding`.
 pub async fn start(funding: bool) -> Funded {
@@ -40,13 +52,18 @@ pub async fn start(funding: bool) -> Funded {
 }
 
 /// As `start`, with the accounts `numbers` in the config, of which only account 0 is credited.
-pub async fn start_with(funding: bool, numbers: &[u8]) -> Funded {
+pub async fn start_with(funding: bool, numbers: &[u16]) -> Funded {
+    start_waiting(funding, numbers, WAITS).await
+}
+
+/// As `start_with`, with the waits `waits`.
+pub async fn start_waiting(funding: bool, numbers: &[u16], waits: Waits) -> Funded {
     let node = StandIn::start().await;
     let chain = ChainStandIn::start().await;
     seed(&node);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("funding.hex"), hex::encode(FUNDING_SECRET)).unwrap();
-    let extra = chain_section(&chain, funding);
+    let extra = chain_section(&chain, funding, waits);
     let cfg: Config = config_many(&node, dir.path(), "1m", numbers, &extra);
     for &n in numbers {
         node.with(|i| {

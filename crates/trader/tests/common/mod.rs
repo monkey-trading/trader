@@ -116,6 +116,8 @@ pub struct Inner {
     pub statuses: VecDeque<u16>,
     /// How long each POST waits before it answers.
     pub post_delay: Option<std::time::Duration>,
+    /// Holds the next POST's answer until the test notifies it; the POST is recorded at once.
+    pub post_gate: Option<Arc<tokio::sync::Notify>>,
     /// The log: offsets with their messages.
     pub log: Vec<((u64, u32), String)>,
     /// Faults by the connection's place among those opened, from 0, and the message's offset.
@@ -188,7 +190,7 @@ impl StandIn {
         });
         let router = lifecycle::routes()
             .route("/v1/markets", get(markets))
-            .route("/v1/markets/{id}/marks", get(marks))
+            .route("/v1/markets/{id}/marks", get(reads::marks))
             .route("/v1/accounts/{address}", get(reads::account_view))
             .route("/v1/accounts/{address}/nonce", get(reads::nonce))
             .route("/v1/accounts/{address}/history", get(reads::history))
@@ -346,29 +348,12 @@ async fn markets(State(s): State<Arc<StandIn>>) -> Response {
     axum::Json(markets).into_response()
 }
 
-async fn marks(State(s): State<Arc<StandIn>>, Query(query): Query<BTreeMap<String, String>>) -> Response {
-    let number = |key: &str| query.get(key).and_then(|v| v.parse::<i64>().ok());
-    let (from, to) = (number("from_ms").unwrap_or(i64::MIN), number("to_ms").unwrap_or(i64::MAX));
-    let limit = number("limit").map_or(500, |limit| limit as usize);
-    let (entries, next) = s.with(|i| {
-        i.marks_reads += 1;
-        let window: Vec<Value> =
-            i.marks.iter().filter(|b| (from..=to).contains(&b["ts"].as_i64().unwrap())).cloned().collect();
-        let page = limit.min(i.marks_page.unwrap_or(limit));
-        let next = (window.len() > page).then(|| window[page - 1]["ts"].as_i64().unwrap() + 1);
-        (window.into_iter().take(page).collect::<Vec<_>>(), i.marks_next.or(next))
-    });
-    axum::Json(json!({ "market": 1, "resolution": query.get("resolution"), "entries": entries, "next": next,
-        "max_limit": 2000 }))
-    .into_response()
-}
-
 /// Records a POST, settles a cancel-all or close-all when `Inner::settle` says so, and answers
 /// with the next scripted status or events, after `Inner::post_delay`.
 async fn record(State(s): State<Arc<StandIn>>, uri: Uri, body: Bytes) -> Response {
     let body: Value = serde_json::from_slice(&body).unwrap();
     // Recorded and settled at once, as a node sequences a request whose answer is then lost.
-    let (status, reply, delay) = s.with(|i| {
+    let (status, reply, delay, gate) = s.with(|i| {
         let status = i.statuses.pop_front();
         let account = body["account"].as_str().unwrap_or_default().to_lowercase();
         if let (true, None, Some(view)) = (i.settle, status, i.accounts.get_mut(&account)) {
@@ -406,10 +391,13 @@ async fn record(State(s): State<Arc<StandIn>>, uri: Uri, body: Bytes) -> Respons
         } else {
             i.replies.pop_front().unwrap_or_else(|| json!([]))
         };
-        (status, reply, i.post_delay)
+        (status, reply, i.post_delay, i.post_gate.take())
     });
     if let Some(delay) = delay {
         tokio::time::sleep(delay).await;
+    }
+    if let Some(gate) = gate {
+        gate.notified().await;
     }
     let status = StatusCode::from_u16(status.unwrap_or(200)).unwrap();
     (status, axum::Json(reply)).into_response()

@@ -196,19 +196,79 @@ dev_stack_build_contracts() {
   rm -rf "$tmp" "$tmp.log"
 }
 
-# A free loopback port, never one a local demo uses.
+# The ports this run has handed out, one a line: the picker never hands one out twice. Each call of
+# dev_stack_free_port runs in a subshell, so the record is a file, created when this script is read.
+dev_stack_ports_file="$(mktemp)"
+# Set to 1 by a start step that found a port it was given taken by another process; see
+# dev_stack_attempts.
+dev_stack_port_lost=0
+
+# A free loopback port, never one a local demo uses and never one this run handed out before. Ports
+# come from 20000-29999, below the range a system gives the outgoing connections of the node, curl and
+# the other processes of a scenario (32768 and up on Linux, 49152 on macOS), which would otherwise take
+# a port between its pick and its bind. A process outside this run can still take one: the step that
+# starts a server on it is retried on new ports (dev_stack_attempts).
 dev_stack_free_port() {
-  local port
-  while :; do
-    port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-    case "$port" in 3000 | 8080 | 8081 | 8545 | 9464 | 9465) ;; *) echo "$port"; return ;; esac
+  python3 -I -c '
+import fcntl
+import random
+import socket
+import sys
+
+avoid = {3000, 8080, 8081, 8545, 9464, 9465}
+with open(sys.argv[1], "a+") as registry:
+    fcntl.flock(registry, fcntl.LOCK_EX)
+    registry.seek(0)
+    handed_out = {int(line) for line in registry.read().split()}
+    for _ in range(1000):
+        port = random.randint(20000, 29999)
+        if port in avoid or port in handed_out:
+            continue
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            continue
+        finally:
+            probe.close()
+        registry.write(f"{port}\n")
+        registry.flush()
+        print(port)
+        break
+    else:
+        sys.exit("no free loopback port")
+' "$dev_stack_ports_file"
+}
+
+# Whether the log `$1` says a server could not bind its address because another process holds it.
+dev_stack_lost_port() {
+  grep -qiE 'address already in use|addrinuse|os error (98|48)' "$1" 2>/dev/null
+}
+
+# Runs the start step `$1` (with its arguments) until it ends without losing a port: a step that finds
+# a port it picked taken by another process cleans up after itself, sets dev_stack_port_lost to 1 and
+# returns, and is run again, which picks new ports. Any other failure ends the scenario as usual.
+dev_stack_attempts() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    dev_stack_port_lost=0
+    "$@"
+    (( dev_stack_port_lost )) || return 0
+    echo "a port picked for $1 was taken by another process (attempt $attempt of 5); picking new ones" >&2
   done
+  dev_stack_fail "a port picked for $1 was taken by another process on each of 5 attempts"
 }
 
 # Starts Anvil and the contracts (with --chain), the access source and the node on fresh ports and
 # data, waits until the node sequences and prices BTC-USD, and sets dev_stack_api, dev_stack_signer,
 # dev_stack_pin and dev_stack_work (and, with --chain, the chain variables dev_stack_chain_start sets).
+# A start that loses a port to another process is run again on new ones.
 dev_stack_start() {
+  dev_stack_attempts dev_stack_start_once "$@"
+}
+
+# One try of dev_stack_start: on a lost port it stops what it started and leaves dev_stack_port_lost 1.
+dev_stack_start_once() {
   local api_port metrics_port source_port max_drift wait_s dev_toml attestation
   dev_stack_chain=0
   [[ "${1:-}" != --chain ]] || dev_stack_chain=1
@@ -220,6 +280,7 @@ dev_stack_start() {
   dev_stack_api="https://127.0.0.1:$api_port"
   if (( dev_stack_chain )); then
     dev_stack_chain_start
+    if (( dev_stack_port_lost )); then dev_stack_stop --keep-ports; return 0; fi
   fi
 
   printf '{"mode":"clear","jurisdictions":{},"sanctioned":[]}\n' > "$dev_stack_work/access-fixture.json"
@@ -263,7 +324,14 @@ CONFIG
   max_drift="$(awk -F'"' '/^max_drift = / { print $2 }' "$dev_toml")"
   wait_s=$(( ${max_drift%s} + 30 ))
   for _ in $(seq 1 $(( wait_s * 5 ))); do
-    kill -0 "$dev_stack_node_pid" 2>/dev/null || dev_stack_fail "the node exited"
+    if ! kill -0 "$dev_stack_node_pid" 2>/dev/null; then
+      if dev_stack_lost_port "$dev_stack_work/node.log"; then dev_stack_port_lost=1; dev_stack_stop --keep-ports; return 0; fi
+      dev_stack_fail "the node exited"
+    fi
+    if ! kill -0 "$dev_stack_source_pid" 2>/dev/null; then
+      if dev_stack_lost_port "$dev_stack_work/access-source.log"; then dev_stack_port_lost=1; dev_stack_stop --keep-ports; return 0; fi
+      dev_stack_fail "the access source exited: $(tail -n 5 "$dev_stack_work/access-source.log")"
+    fi
     if [[ "$(curl -sk --max-time 2 "$dev_stack_api/v1/markets" 2>/dev/null \
       | jq -r '[.[]? | select(.symbol == "BTC-USD" and .mark != null)] | length' 2>/dev/null || true)" == 1 ]]; then
       break
@@ -328,7 +396,10 @@ dev_stack_chain_start() {
     --block-time 1 --silent > "$dev_stack_work/anvil.log" 2>&1 &
   dev_stack_anvil_pid=$!
   for _ in $(seq 1 100); do
-    kill -0 "$dev_stack_anvil_pid" 2>/dev/null || dev_stack_fail "anvil exited at startup: $(tail -n 5 "$dev_stack_work/anvil.log")"
+    if ! kill -0 "$dev_stack_anvil_pid" 2>/dev/null; then
+      if dev_stack_lost_port "$dev_stack_work/anvil.log"; then dev_stack_port_lost=1; return 0; fi
+      dev_stack_fail "anvil exited at startup: $(tail -n 5 "$dev_stack_work/anvil.log")"
+    fi
     cast chain-id --rpc-url "$dev_stack_rpc" > /dev/null 2>&1 && break
     sleep 0.1
   done
@@ -345,6 +416,7 @@ dev_stack_chain_start() {
   for port in "${dev_stack_proxy_ports[@]}"; do
     for _ in $(seq 1 100); do
       cast chain-id --rpc-url "http://127.0.0.1:$port" > /dev/null 2>&1 && break
+      if dev_stack_lost_port "$dev_stack_work/proxy-$port.log"; then dev_stack_port_lost=1; return 0; fi
       sleep 0.1
     done
     cast chain-id --rpc-url "http://127.0.0.1:$port" > /dev/null 2>&1 || dev_stack_fail "an RPC proxy did not come up"
@@ -440,7 +512,8 @@ CONFIG
 }
 
 # Stops the node and the access source, keeps their logs under SCENARIO_ARTIFACTS, and removes the
-# node's data.
+# node's data and, unless `--keep-ports`, the record of the ports handed out, which a start that is
+# run again keeps.
 dev_stack_stop() {
   local pid
   for pid in "$dev_stack_node_pid" "$dev_stack_source_pid" ${dev_stack_proxy_pids[@]+"${dev_stack_proxy_pids[@]}"} "$dev_stack_anvil_pid"; do
@@ -457,6 +530,7 @@ dev_stack_stop() {
     fi
     rm -rf "$dev_stack_work"
   fi
+  [[ "${1:-}" == --keep-ports ]] || rm -f "$dev_stack_ports_file"
 }
 
 # Prints the [node] section of a bot config for this node (its vault is the deployed one with --chain).

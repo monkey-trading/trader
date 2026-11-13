@@ -14,11 +14,12 @@ use engine_core::Fixed;
 use engine_core::access::AccessReject;
 use engine_core::types::AccountId;
 use futures_util::future::BoxFuture;
-use tokio::time::{Instant, sleep};
+use tokio::time::Instant;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::accounts::{Lifecycle, usdc_units};
 use crate::chain::contracts::{ERC20, Vault};
+use crate::chain::idle;
 use crate::chain::{Call, Sent, Spent};
 use crate::keys::AccountKey;
 use crate::node::CallError;
@@ -208,7 +209,7 @@ impl Lifecycle {
                 return Err(anyhow::anyhow!("the node did not credit deposit {tx} within {:?}", self.settle_timeout))
                     .context("it may credit later: see `trader accounts status`");
             }
-            sleep(self.poll_interval).await;
+            idle::wait(self.poll_interval).await;
         }
     }
 }

@@ -13,7 +13,7 @@ use engine_core::types::AccountId;
 use hyper::Method;
 use serde_json::{Value, json};
 
-use common::console::{Running, seed, within};
+use common::console::{Running, SAME, seed, within};
 use common::lifecycle::funding::{CONSOLE, job_id, start, start_with};
 use common::lifecycle::{usdc, wallet};
 use common::{CHAIN_ID, StandIn, VAULT, address, config_many};
@@ -148,8 +148,8 @@ async fn a_bot_with_no_funded_account_serves_the_console() {
     assert_eq!(f.ended(job_id(&started)).await["state"], "landed");
 }
 
-/// A request naming as many accounts as the console allows is read whole, one naming more is refused
-/// for its count, and the accounts' figures are read again after a job changed them.
+/// A request naming more accounts than the bot has is refused for its count, one naming a stranger is not
+/// the bot's, and the accounts' figures are read again after a job changed them.
 #[tokio::test]
 async fn a_large_selection_is_accepted_and_a_jobs_figures_are_read_again() {
     let f = start(false).await;
@@ -159,10 +159,14 @@ async fn a_large_selection_is_accepted_and_a_jobs_figures_are_read_again() {
         serde_json::to_vec(&json!({ "accounts": strangers })).unwrap().len() > 4096,
         "past every other route's limit"
     );
-    let most = f.act("claim", json!({ "accounts": strangers[..500] })).await;
-    assert_eq!((most.status, most.body["code"].clone()), (404, json!("no_account")), "{most:?}");
+    let stranger = f.act("claim", json!({ "accounts": strangers[..2] })).await;
+    assert_eq!((stranger.status, stranger.body["code"].clone()), (404, json!("no_account")), "{stranger:?}");
     let more = f.act("claim", json!({ "accounts": strangers })).await;
     assert_eq!((more.status, more.body["code"].clone()), (422, json!("bad_accounts")), "{more:?}");
+    // The larger limit is for a live session: a request with none takes no more than any other route.
+    let path = "/api/funding/claim";
+    let anonymous = f.running.call(Method::POST, path, SAME, None, Some(json!({ "accounts": strangers }))).await;
+    assert_eq!((anonymous.status, anonymous.body["code"].clone()), (413, json!("body_too_large")), "{anonymous:?}");
     let first = address(0).to_string();
     f.chain.with(|l| {
         l.usdc.insert(wallet(), usdc(7));
@@ -179,6 +183,29 @@ async fn a_large_selection_is_accepted_and_a_jobs_figures_are_read_again() {
         }
     })
     .await;
+}
+
+/// A selection of every account of a fleet over 500 is one request that starts a job for each, not a
+/// refusal of the whole.
+#[tokio::test]
+async fn a_selection_of_a_fleet_over_500_accounts_is_one_request() {
+    let numbers: Vec<u16> = (0..600).collect();
+    let f = start_with(false, &numbers).await;
+    let all: Vec<String> = numbers.iter().map(|n| address(*n).to_string()).collect();
+    assert!(
+        serde_json::to_vec(&json!({ "accounts": all })).unwrap().len() > 22 * 1024,
+        "more than the 500 accounts the request once took"
+    );
+    let started = f.act("claim", json!({ "accounts": all })).await;
+    assert_eq!(started.status, 202, "{started:?}");
+    assert_eq!(started.body["jobs"].as_array().unwrap().len(), 600);
+    let busy = f.act("claim", json!({ "accounts": [all[7]] })).await;
+    assert_eq!((busy.status, busy.body["code"].clone()), (409, json!("busy")), "{busy:?}");
+    // Naming more than the fleet has can only be naming one twice.
+    let twice: Vec<&String> = all.iter().chain([&all[0]]).collect();
+    let more = f.act("claim", json!({ "accounts": twice })).await;
+    assert_eq!((more.status, more.body["code"].clone()), (422, json!("bad_accounts")), "{more:?}");
+    let _ = f.running.stop_after(&f.node).await;
 }
 
 /// An answer another key signed, to a funding read or to a job's request, halts the bot as one the
