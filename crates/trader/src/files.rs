@@ -26,11 +26,13 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     temporary.push(".tmp");
     let temporary = Path::new(&temporary);
     let write = || -> std::io::Result<()> {
+        // Opened first, so a directory that cannot be opened fails before the file is touched.
+        let directory = File::open(dir)?;
         let mut file = OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(temporary, path)?;
-        File::open(dir)?.sync_all()
+        directory.sync_all()
     };
     write().with_context(|| format!("writing {}", path.display()))
 }
@@ -40,6 +42,20 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+
+    /// A directory that cannot be opened for reading fails the write before the file is touched, so a write that
+    /// reports failure has changed nothing.
+    #[test]
+    fn a_directory_that_cannot_be_opened_leaves_the_file_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        write_private(&path, b"old").unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        let written = write_private(&path, b"new");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(written.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+    }
 
     /// The file holds what was written, readable by its owner alone, with no temporary left.
     #[test]

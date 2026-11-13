@@ -260,6 +260,8 @@ MONKEY, and withdraws, every payout going to the account's own address.
   history, the equity curve, failed reads, and the live feed
 - `tests/console_controls.rs`: stopping and starting an account and its strategy, parameters within
   their bounds, the daily loss stop's status, a restart, and the flatten
+- `tests/console_flatten.rs`: a flatten of many closes: fills that come after every close was sent, an
+  account that halts while it runs, and a stop that comes while it reports its closes
 - `tests/console_many.rs`: the console over several accounts, one stopped while the other trades,
   and accounts that could not start
 - `tests/node_answers.rs`, `tests/stream.rs`, `tests/bot.rs`: the binary against the stand-in

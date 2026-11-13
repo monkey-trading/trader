@@ -134,6 +134,28 @@ impl Running {
         self.stop.take().unwrap().send(()).unwrap();
     }
 
+    /// Sends a POST in the session `cookie` and does not wait for its answer, which a stop may cut off.
+    pub fn post_in_background(&self, path: &str, cookie: &str) {
+        let (tls, port, path, cookie) = (self.tls.clone(), self.addr.port(), path.to_owned(), cookie.to_owned());
+        tokio::spawn(async move {
+            let host = format!("127.0.0.1:{port}");
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(&path)
+                .header(HOST, &host)
+                .header(ORIGIN, format!("https://{host}"))
+                .header(COOKIE, &cookie)
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            let Ok(stream) = tls.connect().await else { return };
+            let Ok((mut sender, connection)) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await else {
+                return;
+            };
+            tokio::spawn(connection);
+            let _ = sender.send_request(request).await;
+        });
+    }
+
     /// Stops the bot and waits for it.
     pub async fn stop(mut self) -> anyhow::Result<()> {
         self.stop.take().unwrap().send(()).unwrap();

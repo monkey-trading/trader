@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, ensure};
 use engine_core::Fixed;
@@ -103,6 +104,12 @@ pub struct Account {
     /// The signatures of the last orders this process signed for the account, to tell its fills
     /// from others': a signature is over the whole request, so no other request carries one of them.
     pub signed: VecDeque<Signature>,
+    /// The closes a console flatten signed, with the expiry until which each may still enter the log,
+    /// kept until the log has passed it, since a flatten sends one close after another without waiting
+    /// for each to reach the log.
+    pub closes: Vec<(Signature, Millis)>,
+    /// Set when the account stops trading, for a flatten under way to see before it signs anything more.
+    pub halt: Arc<AtomicBool>,
     pub nonce: Nonce,
     /// Whether a request for the account is out, so no other goes before it answers.
     pub busy: bool,
@@ -393,6 +400,8 @@ impl Fleet {
                 changed: false,
                 assignments: first..u32::try_from(assignments.len())?,
                 signed: VecDeque::with_capacity(2 * account.strategies.len().max(2)),
+                closes: Vec::new(),
+                halt: Arc::new(AtomicBool::new(false)),
                 nonce: account.nonce.map_or(Nonce::Unknown, Nonce::Synced),
                 busy: false,
                 balance: account.balance,
@@ -474,6 +483,7 @@ impl Fleet {
         if entry.failed.is_none() {
             error!(alert = "account_failed", account = %entry.address, "{reason}; the account is left as it is");
             entry.failed = Some(reason);
+            entry.halt.store(true, Ordering::Relaxed);
             self.failed += 1;
         }
         for a in entry.assignments.clone() {

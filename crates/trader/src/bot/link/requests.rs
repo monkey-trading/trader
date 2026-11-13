@@ -12,7 +12,7 @@ use crate::bot::Halt;
 use crate::bot::fleet::Nonce;
 use crate::bot::link::{AccountRequest, Control, Refusal, Reply, Saved, Waiting};
 use crate::bot::run::{Done, Runner};
-use crate::bot::stop::Failed;
+use crate::bot::stop::{Failed, SignedClose};
 use crate::config::bounds;
 
 impl Runner {
@@ -126,17 +126,22 @@ impl Runner {
     /// Takes in the closes the flattens signed: each one's fills are the account's own, and until
     /// the log passes its expiry, no strategy of the account orders.
     pub(in crate::bot) fn record_closes(&mut self) {
-        while let Ok((a, signature, expires_at)) = self.closes.1.try_recv() {
-            let account = &mut self.fleet.accounts[a as usize];
-            // As an order's signature is: the oldest goes when the list is full, never growing it.
-            if account.signed.len() == account.signed.capacity() {
-                account.signed.pop_front();
-            }
-            account.signed.push_back(signature);
-            for i in account.assignments.clone() {
-                let asg = &mut self.fleet.assignments[i as usize];
-                asg.expires_at = asg.expires_at.max(Some(expires_at));
-            }
+        while let Ok(close) = self.closes.1.try_recv() {
+            self.take_close(close);
+        }
+    }
+
+    /// Takes in one close a flatten signed. Its signature stays until the log has passed its expiry:
+    /// a flatten does not wait for one close to reach the log before it signs the next, so no
+    /// signature may go while its command may still come.
+    pub(in crate::bot) fn take_close(&mut self, (a, signature, expires_at): SignedClose) {
+        let now = self.fleet.log_ts;
+        let account = &mut self.fleet.accounts[a as usize];
+        account.closes.retain(|(_, until)| *until >= now);
+        account.closes.push((signature, expires_at));
+        for i in account.assignments.clone() {
+            let asg = &mut self.fleet.assignments[i as usize];
+            asg.expires_at = asg.expires_at.max(Some(expires_at));
         }
     }
 
@@ -149,6 +154,9 @@ impl Runner {
         (account.busy, account.nonce) = (false, Nonce::Unknown);
         let (result, halt) = match outcome {
             Ok(()) => (Ok(()), None),
+            Err(Failed::Incomplete(reason)) if self.fleet.accounts[a as usize].failed.is_some() => {
+                (Err(Refusal::invalid("account_halted", reason)), None)
+            }
             Err(Failed::Incomplete(reason)) => (Err(Refusal::failed("flatten_incomplete", reason)), None),
             Err(Failed::WrongSigner) => {
                 let refusal = Refusal::failed("wrong_signer", "the node's answers are not its signer's");

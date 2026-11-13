@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use engine_core::Fixed;
@@ -69,6 +70,8 @@ pub(super) struct Stop {
     /// Where the closes are reported before they go, with the account's slot, when the stop runs
     /// beside the log's reading: their fills are then the account's own.
     report: Option<(u32, mpsc::Sender<SignedClose>)>,
+    /// Set when the account stops trading: nothing more is signed for it then.
+    halt: Option<Arc<AtomicBool>>,
 }
 
 /// Why an account's stop did not complete.
@@ -105,9 +108,15 @@ impl Runner {
             let asg = &mut self.fleet.assignments[a as usize];
             (asg.pending, asg.queued) = (None, false);
         }
-        while let Some(done) = self.in_flight.next().await {
-            self.handle(done)?;
+        // A flatten under way sends the closes it signs here: they are taken in as they come, so none
+        // waits for room while this waits for it.
+        while !self.in_flight.is_empty() {
+            tokio::select! {
+                Some(done) = self.in_flight.next() => self.handle(done)?,
+                Some(close) = self.closes.1.recv() => self.take_close(close),
+            }
         }
+        self.record_closes();
         let settled = self.wait_for_log_past(stream).await?;
         let last = self.fleet.markets.iter().map(|m| (m.id, m.mark)).collect();
         let quotes = Arc::new(Quotes { last, read: Mutex::new(None) });
@@ -131,6 +140,7 @@ impl Runner {
                     markets,
                     quotes: Arc::clone(&quotes),
                     report: None,
+                    halt: None,
                 }
                 .run()
             })
@@ -220,6 +230,7 @@ impl Runner {
             markets,
             quotes: Arc::new(Quotes { last, read: Mutex::new(None) }),
             report: report.map(|report| (a, report)),
+            halt: Some(Arc::clone(&account.halt)),
         }
     }
 }
@@ -345,6 +356,7 @@ impl Stop {
     /// Signs and sends a cancel of every resting order, on the account's next nonce, once the node's
     /// limits let it go. A failed cancel is logged: the account read that follows shows what it did.
     async fn cancel(&self, account: AccountId) -> Result<(), Failed> {
+        self.check_halt()?;
         let Some(nonce) = self.nonce(account).await? else { return Ok(()) };
         let admission = self.admit(account).await?;
         let Some(expires_at) = self.expiry() else { return Ok(()) };
@@ -368,6 +380,7 @@ impl Stop {
             by_slippage.entry(*slippage).or_default().push((*market, *qty));
         }
         for (slippage, markets) in by_slippage {
+            self.check_halt()?;
             let Some(nonce) = self.nonce(account).await? else { continue };
             // The marks are read, and then the limits let the request go; if that took long, again.
             let (marks, admission) = {
@@ -414,6 +427,18 @@ impl Stop {
             }
         }
         Ok(())
+    }
+
+    /// Ends the stop of an account that has stopped trading since it began, before anything more is signed.
+    /// Error cases:
+    /// - the account halted
+    fn check_halt(&self) -> Result<(), Failed> {
+        match &self.halt {
+            Some(halt) if halt.load(Ordering::Relaxed) => {
+                Err(Failed::Incomplete("the account halted: nothing more was signed for it".into()))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// The expiry for a request signed now: the node's time as the bot last verified it, counted on,
