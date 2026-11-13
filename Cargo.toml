@@ -21,11 +21,12 @@ engine-wire = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721
 alloy-consensus = { version = "2.5", default-features = false, features = ["std"] }
 alloy-eips = { version = "2.5", default-features = false, features = ["std"] }
 alloy-primitives = { version = "1.7", default-features = false, features = ["std"] }
-alloy-provider = { version = "2.5", default-features = false, features = ["reqwest"] }
 alloy-rpc-client = { version = "2.5", default-features = false, features = ["reqwest"] }
 alloy-rpc-types-eth = { version = "2.5", default-features = false, features = ["std", "serde"] }
 # The vault's and the token's bindings, generated from their ABIs at the pinned engine commit.
 alloy-sol-types = { version = "1.7", default-features = false, features = ["std", "json"] }
+# JSON-RPC errors; the same release as the client.
+alloy-transport = { version = "2.5", default-features = false }
 anyhow = "1"
 # The console's login: one Argon2id hash of the generated password.
 argon2 = { version = "0.6", features = ["zeroize"] }

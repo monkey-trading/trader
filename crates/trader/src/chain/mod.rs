@@ -10,6 +10,7 @@
 //! config, and no transport error is printed as it is.
 
 pub mod contracts;
+mod rpc;
 mod send;
 
 pub use send::{Guard, Sent, Spent};
@@ -19,11 +20,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
-use alloy_provider::transport::{RpcError, TransportError, TransportErrorKind};
-use alloy_provider::{Provider, RootProvider};
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::{BlockId, Filter, Log, TransactionInput, TransactionRequest};
 use alloy_sol_types::SolCall;
+use alloy_transport::{RpcError, TransportError, TransportErrorKind};
 use anyhow::{Context, bail, ensure};
 use rustls::RootCertStore;
 use rustls::crypto::ring::default_provider;
@@ -31,10 +31,11 @@ use tokio::time::{Instant, sleep};
 use tracing::{debug, warn};
 
 use crate::config::ChainSection;
+use rpc::Endpoint;
 
 /// The chain's endpoints and the waits around a transaction.
 pub struct Chain {
-    endpoints: Vec<RootProvider>,
+    endpoints: Vec<Endpoint>,
     /// The chain id each endpoint answered, or 0 before it has.
     chains: Vec<AtomicU64>,
     chain_id: u64,
@@ -117,7 +118,7 @@ impl Chain {
             .map(|(index, url)| {
                 // The config load parsed it; the error never quotes it.
                 let url = reqwest::Url::parse(url.expose()).ok().with_context(|| format!("chain.rpc[{index}]"))?;
-                anyhow::Ok(RootProvider::new(RpcClient::new_http_with_client(http.clone(), url)))
+                anyhow::Ok(Endpoint::new(RpcClient::new_http_with_client(http.clone(), url)))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Self {
@@ -192,7 +193,7 @@ impl Chain {
         let data = self
             .read(|endpoint| {
                 let request = request.clone();
-                async move { endpoint.call(request).block(BlockId::hash(block)).await }
+                async move { endpoint.call_at(request, BlockId::hash(block)).await }
             })
             .await?;
         C::abi_decode_returns(&data).map_err(|e| ReadError::Undecodable(e.to_string()))
@@ -228,7 +229,7 @@ impl Chain {
     /// - see `ReadError`
     async fn read<T, F, Fut>(&self, read: F) -> Result<T, ReadError>
     where
-        F: Fn(RootProvider) -> Fut,
+        F: Fn(Endpoint) -> Fut,
         Fut: Future<Output = Result<T, TransportError>>,
     {
         let deadline = Instant::now() + self.receipt_timeout;
