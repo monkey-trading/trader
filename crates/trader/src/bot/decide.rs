@@ -351,7 +351,7 @@ impl Fleet {
     }
 
     /// Reads `account`'s equity at the sequenced time `ts`, while its balance and entries are those of
-    /// the positions the log gives, and keeps the day's state.
+    /// the positions the log gives, records it and the margin level, and keeps the day's state.
     pub fn observe_account(&mut self, account: u32, ts: Millis) {
         let acc = &self.accounts[account as usize];
         if acc.behind || acc.failed.is_some() {
@@ -362,6 +362,11 @@ impl Fleet {
         let held = filled(&buf);
         let holdings: &[Holding<'_>] = held.as_ref().map_or(&[], |held| &held[..n]);
         let acc = &mut self.accounts[account as usize];
+        if let (Some(series), Some((equity, requirement))) =
+            (self.metrics.accounts.get(account as usize), equity_and_margin(acc.balance, holdings))
+        {
+            series.set_equity(equity, requirement);
+        }
         let Some(status) = acc.controls.observe(ts, &Controlled { balance: acc.balance, holdings }) else {
             return;
         };

@@ -146,7 +146,7 @@ pub fn config(node: &StandIn, rpc: &[String], dir: &Path, funding: bool, extra: 
 url = "https://127.0.0.1:{port}"
 chain_id = {CHAIN_ID}
 vault = "0x{vault}"
-signer = "0x{signer}"
+attestation = {{ type = "mock" }}
 tls_key_sha256 = "{pin}"
 request_timeout = "2s"
 
@@ -185,7 +185,6 @@ poll_interval = "20ms"
 "#,
         port = node.addr.port(),
         vault = hex::encode(VAULT),
-        signer = hex::encode(node.signer()),
         pin = hex::encode(node.pin),
         rpc = rpc.join(", "),
     );

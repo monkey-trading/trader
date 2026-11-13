@@ -1,9 +1,10 @@
 //! A console flatten against the stand-in, in the cases a flatten of many closes brings: fills that
 //! come after every close was sent, an account that halts while it runs, and a stop that comes while
-//! it is still reporting its closes.
+//! it is still reporting its closes; and how its closes count in the metrics.
 
 mod common;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::console::{Running, console_config, figures_view, seed, until_account, until_started, within};
@@ -11,6 +12,7 @@ use common::{MINUTE, StandIn, T0, account, address, command, config_many};
 use engine_core::access::{AccessEvidence, SourceFailure};
 use engine_core::command::{CloseAllRequest, Command};
 use serde_json::{Value, json};
+use trader::metrics::Metrics;
 
 /// The console section of these tests' configs: a free loopback port, data beside the config.
 const CONSOLE: &str = "\n[console]\nbind = \"127.0.0.1:0\"\ndata_dir = \"data\"\nrefresh_interval = \"1s\"\n";
@@ -65,6 +67,52 @@ async fn every_close_of_a_long_flatten_is_known_when_its_fill_arrives() {
     }
     let view = running.get(&format!("/api/accounts/{a}"), &cookie).await.body;
     assert_eq!((&view["state"], &view["halt"]), (&json!("stopped"), &Value::Null), "{view}");
+    running.stop_after(&stand_in).await.ok();
+}
+
+/// A flatten's close counts as placed; the node's refusal of one as declined, from its answer; and the
+/// engine's rejection of one once, as the log gives it, though its answer gave it too.
+#[tokio::test]
+async fn a_flattens_closes_count_once_in_the_metrics() {
+    let stand_in = StandIn::start().await;
+    seed(&stand_in);
+    let a = account().to_string();
+    holding(&stand_in, &a, "1");
+    let rejected = json!([{ "type": "order_rejected", "account": a, "client_id": 0,
+        "reason": { "kind": "market_closed" } }]);
+    stand_in.with(|i| {
+        // Neither close moves the position: the node refuses the first, and the engine rejects the second.
+        i.settle = false;
+        i.statuses.push_back(400);
+        i.replies.push_back(rejected.clone());
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let metrics = Arc::new(Metrics::new());
+    let running = Running::start_recording(console_config(&stand_in, dir.path(), ""), Arc::clone(&metrics)).await;
+    let cookie = running.session().await;
+    until_started(&running, &cookie).await;
+
+    let flatten = format!("/api/accounts/{a}/flatten");
+    for minute in [1, 2] {
+        // The second flatten waits for the log to pass the first close's expiry.
+        stand_in.with(|i| i.time_ms = (T0 + minute * MINUTE) as u64);
+        stand_in.tick(T0 + minute * MINUTE);
+        let answer = running.post(&flatten, &cookie).await;
+        assert_eq!(answer.body["code"], "flatten_incomplete", "{answer:?}");
+    }
+    assert_eq!(posted(&stand_in), ["/v1/positions/close-all"; 2]);
+    let body = stand_in.with(|i| i.posts.last().unwrap().1.clone());
+    let request: CloseAllRequest = serde_json::from_value(body).unwrap();
+    let evidence = AccessEvidence::Failed { reason: SourceFailure::NotConfigured };
+    let cmd = serde_json::to_value(Command::AccessCloseAll { request, evidence }).unwrap();
+    let seq = stand_in.with(|i| i.log.last().map_or(i.head_seq, |((seq, _), _)| *seq) + 1);
+    stand_in.append((seq, 0), command(seq, T0 + 2 * MINUTE + 1_000, cmd, rejected));
+    stand_in.applied((seq, 0)).await;
+    let text = metrics.encode();
+    for (name, count) in [("placed", 2), ("declined", 2)] {
+        let line = format!("trader_orders_{name}_total{{account=\"{a}\",market=\"BTC-USD\"}} {count}");
+        assert!(text.lines().any(|l| l == line), "no {line} in\n{text}");
+    }
     running.stop_after(&stand_in).await.ok();
 }
 

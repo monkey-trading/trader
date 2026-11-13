@@ -199,7 +199,7 @@ async fn an_answer_another_key_signed_to_the_funding_halts_the_bot() {
         }
         let ended = tokio::time::timeout(Duration::from_secs(30), f.running.task).await.expect("the bot stops");
         let error = ended.unwrap().expect_err("the bot halts");
-        assert_eq!(error.to_string(), "the node's answers are not signed by the configured signer", "{path}");
+        assert_eq!(error.to_string(), "the node's answers are not signed by the attested signer", "{path}");
         assert!(f.node.with(|i| i.posts.is_empty()), "{path}: nothing was sent to the node");
         assert!(f.chain.sent().is_empty(), "{path}");
     }

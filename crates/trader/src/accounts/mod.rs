@@ -30,7 +30,8 @@ use crate::chain::contracts::{ERC20, Vault};
 use crate::config::{Config, DEFAULT_POLL_INTERVAL, DEFAULT_SETTLE_TIMEOUT};
 use crate::keys::AccountKey;
 use crate::node::accounts::{Payout, QueuedWithdrawal};
-use crate::node::{CallError, Node, Tls};
+use crate::node::attestation::attest_node;
+use crate::node::{CallError, Node};
 
 /// USDC's decimals.
 pub const USDC_DECIMALS: u8 = 6;
@@ -92,13 +93,13 @@ impl Lifecycle {
     /// The lifecycle of `cfg`'s accounts: a node client of its own, the chain `[chain]` names, and
     /// the funding key (see `with_node`).
     /// Error cases:
-    /// - the node's TLS configuration cannot be built
+    /// - the node's attestation does not verify (see `attest_node`)
     /// - see `with_node`
     pub async fn connect(cfg: &Config, env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
         let node_cfg = &cfg.node;
-        let tls = Tls::new(node_cfg.url.clone(), node_cfg.tls_key_sha256)?;
+        let attested = attest_node(node_cfg).await?;
         let deployment = Deployment { chain_id: node_cfg.chain_id, vault: node_cfg.vault.0 };
-        let node = Node::new(tls, node_cfg.signer.0, deployment, node_cfg.request_timeout, &node_cfg.limits);
+        let node = Node::new(attested.tls, attested.signer, deployment, node_cfg.request_timeout, &node_cfg.limits);
         Self::with_node(cfg, Arc::new(node), env).await
     }
 

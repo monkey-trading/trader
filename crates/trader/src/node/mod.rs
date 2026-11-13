@@ -1,20 +1,22 @@
 //! The node's REST API. Every call carries a fresh challenge, and its answer counts only once the
 //! enclave key's signature over it, the request, and that challenge verifies (`engine_wire`). An
 //! answer that does not verify is an error, never data. Calls share a small pool of connections and
-//! are paced under the node's limits (`pace`).
+//! are paced under the node's limits (`pace`). The signer is the enclave address the node's
+//! attestation names (`attestation`), read once before any call.
 
 pub mod accounts;
 pub mod api;
+pub mod attestation;
 mod pace;
 mod pool;
 mod tls;
-pub use tls::Tls;
+pub use tls::{KeyMismatch, Tls, is_mismatch};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use bytes::Bytes;
 use engine_core::types::AccountId;
 use engine_wire::{
@@ -27,6 +29,7 @@ use rand::RngCore;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::time::{Instant, sleep, timeout};
+use tracing::error;
 
 use crate::config::LimitsSection;
 use crate::node::pace::{NodeClock, Pacer};
@@ -67,10 +70,11 @@ pub struct Verified<T> {
 /// Why a call has no answer to act on.
 #[derive(Debug, thiserror::Error)]
 pub enum CallError {
-    /// The answer's signature is not the configured signer's over it: another key signed it, or it
+    /// The answer's signature is not the attested signer's over it: another key signed it, or it
     /// is not the answer that was signed. `engine_wire` cannot tell the two apart, and over a
-    /// pinned TLS connection neither passes by chance.
-    #[error("{target}: the answer is not signed by the configured signer")]
+    /// pinned TLS connection neither passes by chance. A node that presents another TLS key than
+    /// the attested one (`KeyMismatch`) is not the attested enclave either, and is refused so too.
+    #[error("{target}: the answer is not signed by the attested signer")]
     WrongSigner { target: String },
     /// The answer is unsigned, malformed, or not for this request.
     #[error("{target}: the answer does not verify: {source}")]
@@ -224,11 +228,7 @@ impl Node {
             // A read waits for its room first, and then for the limits, so that a hold the node asks
             // for while it waits reaches it, and the wait is not counted in the time it may take.
             None => {
-                let slot = self
-                    .pool
-                    .read_slot()
-                    .await
-                    .map_err(|source| CallError::Failed { target: target.clone(), source })?;
+                let slot = self.pool.read_slot().await.map_err(|source| failed(target.clone(), source))?;
                 self.pace(account).await;
                 (Some(slot), None)
             }
@@ -239,7 +239,7 @@ impl Node {
             .await
             .map_err(|_| anyhow!("no answer within {:?}", self.timeout))
             .and_then(|answer| answer)
-            .map_err(|source| CallError::Failed { target: target.clone(), source })?;
+            .map_err(|source| failed(target.clone(), source))?;
         if matches!(answer.status, 429 | 503) {
             let wait = retry_after(&answer.headers);
             self.retry_later.fetch_add(1, Ordering::Relaxed);
@@ -271,6 +271,39 @@ impl Node {
             .map_err(|source| CallError::Failed { target, source })?;
         Ok(Verified { body, time_ms: verified.time_ms, head_seq: verified.head_seq })
     }
+}
+
+/// The error of a call to `target` that got no answer: a handshake with another TLS key than the
+/// attested one, which no retry cures, counts as another signer's answer.
+fn failed(target: String, source: anyhow::Error) -> CallError {
+    if is_mismatch(&source) {
+        error!(%target, "the node completed a TLS handshake with another key than the attested one");
+        CallError::WrongSigner { target }
+    } else {
+        CallError::Failed { target, source }
+    }
+}
+
+/// The most bytes of an unsigned refusal's body an error shows.
+const UNSIGNED_SHOWN: usize = 200;
+
+/// `GET path` from the node `tls` connects to, an answer the node does not sign (its attestation and
+/// the attestation's collateral), as its 200 body. It proves nothing by itself: the caller checks it.
+/// Error cases:
+/// - no 200 answer within `timeout`, or a body over the pool's limit
+pub async fn fetch_unsigned(tls: &Tls, path: &str, timeout_after: Duration) -> anyhow::Result<Bytes> {
+    // The node signs neither answer, so the challenge every request carries goes unanswered.
+    let pool = Pool::new(tls.clone(), 1);
+    let answer = timeout(timeout_after, pool.exchange(None, None, &Method::GET, path, &Bytes::new(), &[0; 32]))
+        .await
+        .map_err(|_| anyhow!("GET {path}: no answer within {timeout_after:?}"))?
+        .with_context(|| format!("GET {path}"))?;
+    if answer.status != 200 {
+        // Nothing has authenticated the body: a short, escaped prefix of it only.
+        let shown = String::from_utf8_lossy(&answer.body[..answer.body.len().min(UNSIGNED_SHOWN)]);
+        bail!("GET {path}: {} {}", answer.status, shown.escape_debug());
+    }
+    Ok(answer.body)
 }
 
 /// The delay a `Retry-After` header names, in whole seconds, at least one second.

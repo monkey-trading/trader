@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 use trader_core::risk::RiskParams;
 use trader_core::sizing::Sizing;
 
-use crate::config::{Config, KeySource, NodeUrl, StrategySection, TlsPin, bounds};
+use crate::config::{AttestationSection, Config, KeySource, NodeUrl, StrategySection, TlsPin, bounds};
 
 /// The shortest bar: the marks history the bot warms up from is in one-minute buckets.
 const MIN_BAR: Duration = Duration::from_secs(60);
@@ -25,24 +25,30 @@ const MAX_SLIPPAGE_BPS: i64 = 10_000;
 const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 impl Config {
-    /// Checks the values serde cannot: that some account is named, each account's strategies, the
-    /// request limits, the log filter, and that a plain hex key appears only in a dev build
-    /// (`dev_build`).
+    /// Checks the values serde cannot: what only a dev build (`dev_build`) takes, the release
+    /// manifests, that some account is named, each account's strategies, the request limits, the log
+    /// filter, the timeouts, and the metrics address.
     /// Error cases:
-    /// - no account, or a hex key file outside a dev build
+    /// - outside a dev build, a value only a dev build takes (see `refuse_dev_only`)
+    /// - an SEV-SNP attestation with no release manifest
+    /// - no account
     /// - a strategy that `validate_strategies` refuses
     /// - a limit of zero, or connections outside 1 to `MAX_CONNECTIONS`
     /// - a log level that is not a tracing filter directive, or a zero timeout
     /// - a chain section that fails its checks (see `validate_chain`)
     /// - a console refresh interval under a second
+    /// - a metrics address that is not a loopback one
     pub(super) fn validate(&self, dev_build: bool) -> anyhow::Result<()> {
+        if !dev_build {
+            self.refuse_dev_only()?;
+        }
+        if let AttestationSection::SevSnp { releases, .. } = &self.node.attestation {
+            ensure!(!releases.is_empty(), "node.attestation.releases: at least one release manifest");
+        }
         ensure!(!self.account.is_empty() || !self.account_dir.is_empty(), "no [[account]] or [[account_dir]]");
         check_limits(&self.sizing, &self.risk)?;
         for account in &self.account {
             check_limits(account.sizing.as_ref().unwrap_or(&self.sizing), account.risk.as_ref().unwrap_or(&self.risk))?;
-            if matches!(account.key, KeySource::HexFile { .. }) && !dev_build {
-                bail!("account.key: a plain hex key is accepted only in a dev build; use a keystore");
-            }
             validate_strategies(&account.strategy)?;
         }
         for dir in &self.account_dir {
@@ -68,7 +74,34 @@ impl Config {
         EnvFilter::try_new(&self.logging.level).map_err(|e| anyhow!("logging.level: {e}"))?;
         ensure!(!self.node.request_timeout.is_zero(), "node.request_timeout: above zero");
         ensure!(!self.node.stream_timeout.is_zero(), "node.stream_timeout: above zero");
+        if let Some(metrics) = &self.metrics {
+            ensure!(metrics.listen.ip().is_loopback(), "metrics.listen: a loopback address, not {}", metrics.listen);
+        }
         self.validate_chain(dev_build)
+    }
+
+    /// Refuses what only a dev build takes: a mock attestation or an extra root, which would let a
+    /// node no vendor chip vouches for name the signer; a pinned TLS key, which only a dev node's
+    /// self-signed certificate needs; and a plain hex key.
+    /// Error cases:
+    /// - any of those
+    fn refuse_dev_only(&self) -> anyhow::Result<()> {
+        match &self.node.attestation {
+            AttestationSection::Mock {} => {
+                bail!("node.attestation: a mock attestation proves nothing; only a dev build takes one")
+            }
+            AttestationSection::SevSnp { root: Some(_), .. } => {
+                bail!("node.attestation.root: a production build trusts only the vendor's roots")
+            }
+            AttestationSection::SevSnp { root: None, .. } => {}
+        }
+        if self.node.tls_key_sha256.is_some() {
+            bail!("node.tls_key_sha256: a production build takes only a node whose certificate a public CA signs");
+        }
+        if self.account.iter().any(|account| matches!(account.key, KeySource::HexFile { .. })) {
+            bail!("account.key: a plain hex key is accepted only in a dev build; use a keystore");
+        }
+        Ok(())
     }
 }
 

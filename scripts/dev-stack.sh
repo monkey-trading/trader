@@ -2,8 +2,9 @@
 # A local monkeytrading node for the bot: the engine commit Cargo.lock pins, fetched and built once
 # into a cache outside the repository, run on that commit's config/dev.toml (mock TEE, custody and
 # feeds) with every port moved to a free one, on private temporary data, and with the engine's
-# synthetic signed access source, which clears every client. Prints the API URL, the enclave signer
-# and the TLS key hash a bot config needs (see config/example.toml).
+# synthetic signed access source, which clears every client. Prints the [node] section a bot config
+# needs (see config/example.toml): the API URL, the TLS key hash, and the mock attestation a dev
+# build takes, which names the enclave signer.
 #
 # With --chain it also starts Anvil, deploys the vault and a mock USDC from the engine's contracts/ at
 # the same commit, and runs the node on that commit's config/anvil.toml (EVM custody, three local RPC
@@ -459,15 +460,16 @@ dev_stack_stop() {
   fi
 }
 
-# Prints the [node] section of a bot config for this node (its vault is the deployed one with --chain).
+# Prints the [node] section of a bot config for this node, which a dev build takes: its signer is
+# the one the node's mock attestation names (its vault is the deployed one with --chain).
 dev_stack_node_config() {
   cat <<CONFIG
 [node]
 url = "$dev_stack_api"
 chain_id = $dev_stack_chain_id
 vault = "$dev_stack_vault"
-signer = "$dev_stack_signer"
 tls_key_sha256 = "$dev_stack_pin"
+attestation = { type = "mock" }
 CONFIG
 }
 

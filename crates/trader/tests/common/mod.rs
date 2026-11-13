@@ -1,11 +1,17 @@
 //! A local stand-in for the node: its API over TLS with a self-signed certificate, signing every
-//! answer and stream frame as the node does (`engine_wire`), with the faults a test injects.
+//! answer and stream frame as the node does (`engine_wire`), with the faults a test injects. It
+//! serves a mock attestation of its signer and TLS key unless a test serves another.
 
 #![allow(dead_code, unused_imports)]
 
+mod attestation;
+pub use attestation::*;
 mod bot;
 pub mod console;
 mod controls;
+mod keys;
+pub use keys::Presented;
+mod log;
 mod messages;
 mod reads;
 pub use bot::*;
@@ -26,8 +32,7 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use engine_core::eip712::{self, B256};
-use engine_wire::{Connection, Deployment, FRAME_VERSION, SignedFrame, frame_digest, parse_challenge, response_digest};
-use futures_util::{SinkExt, StreamExt};
+use engine_wire::{Deployment, parse_challenge, response_digest};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use k256::ecdsa::SigningKey;
@@ -79,6 +84,9 @@ pub enum Fault {
 /// What the stand-in holds and has seen.
 #[derive(Default)]
 pub struct Inner {
+    /// What `/v1/attestation` and `/v1/attestation/collateral` serve; no collateral answers 404.
+    pub attestation: Value,
+    pub collateral: Option<Vec<u8>>,
     pub answers: Option<Answers>,
     /// A request path (or its end) whose answers another key signs, the rest staying the signer's.
     pub other_signer_path: Option<String>,
@@ -156,24 +164,25 @@ pub struct StandIn {
     other: SigningKey,
     pub addr: SocketAddr,
     pub pin: [u8; 32],
+    keys: Arc<keys::Keys>,
 }
 
 impl StandIn {
     /// Starts a stand-in on a free loopback port, answering signed.
     pub async fn start() -> Arc<Self> {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let pin: [u8; 32] = Sha256::digest(cert.signing_key.subject_public_key_info()).into();
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
-        let config = ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        let (keys, pin) = keys::Keys::new();
+        let mut config = ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_protocol_versions(&[&rustls::version::TLS13])
             .unwrap()
             .with_no_client_auth()
-            .with_single_cert(vec![CertificateDer::from(cert.cert.der().to_vec())], key)
-            .unwrap();
+            .with_cert_resolver(keys.clone());
+        config.session_storage = keys.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let signer = SigningKey::from_slice(&SIGNER_SECRET).unwrap();
         let stand_in = Arc::new(StandIn {
             inner: Mutex::new(Inner {
+                attestation: mock_attestation(eip712::address(signer.verifying_key()).0, pin),
                 answers: Some(Answers::Signed),
                 time_ms: 1_800_000_000_000,
                 settle: true,
@@ -181,12 +190,15 @@ impl StandIn {
                 ..Inner::default()
             }),
             appended: Notify::new(),
-            signer: SigningKey::from_slice(&SIGNER_SECRET).unwrap(),
+            signer,
             other: SigningKey::from_slice(&OTHER_SECRET).unwrap(),
             addr,
             pin,
+            keys,
         });
         let router = lifecycle::routes()
+            .route("/v1/attestation", get(attestation_route))
+            .route("/v1/attestation/collateral", get(collateral_route))
             .route("/v1/markets", get(markets))
             .route("/v1/markets/{id}/marks", get(marks))
             .route("/v1/accounts/{address}", get(reads::account_view))
@@ -196,7 +208,7 @@ impl StandIn {
             .route("/v1/orders", post(record))
             .route("/v1/orders/cancel-all", post(record))
             .route("/v1/positions/close-all", post(record))
-            .route("/v1/stream", get(stream))
+            .route("/v1/stream", get(log::stream))
             .layer(from_fn_with_state(stand_in.clone(), sign_answers))
             .layer(from_fn_with_state(stand_in.clone(), limit_ip))
             .with_state(stand_in.clone());
@@ -221,9 +233,19 @@ impl StandIn {
         stand_in
     }
 
+    /// Presents `presented` on every new connection from now on.
+    pub fn present(&self, presented: Presented) {
+        self.keys.present(presented);
+    }
+
     /// The enclave key's address.
     pub fn signer(&self) -> [u8; 20] {
         eip712::address(self.signer.verifying_key()).0
+    }
+
+    /// The other key's address, which signs what `Answers::OtherSigner` and `Fault::OtherSigner` do.
+    pub fn other_signer(&self) -> [u8; 20] {
+        eip712::address(self.other.verifying_key()).0
     }
 
     /// The deployment the stand-in signs for.
@@ -290,10 +312,10 @@ async fn limit_ip(State(s): State<Arc<StandIn>>, req: Request, next: Next) -> Re
     next.run(req).await
 }
 
-/// Signs each answer as the node does, or answers as `Inner::answers` says. The stream answers
-/// unsigned, as the node's upgrade does.
+/// Signs each answer as the node does, or answers as `Inner::answers` says. The stream and the
+/// attestation answer unsigned, as the node's do.
 async fn sign_answers(State(s): State<Arc<StandIn>>, req: Request, next: Next) -> Response {
-    if req.uri().path() == "/v1/stream" {
+    if ["/v1/stream", "/v1/attestation", "/v1/attestation/collateral"].contains(&req.uri().path()) {
         return next.run(req).await;
     }
     let challenge = req.headers().get("x-engine-challenge").and_then(|v| v.to_str().ok()).and_then(parse_challenge);
@@ -413,88 +435,4 @@ async fn record(State(s): State<Arc<StandIn>>, uri: Uri, body: Bytes) -> Respons
     }
     let status = StatusCode::from_u16(status.unwrap_or(200)).unwrap();
     (status, axum::Json(reply)).into_response()
-}
-
-/// The log over a signed stream connection, from `from` or after `after`, then whatever is
-/// appended, with each fault injected once.
-async fn stream(State(s): State<Arc<StandIn>>, uri: Uri, ws: WebSocketUpgrade) -> Response {
-    let target = uri.path_and_query().unwrap().to_string();
-    let query: BTreeMap<String, String> = uri
-        .query()
-        .unwrap_or_default()
-        .split('&')
-        .filter_map(|pair| pair.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
-        .collect();
-    let challenge = parse_challenge(&query["challenge"]).unwrap();
-    let start = match (query.get("from"), query.get("after")) {
-        (Some(seq), None) => (seq.parse::<u64>().unwrap(), 0),
-        (None, Some(after)) => {
-            let (seq, index) = after.split_once(':').unwrap();
-            (seq.parse().unwrap(), index.parse::<u32>().unwrap() + 1)
-        }
-        _ => panic!("a stream connection names from or after: {target}"),
-    };
-    let place = s.with(|i| {
-        i.connections.push(target.clone());
-        i.connections.len() - 1
-    });
-    ws.on_upgrade(move |socket| serve_log(s, socket, Connection::new(challenge, &target), start, place))
-}
-
-/// Sends the log's messages at or after `start` in signed frames, with the faults set for the
-/// connection at `place`, each frame followed by a ping naming its offset. The bot's client answers
-/// a ping when it next reads, which it does only once it has applied the frame before it.
-async fn serve_log(s: Arc<StandIn>, socket: WebSocket, connection: Connection, start: (u64, u32), place: usize) {
-    let (mut socket, mut replies) = socket.split();
-    let pongs = Arc::clone(&s);
-    tokio::spawn(async move {
-        while let Some(Ok(reply)) = replies.next().await {
-            let Message::Pong(payload) = reply else { continue };
-            let offset = std::str::from_utf8(&payload).ok().and_then(|text| {
-                let (seq, index) = text.split_once(':')?;
-                Some((seq.parse::<u64>().ok()?, index.parse::<u32>().ok()?))
-            });
-            pongs.with(|i| i.applied = i.applied.max(offset));
-        }
-    });
-    let (mut n, mut previous) = (0u64, [0u8; 32]);
-    let mut next = 0;
-    loop {
-        let appended = s.appended.notified();
-        let entry = s.with(|i| {
-            let pending: Vec<_> = i.log.iter().filter(|(offset, _)| *offset >= start).cloned().collect();
-            pending.get(next).cloned().map(|(offset, msg)| {
-                (offset, msg, i.faults.remove(&(place, offset)), i.frame_time.unwrap_or(i.time_ms))
-            })
-        });
-        let Some((offset, msg, fault, time)) = entry else {
-            appended.await;
-            continue;
-        };
-        next += 1;
-        let (msg, other) = match fault {
-            Some(Fault::Skip) => continue,
-            Some(Fault::Silence) => return std::future::pending().await,
-            Some(Fault::OutOfSequence) => {
-                n += 1;
-                (msg, Some(false))
-            }
-            Some(Fault::BadSignature) => (msg, None),
-            Some(Fault::OtherSigner) => (msg, Some(true)),
-            None => (msg, Some(false)),
-        };
-        let digest = frame_digest(&s.deployment(), &connection, &previous, n, time, &msg);
-        let sig = match other {
-            Some(other) => s.sign(digest, other),
-            None => s.sign(frame_digest(&s.deployment(), &connection, &previous, n, time, "altered"), false),
-        };
-        let frame = SignedFrame { v: FRAME_VERSION, n, time, msg, sig };
-        (n, previous) = (n + 1, digest);
-        if socket.send(Message::Text(serde_json::to_string(&frame).unwrap().into())).await.is_err() {
-            return;
-        }
-        if socket.send(Message::Ping(format!("{}:{}", offset.0, offset.1).into())).await.is_err() {
-            return;
-        }
-    }
 }

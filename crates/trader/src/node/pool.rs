@@ -14,7 +14,7 @@ use hyper_util::rt::TokioIo;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
 
-use crate::node::Tls;
+use crate::node::{KeyMismatch, Tls, is_mismatch};
 
 /// The longest a connection made in the background may take; a request's own time is the config's
 /// `request_timeout`.
@@ -42,6 +42,9 @@ pub struct Pool {
     reads: Arc<Semaphore>,
     /// Whether a connection is being made for the idle set.
     filling: AtomicBool,
+    /// Whether one made for the idle set completed a handshake with another key than the attested
+    /// one. Every request then fails as such a connection does, so the bot halts at its next call.
+    other_key: AtomicBool,
 }
 
 /// The room for one request in the pool: a permit, and for a read one of the read slots too.
@@ -76,6 +79,7 @@ impl Pool {
             permits: Arc::new(Semaphore::new(limit)),
             reads: Arc::new(Semaphore::new(limit.saturating_sub(1).max(1))),
             filling: AtomicBool::new(false),
+            other_key: AtomicBool::new(false),
         })
     }
 
@@ -105,6 +109,8 @@ impl Pool {
     /// replaced, once, when the request never left, unless the caller's own was ready.
     /// Error cases:
     /// - the connection or the exchange fails, or the body is over `MAX_ANSWER_BYTES`
+    /// - a connection, this one or one made in the background, completed a handshake with another
+    ///   key than the attested one: `KeyMismatch`
     pub async fn exchange(
         &self,
         slot: Option<Slot>,
@@ -115,6 +121,9 @@ impl Pool {
         challenge: &[u8; 32],
     ) -> anyhow::Result<Answer> {
         let _slot = slot;
+        if self.other_key.load(Ordering::Acquire) {
+            return Err(KeyMismatch.into());
+        }
         let mut given = checkout.as_mut().and_then(|c| c.sender.take());
         let mut reused = given.is_none();
         loop {
@@ -176,8 +185,10 @@ impl Pool {
         let pool = Arc::clone(self);
         tokio::spawn(async move {
             let _conn = conn;
-            if let Ok(Ok(sender)) = timeout(CONNECT_TIMEOUT, pool.connect()).await {
-                pool.give_back(sender);
+            match timeout(CONNECT_TIMEOUT, pool.connect()).await {
+                Ok(Ok(sender)) => pool.give_back(sender),
+                Ok(Err(e)) if is_mismatch(&e) => pool.other_key.store(true, Ordering::Release),
+                _ => {}
             }
             pool.filling.store(false, Ordering::Release);
         });

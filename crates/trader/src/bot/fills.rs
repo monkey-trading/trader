@@ -6,13 +6,13 @@ use engine_core::Fixed;
 use engine_core::command::Command;
 use engine_core::eip712::Signature;
 use engine_core::event::Event;
-use engine_core::types::AccountId;
+use engine_core::types::{AccountId, MarketId};
 use serde_json::value::RawValue;
 use tracing::{error, info};
 
 use crate::bot::Halt;
 use crate::bot::fleet::Fleet;
-use crate::stream::message::{CommandMessage, EventHead, FillRef, OrderRef};
+use crate::stream::message::{CommandMessage, EventHead, FillRef, OrderRef, for_each_event};
 
 /// The events that move an account's cash without a fill, each naming the account.
 const CASH_EVENTS: [&str; 8] = [
@@ -112,6 +112,12 @@ impl Fleet {
             }
             return Ok(());
         }
+        if head.kind == "order_rejected" {
+            if let Some(account) = head.account.and_then(|address| self.account_of(address)) {
+                self.count_rejection(account, message, event)?;
+            }
+            return Ok(());
+        }
         if head.kind != "fill" {
             // An event of a kind the pinned engine does not write is a log the bot cannot follow: the
             // engine's own reading of it refuses it. Known kinds are skipped without being read.
@@ -128,6 +134,9 @@ impl Fleet {
         let position: Fixed =
             fill.position.parse().map_err(|e| Halt::Unfollowable(anyhow!("a fill's position: {e}")))?;
         if let Some(a) = self.assignment_of(account, fill.market) {
+            if let Some(series) = self.metrics.markets.get(a as usize) {
+                series.fills.inc();
+            }
             let before = std::mem::replace(&mut self.assignments[a as usize].position, position);
             self.accounts[account as usize].controls.on_fill(message.ts, fill.market, before, position);
             // The entry price the engine keeps is read again with the balance, which a fill moves.
@@ -201,6 +210,40 @@ impl Fleet {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Counts the engine's rejections in `message` of requests this process signed, as `apply_event`
+    /// does, for a message the stop reads past without following it: the answer to an order out at
+    /// the stop leaves its rejection to the log. An event that cannot be read counts nothing.
+    pub(super) fn count_rejections(&self, message: &CommandMessage<'_>) {
+        let Some(events) = message.events else { return };
+        let _ = for_each_event(events, |event| {
+            let head: EventHead<'_> = serde_json::from_str(event.get())?;
+            if let ("order_rejected", Some(account)) = (head.kind, head.account.and_then(|a| self.account_of(a))) {
+                // An unreadable event counts nothing; the stop reads on.
+                let _ = self.count_rejection(account, message, event);
+            }
+            Ok(())
+        });
+    }
+
+    /// Counts the engine's rejection `event` of a request this process signed for `account` as declined
+    /// in the market it names: the log gives it whether the answer to the request came or not.
+    /// Error cases:
+    /// - an event that is not the shape the pinned engine writes
+    fn count_rejection(&self, account: u32, message: &CommandMessage<'_>, event: &RawValue) -> Result<(), Halt> {
+        if !self.signed_here(account, message) {
+            return Ok(());
+        }
+        let markets: Vec<MarketId> = match message.command() {
+            Ok(Command::PlaceOrder(request) | Command::AccessOrder { request, .. }) => vec![request.market],
+            Ok(Command::AccessCloseAll { request, .. }) => request.closes.iter().map(|close| close.market).collect(),
+            _ => return Ok(()),
+        };
+        let event: Event =
+            serde_json::from_str(event.get()).map_err(|e| Halt::Unfollowable(anyhow!(e).context("an event")))?;
+        self.order_series(self.accounts[account as usize].assignments.clone()).rejected(&markets, &[event]);
+        Ok(())
     }
 
     /// Whether the command of `message` is an order of `account` whose signature this process made.

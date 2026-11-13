@@ -50,15 +50,17 @@ ask us before you do it.
 
 The policy covers the code in this repository and what is built from it: `trader-core`, the
 strategy logic; `trader`, the binary, which talks to a monkeytrading node, signs for its keys, and
-serves the console and its API over HTTPS behind a login; and the console in `console/`, a web app
-the binary embeds. The CI workflows and scripts in the repository are in scope too, as they guard
-what merges.
+serves the console and its API over HTTPS behind a login; the console in `console/`, a web app the
+binary embeds; and the image the `Dockerfile` builds and the release workflow publishes. The CI
+workflows and scripts in the repository are in scope too, as they guard what merges and what is
+released.
 
 The findings that matter most let someone obtain or use a key the bot holds, make the bot sign an
 order its operator did not configure, make the bot act on an answer from the node that fails its
-signature check, move funds away from an account's own key through the console, read a key or the
-login password through it, act through the console from another site's page, or reach the console
-without the operator's login.
+signature check, make a production build trust a signer that no attestation verified against the
+operator's release manifests names, move funds away from an account's own key through the console,
+read a key or the login password through it, act through the console from another site's page, or
+reach the console without the operator's login.
 
 The engine, its node, and its contracts have their own policy in the
 [engine repository](https://github.com/monkey-trading/engine/blob/main/SECURITY.md); report a

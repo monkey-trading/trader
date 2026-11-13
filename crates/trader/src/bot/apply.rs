@@ -1,15 +1,20 @@
 //! Applying one message of the log to the fleet: a `Prices` command for a market the fleet trades
 //! stores its quotes, a new listing of such a market changes its rules and hours, the accounts'
-//! fills move their positions, and the command's time may complete bars.
+//! fills move their positions, and the command's time may complete bars. An account that can trade no
+//! further fails, and is left as it is.
+
+use std::sync::atomic::Ordering;
+use std::time::SystemTime;
 
 use engine_core::command::{AdminCommand, Command};
 use engine_core::event::Event;
 use engine_core::types::Millis;
 use serde_json::value::RawValue;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::bot::fleet::{Fleet, Warm};
 use crate::bot::{Halt, bar_fits, supported};
+use crate::metrics::{FleetMetrics, Metrics, OrderSeries, lag_seconds};
 use crate::stream::message::{CommandMessage, Envelope, Offset, for_each_event, store_prices};
 
 /// How much sequenced time passes between checks of which accounts are due a read.
@@ -36,6 +41,7 @@ impl Fleet {
         }
         let message = envelope.command().map_err(unreadable)?;
         self.log_ts = message.ts;
+        self.metrics.stream_lag.set(lag_seconds(SystemTime::now(), message.ts));
         let command = message.head().map_err(unreadable)?;
         // Every command brings each book to its time before it acts: a closure between two commands
         // drops the quotes from before it.
@@ -179,5 +185,43 @@ impl Fleet {
             (None, Err(e)) => Err(EventsError::Unreadable(e)),
             (None, Ok(())) => Ok(()),
         }
+    }
+}
+
+impl Fleet {
+    /// The order series of the assignments in `range`, one account's, by market.
+    pub fn order_series(&self, range: std::ops::Range<u32>) -> OrderSeries {
+        let series = |a: u32| self.metrics.markets.get(a as usize).cloned().unwrap_or_default();
+        OrderSeries(range.map(|a| (self.assignments[a as usize].market, series(a))).collect())
+    }
+
+    /// Stops `account` from trading, leaving it as it is, and says why.
+    pub fn fail(&mut self, account: u32, reason: String) {
+        let entry = &mut self.accounts[account as usize];
+        if entry.failed.is_none() {
+            error!(alert = "account_failed", account = %entry.address, "{reason}; the account is left as it is");
+            entry.failed = Some(reason);
+            entry.halt.store(true, Ordering::Relaxed);
+            self.failed += 1;
+            self.metrics.account_failed(account);
+        }
+        for a in entry.assignments.clone() {
+            let asg = &mut self.assignments[a as usize];
+            (asg.wanted, asg.pending) = (None, None);
+        }
+        self.mark_changed(account);
+    }
+
+    /// Records the fleet's orders, fills, equity and lag in `metrics` from now on.
+    pub fn register_metrics(&mut self, metrics: &Metrics) {
+        let markets = self.assignments.iter().map(|asg| {
+            let symbol = &self.markets[asg.market_slot as usize].spec.symbol;
+            metrics.market(self.accounts[asg.account as usize].address, symbol)
+        });
+        self.metrics = FleetMetrics {
+            markets: markets.collect(),
+            accounts: self.accounts.iter().map(|account| metrics.account(account.address)).collect(),
+            stream_lag: metrics.stream_lag(),
+        };
     }
 }

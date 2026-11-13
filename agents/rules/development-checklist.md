@@ -106,7 +106,7 @@ effects, anything the bot keeps between restarts.
   from a kill or restart without an operator when the state it finds is consistent?
 - Does a restart or a dropped connection resume the stream from the last verified offset, with no
   gap and no replayed fill counted twice, and does a node that signs with a different key than the
-  configured signer stop the bot rather than trade?
+  signer its attestation named stop the bot rather than trade?
 - When the state it finds is inconsistent — persisted data that contradicts itself, the node, or
   the chain — does it raise a Critical alert and stop that account without changing anything, or
   fail closed where continuing could trade on a wrong position, for the user to repair? It never

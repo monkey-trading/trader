@@ -37,6 +37,7 @@ use crate::bot::link::ConsoleEnd;
 use crate::config::Config;
 use crate::console::{Console, Funding, Prepared};
 use crate::keys::AccountKey;
+use crate::metrics::Metrics;
 use crate::node::CallError;
 
 pub use run::Runner;
@@ -45,9 +46,9 @@ pub use warm::WarmRequest;
 /// Why the bot stopped on its own.
 #[derive(Debug, thiserror::Error)]
 pub enum Halt {
-    /// An answer or frame from the node is not the configured signer's: nothing it says is trusted,
+    /// An answer or frame from the node is not the attested signer's: nothing it says is trusted,
     /// and nothing more is sent to it.
-    #[error("the node's answers are not signed by the configured signer")]
+    #[error("the node's answers are not signed by the attested signer")]
     WrongSigner,
     /// The log holds what the bot cannot follow; it stops before acting on a view it cannot confirm.
     #[error("{0:#}")]
@@ -74,7 +75,8 @@ pub async fn addresses(cfg: &Config, env: impl Fn(&str) -> Option<String>) -> an
 
 /// Runs the bot until `stop` completes, then cancels each account's resting orders and, when
 /// configured, closes its positions; or until it halts on its own, leaving the accounts as they are.
-/// It returns an error when any account could not start or stopped trading, so a supervisor sees it.
+/// It records what it does in `metrics`, and returns an error when any account could not start or
+/// stopped trading, so a supervisor sees it.
 /// Error cases:
 /// - no key or startup read works (see `startup::start`)
 /// - the bot halts (see `Halt`)
@@ -84,8 +86,9 @@ pub async fn run(
     cfg: Config,
     env: impl Fn(&str) -> Option<String> + Sync,
     stop: impl Future<Output = ()>,
+    metrics: &Metrics,
 ) -> anyhow::Result<()> {
-    run_with_console(cfg, env, stop, None).await
+    run_with_console(cfg, env, stop, None, metrics).await
 }
 
 /// Runs the bot as `run` does, with its console when `console` holds one prepared from the config's
@@ -99,11 +102,12 @@ pub async fn run_with_console(
     env: impl Fn(&str) -> Option<String> + Sync,
     stop: impl Future<Output = ()>,
     console: Option<Prepared>,
+    metrics: &Metrics,
 ) -> anyhow::Result<()> {
     let console = console.zip(cfg.console.as_ref());
     let data_dir = console.as_ref().map(|(_, section)| section.data_dir.as_path());
     let fundable = console.is_some() && cfg.chain.is_some();
-    let started = match startup::start(&cfg, &env, data_dir, fundable).await {
+    let started = match startup::start(&cfg, &env, data_dir, fundable, metrics).await {
         Ok(started) => started,
         Err(e) => {
             if let Some(CallError::WrongSigner { .. }) = e.downcast_ref::<CallError>() {

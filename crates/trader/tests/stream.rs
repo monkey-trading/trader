@@ -6,7 +6,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{Fault, StandIn};
+use common::{Fault, Presented, StandIn};
 use serde_json::json;
 use tokio::time::timeout;
 use trader::config::{NodeUrl, TlsPin};
@@ -100,6 +100,40 @@ async fn a_message_with_no_offset_stops_the_stream() {
     let err = timeout(Duration::from_secs(10), stream.next()).await.unwrap().unwrap_err();
     assert!(err.to_string().contains("something_new stream message with no offset"), "{err}");
     assert_eq!(stand_in.with(|i| i.connections.len()), 1);
+}
+
+/// A node that presents another TLS key than the attested one when the stream reconnects is not the
+/// attested enclave: the stream stops as on a frame another key signed, and does not retry.
+#[tokio::test]
+async fn another_tls_key_on_reconnection_stops_the_stream() {
+    let stand_in = StandIn::start().await;
+    stand_in.append((1, 0), tick(1));
+    stand_in.append((2, 0), tick(2));
+    stand_in.with(|i| i.faults.insert((0, (2, 0)), Fault::Silence));
+    let mut stream = stream(&stand_in, 1, Duration::from_secs(1));
+    assert_eq!(next(&mut stream).await, (1, 0));
+    stand_in.present(Presented::Other);
+    let stopped = timeout(Duration::from_secs(10), stream.next()).await.expect("the stream stops at once");
+    assert!(matches!(stopped, Err(StreamError::WrongSigner)), "{stopped:?}");
+    assert_eq!(stand_in.with(|i| i.connections.len()), 1, "the other key's connection opens no stream");
+}
+
+/// Another key's certificate from a server that cannot sign with that key proves nothing, as a
+/// party between the bot and the node could replay one: the stream retries as through any outage,
+/// and reads on once the node is reached again.
+#[tokio::test]
+async fn a_replayed_certificate_is_an_outage_not_a_halt() {
+    let stand_in = StandIn::start().await;
+    stand_in.append((1, 0), tick(1));
+    stand_in.append((2, 0), tick(2));
+    stand_in.with(|i| i.faults.insert((0, (2, 0)), Fault::Silence));
+    let mut stream = stream(&stand_in, 1, Duration::from_secs(1));
+    assert_eq!(next(&mut stream).await, (1, 0));
+    stand_in.present(Presented::Replayed);
+    let waited = timeout(Duration::from_secs(4), stream.next()).await;
+    assert!(waited.is_err(), "the stream neither stops nor reads through the replayed certificate: {waited:?}");
+    stand_in.present(Presented::Attested);
+    assert_eq!(next(&mut stream).await, (2, 0));
 }
 
 // ── Helpers ──

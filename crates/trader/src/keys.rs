@@ -12,6 +12,7 @@ use k256::ecdsa::SigningKey;
 use tokio::task::spawn_blocking;
 use zeroize::Zeroizing;
 
+use crate::PRODUCTION_BUILD;
 use crate::config::{KeySource, PasswordSource};
 
 /// The accounts whose private keys this repository publishes, for its dev scenario and its tests.
@@ -55,7 +56,7 @@ impl AccountKey {
     /// - the key file or password cannot be read, or the password variable is unset
     /// - the keystore does not decrypt with the password
     /// - the bytes are not a valid secp256k1 secret key
-    /// - outside a dev build, the key is one this repository publishes
+    /// - in a production build, the key is one this repository publishes
     pub async fn load(source: &KeySource, env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
         let secret: Zeroizing<Vec<u8>> = match source {
             KeySource::Keystore { path, password } => {
@@ -71,9 +72,9 @@ impl AccountKey {
             }
             KeySource::HexFile { path } => Zeroizing::new(read_hex_key(path)?.to_vec()),
         };
-        refuse_guessable(&secret, cfg!(debug_assertions))?;
+        refuse_guessable(&secret, !PRODUCTION_BUILD)?;
         let key = Self::from_secret(&secret)?;
-        refuse_published(key.address, cfg!(debug_assertions))?;
+        refuse_published(key.address, !PRODUCTION_BUILD)?;
         Ok(key)
     }
 

@@ -6,6 +6,13 @@ license.workspace = true
 repository.workspace = true
 description = "The monkeytrading bot: runs strategies against the engine's node and serves its console"
 
+[features]
+# Refuses a mock attestation, an extra attestation root, a plain hex key, a node pinned by its TLS
+# key rather than a public certificate, and a plain-HTTP chain endpoint, at config load; and a key
+# this repository publishes or anyone can guess, when it is unlocked.
+# Release binaries and images build with it.
+production = []
+
 [dependencies]
 alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }
@@ -20,6 +27,7 @@ axum = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
 engine-core = { workspace = true }
+engine-verify = { workspace = true }
 engine-wire = { workspace = true }
 eth-keystore = { workspace = true }
 futures-util = { workspace = true }
@@ -29,6 +37,7 @@ humantime-serde = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 k256 = { workspace = true }
+prometheus-client = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
 rcgen = { workspace = true }
@@ -50,6 +59,8 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 allocation-counter = { workspace = true }
+# The stand-in vendor chain and forged reports the attestation tests verify.
+engine-verify = { workspace = true, features = ["test-fixtures"] }
 tempfile = { workspace = true }
 # Paused time, for the console's sessions and login limit.
 tokio = { workspace = true, features = ["test-util"] }

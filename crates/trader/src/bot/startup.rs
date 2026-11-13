@@ -1,5 +1,6 @@
-//! What the bot reads before it follows the log: the markets, each account's balance and
-//! positions, each a verified answer; the keys it unlocks; and the stop signals it listens for.
+//! What the bot reads before it follows the log: the node's attestation, then the markets, each
+//! account's balance and positions, each a verified answer; the keys it unlocks; and the stop
+//! signals it listens for.
 //! An account that cannot start is reported and left out; the others carry on.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,8 +25,10 @@ use crate::bot::link::{self, Kept, Saved as ConsoleSaved, StartFailure};
 use crate::bot::{bar_fits, supported};
 use crate::config::{AccountPlan, Config, KeySource};
 use crate::keys::AccountKey;
+use crate::metrics::Metrics;
 use crate::node::api::AccountView;
-use crate::node::{CallError, Node, Tls, Verified};
+use crate::node::attestation::attest_node;
+use crate::node::{CallError, Node, Verified};
 use crate::stream::Stream;
 
 /// How many times an account is read at startup before it is left out, and the wait between tries.
@@ -64,8 +67,11 @@ pub(super) struct Started {
     pub idle: Vec<(usize, Arc<AccountKey>)>,
 }
 
-/// The fleet for `cfg`'s accounts, and the log from the seq after the head before the reads.
+/// The fleet for `cfg`'s accounts, recording into `metrics`, and the log from the seq after the head
+/// before the reads, from the node whose attestation verified.
 /// Error cases:
+/// - the system clock is before 1970
+/// - the node's attestation does not verify (see `attest`)
 /// - the node cannot be reached, or an answer does not verify
 /// - no account can start, and none is left for the console to fund (`fundable`)
 pub(super) async fn start(
@@ -73,12 +79,18 @@ pub(super) async fn start(
     env: &(dyn Fn(&str) -> Option<String> + Sync),
     data_dir: Option<&Path>,
     fundable: bool,
+    metrics: &Metrics,
 ) -> anyhow::Result<Started> {
     let node_cfg = &cfg.node;
-    let tls = Tls::new(node_cfg.url.clone(), node_cfg.tls_key_sha256)?;
+    let attested = attest_node(node_cfg).await?;
     let deployment = Deployment { chain_id: node_cfg.chain_id, vault: node_cfg.vault.0 };
-    let node =
-        Arc::new(Node::new(tls.clone(), node_cfg.signer.0, deployment, node_cfg.request_timeout, &node_cfg.limits));
+    let node = Arc::new(Node::new(
+        attested.tls.clone(),
+        attested.signer,
+        deployment,
+        node_cfg.request_timeout,
+        &node_cfg.limits,
+    ));
     let mut failed: Vec<StartFailure> = Vec::new();
 
     let mut unlocked: Vec<(usize, &AccountPlan, AccountKey)> = Vec::new();
@@ -213,9 +225,10 @@ pub(super) async fn start(
     let trading_from =
         Millis::try_from(read_at).context("node time")?.saturating_add(EXPIRES_IN_MS).saturating_add(lead);
     info!(accounts = accounts.len(), failed = failed.len(), markets = markets.len(), "started");
-    let fleet = Fleet::new(&markets, accounts, trading_from)?;
+    let mut fleet = Fleet::new(&markets, accounts, trading_from)?;
+    fleet.register_metrics(metrics);
     let domain = eip712::domain(node_cfg.chain_id, node_cfg.vault);
-    let stream = Stream::new(tls, node_cfg.signer.0, deployment, node_cfg.stream_timeout, head_seq + 1);
+    let stream = Stream::new(attested.tls, attested.signer, deployment, node_cfg.stream_timeout, head_seq + 1);
     Ok(Started { fleet, node, stream, domain, failed, kept, idle })
 }
 
