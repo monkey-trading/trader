@@ -11,7 +11,7 @@ use engine_core::types::Millis;
 use tracing::{debug, info, warn};
 use trader_core::bars::Bar;
 use trader_core::controls::{Account as Controlled, BarTarget, Decision, Refusal};
-use trader_core::margin::Holding;
+use trader_core::margin::{Holding, equity_and_margin};
 use trader_core::risk::DayStatus;
 use trader_core::strategies::is_valid_close;
 use trader_core::strategy::Target;
@@ -57,6 +57,17 @@ fn filled<'f>(buf: &[Option<Holding<'f>>; MAX_HOLDINGS]) -> Option<[Holding<'f>;
 }
 
 impl Fleet {
+    /// `account`'s equity at the markets' marks as the fleet has them, when each holding can be
+    /// valued.
+    pub fn equity_of(&self, account: u32) -> Option<Fixed> {
+        let acc = &self.accounts[account as usize];
+        let mut buf = [None; MAX_HOLDINGS];
+        let n = holdings_of(&self.assignments, acc.assignments.clone(), &self.markets, &mut buf)?;
+        let held = filled(&buf);
+        let holdings: &[Holding<'_>] = held.as_ref().map_or(&[], |held| &held[..n]);
+        equity_and_margin(acc.balance, holdings).map(|(equity, _)| equity)
+    }
+
     /// Hands a completed bar to the strategies that read it, and each account that trades on them.
     /// A bar the stream is replaying from history places no order: `lag` is past `REPLAY_LAG_MS`.
     pub(super) fn bar_closed(&mut self, series: u32, bar: Bar, ts: Millis, lag: Millis) {
@@ -68,12 +79,18 @@ impl Fleet {
             warn!(market = feed.id, start = bar.start, close = %bar.close, "the bar's close is not a mark the strategies take: no data");
         }
         for shared in &mut state.strategies {
+            let was = shared.target;
             shared.target = if valid { shared.strategy.on_close(bar.close) } else { None };
+            shared.changed = shared.target != was;
             debug!(market = feed.id, start = bar.start, close = %bar.close, target = ?shared.target, gap, lag, "bar");
         }
         for k in 0..state.assignments.len() {
             let a = self.series[series as usize].assignments[k];
-            let target = self.series[series as usize].strategies[self.assignments[a as usize].strategy as usize].target;
+            let strategy = self.assignments[a as usize].strategy as usize;
+            let target = self.series[series as usize].strategies[strategy].target;
+            if self.series[series as usize].strategies[strategy].changed {
+                self.mark_changed(self.assignments[a as usize].account);
+            }
             if let Some(target) = target {
                 self.want(a, Wanted { target, bar_start: bar.start, ts, lag, gap });
             }
@@ -90,6 +107,11 @@ impl Fleet {
             (Target::Long, 1) | (Target::Short, -1) | (Target::Flat, 0)
         );
         let account = asg.account;
+        // A strategy the console stopped keeps its target, and places no order.
+        if !asg.running || !self.accounts[account as usize].running {
+            asg.pending = None;
+            return;
+        }
         // A newer bar's target replaces an order queued for an older one, whether it asks for a move or not.
         if at_target {
             asg.pending = None;
@@ -143,6 +165,9 @@ impl Fleet {
         entry.behind = false;
         entry.read_after = log_ts.saturating_add(READ_EVERY_MS);
         entry.balance = view.balance;
+        if entry.controls.is_stopped() {
+            self.mark_changed(account);
+        }
         for a in range {
             let asg = &mut self.assignments[a as usize];
             asg.entry = view.positions.get(&asg.market).map_or(Fixed::ZERO, |p| p.entry);
@@ -331,6 +356,7 @@ impl Fleet {
         let Some(status) = acc.controls.observe(ts, &Controlled { balance: acc.balance, holdings }) else {
             return;
         };
+        let stop_shown = acc.loss_alert;
         match status {
             DayStatus::Stopped { newly } => {
                 if newly || !acc.loss_alert {
@@ -349,6 +375,10 @@ impl Fleet {
                 info!(alert_resolved = "daily_loss_limit", account = %acc.address, "a new UTC day: trading again");
             }
             DayStatus::Trading => {}
+        }
+        // The console's status shows the day's stop and what the day has lost while it holds.
+        if self.accounts[account as usize].loss_alert != stop_shown || self.accounts[account as usize].loss_alert {
+            self.mark_changed(account);
         }
         self.touch_state(account);
     }

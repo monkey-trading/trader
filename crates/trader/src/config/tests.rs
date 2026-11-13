@@ -33,6 +33,15 @@ fn the_example_loads() {
     };
     assert_eq!(path, &Path::new(EXAMPLE).parent().unwrap().join("keys/account.json"));
     assert_eq!(name, "TRADER_KEY_PASSWORD");
+    assert_eq!(
+        strategy.bounds,
+        Some(serde_json::from_value(serde_json::json!({ "fast": [2, 20], "slow": [10, 100] })).unwrap())
+    );
+    let console = cfg.console.unwrap();
+    assert_eq!(console.bind, "0.0.0.0:8443".parse().unwrap());
+    assert_eq!(console.data_dir, Path::new(EXAMPLE).parent().unwrap().join("data"));
+    assert_eq!(console.refresh_interval, Duration::from_secs(5));
+    assert!(console.tls.is_none());
     let chain = cfg.chain.as_ref().expect("the example names a chain");
     assert_eq!((chain.rpc.len(), chain.settle_timeout), (1, Duration::from_secs(1800)));
     assert!(cfg.funding.is_none() && cfg.claims.is_none());
@@ -105,6 +114,61 @@ fn chain_values_are_checked_and_urls_never_printed() {
     assert_eq!(fee.chain.unwrap().max_fee_gwei, Gwei(1));
 }
 
+/// Without a `[console]` section the bot serves none; an empty one listens on every interface on
+/// port 8443, keeping its data beside the config.
+#[test]
+fn the_console_defaults_to_every_interface() {
+    let without = example().split("\n# The console:").next().unwrap().to_owned();
+    assert!(parse(&without).unwrap().console.is_none());
+    let cfg = parse(&format!("{without}\n[console]\n")).unwrap();
+    let console = cfg.console.unwrap();
+    assert_eq!(console.bind, DEFAULT_CONSOLE_BIND);
+    assert_eq!(console.bind.to_string(), "0.0.0.0:8443");
+    assert_eq!((console.data_dir.as_path(), console.refresh_interval), (Path::new("data"), DEFAULT_REFRESH_INTERVAL));
+}
+
+/// The console's values and the parameter bounds are checked: each range low to high, naming a
+/// parameter of the strategy and admitting the value set, and reads of the node at most once a second.
+#[test]
+fn console_values_are_checked() {
+    for (from, to) in [
+        ("fast = [2, 20]", "fast = [6, 4]"),
+        ("fast = [2, 20]", "fast = [6, 20]"),
+        ("slow = [10, 100]", "slow = [21, 100]"),
+        ("slow = [10, 100]", "slow = [10, 19]"),
+        ("slow = [10, 100]", "slow = [\"10\", \"100\"]"),
+        ("slow = [10, 100]", "period = [10, 100]"),
+        ("refresh_interval = \"5s\"", "refresh_interval = \"999ms\""),
+        ("bind = \"0.0.0.0:8443\"", "bind = \"8443\""),
+    ] {
+        assert!(parse(&example().replacen(from, to, 1)).is_err(), "{to} was accepted");
+    }
+    for (from, to) in [
+        ("fast = [2, 20]", "fast = [5, 5]"),
+        ("slow = [10, 100]", "slow = [20, 20]"),
+        ("refresh_interval = \"5s\"", "refresh_interval = \"1s\""),
+        ("bind = \"0.0.0.0:8443\"", "bind = \"[::]:9443\""),
+    ] {
+        parse(&example().replacen(from, to, 1)).unwrap_or_else(|e| panic!("{to}: {e:#}"));
+    }
+}
+
+/// The console's data directory and named certificate resolve against the config's directory.
+#[test]
+fn console_paths_resolve_against_the_config() {
+    let text =
+        example().replace("# tls = {", "tls = {").replace("data_dir = \"data\"", "data_dir = \"/var/lib/trader\"");
+    let mut cfg: Config = toml::from_str(&text).unwrap();
+    cfg.resolve_paths(Path::new("/etc/trader"));
+    let console = cfg.console.unwrap();
+    assert_eq!(console.data_dir, Path::new("/var/lib/trader"));
+    let tls = console.tls.unwrap();
+    assert_eq!(
+        (tls.cert.as_path(), tls.key.as_path()),
+        (Path::new("/etc/trader/console.crt"), Path::new("/etc/trader/console.key"))
+    );
+}
+
 /// An unknown key is refused in every section, the key and password tables included.
 #[test]
 fn unknown_keys_are_refused() {
@@ -119,6 +183,8 @@ fn unknown_keys_are_refused() {
         ("\n[risk]\n", "\n[risk]\nbogus = 1\n"),
         ("\n[logging]\n", "\n[logging]\nbogus = 1\n"),
         ("\n[chain]\n", "\n[chain]\nbogus = 1\n"),
+        ("\n[console]\n", "\n[console]\nbogus = 1\n"),
+        ("# tls = { cert = \"console.crt\", key = \"console.key\" }", "tls = { cert = \"a\", key = \"b\", bogus = 1 }"),
         ("\n[logging]\n", "\n[bogus]\n[logging]\n"),
         ("path = \"keys/account.json\", password", "path = \"keys/account.json\", bogus = 1, password"),
         ("{ env = \"TRADER_KEY_PASSWORD\" }", "{ env = \"TRADER_KEY_PASSWORD\", bogus = 1 }"),
@@ -227,6 +293,9 @@ fn strategy_values_are_checked() {
     }
 }
 
+/// The example's strategy, its bounds included.
+const SMA: &str = "bounds = { fast = [2, 20], slow = [10, 100] }\nkind = \"sma_crossover\"\nfast = 5\nslow = 20";
+
 /// The strategy kinds the example's comment lists each load with their own parameters, and a key one kind
 /// does not take is refused.
 #[test]
@@ -235,22 +304,18 @@ fn every_strategy_kind_loads() {
         "kind = \"ema_crossover\"\nfast = 3\nslow = 9",
         "kind = \"macd\"",
         "kind = \"rsi_reversion\"\nperiod = 7\noversold = 25",
-        "kind = \"bollinger_reversion\"\nwidth = \"1.5\"",
+        "bounds = { width = [\"1\", \"3\"] }\nkind = \"bollinger_reversion\"\nwidth = \"1.5\"",
         "kind = \"donchian_breakout\"\nentry = 30",
     ];
     for kind in kinds {
-        let text = example().replacen("kind = \"sma_crossover\"\nfast = 5\nslow = 20", kind, 1);
+        let text = example().replacen(SMA, kind, 1);
         parse(&text).unwrap_or_else(|e| panic!("{kind}: {e:#}"));
     }
     let typo = example().replacen("fast = 5", "fasst = 5", 1);
     assert!(parse(&typo).is_err(), "a key the strategy does not take was accepted");
-    let other = example().replacen("kind = \"sma_crossover\"\nfast = 5\nslow = 20", "kind = \"macd\"\nfast = 5", 1);
+    let other = example().replacen(SMA, "kind = \"macd\"\nfast = 5", 1);
     assert!(parse(&other).is_ok());
-    let wrong = example().replacen(
-        "kind = \"sma_crossover\"\nfast = 5\nslow = 20",
-        "kind = \"donchian_breakout\"\nfast = 5",
-        1,
-    );
+    let wrong = example().replacen(SMA, "kind = \"donchian_breakout\"\nfast = 5", 1);
     assert!(parse(&wrong).is_err(), "a key another kind takes was accepted");
 }
 

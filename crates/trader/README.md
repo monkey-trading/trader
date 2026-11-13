@@ -4,8 +4,8 @@
 
 The monkeytrading bot's binary. `trader run --config <file>` trades one or many accounts, each its
 own funded key with its own markets and a strategy in each, against a monkeytrading node, in one
-process over one stream connection. `trader addresses --config <file>` prints the accounts'
-addresses, for funding and declaring them. Every answer the node signs and every frame of its
+process over one stream connection, and serves its console on the host's address. `trader
+addresses --config <file>` prints the accounts' addresses, for funding and declaring them. Every answer the node signs and every frame of its
 public log stream is checked against the configured enclave signer before the bot acts on it; an
 answer that fails the check is an error, never data, and one signed by another key stops the bot.
 `trader accounts <action> --config <file>` takes each configured account from an empty wallet to
@@ -126,8 +126,58 @@ MONKEY, and withdraws, every payout going to the account's own address.
   held only as a signing key that zeroes its secret on drop, and never printed. A release build
   refuses the keys whose private halves this repository publishes
 
+- The console, with a `[console]` section: HTTPS on `bind` (every interface, port 8443, by
+  default) with the certificate and key the config names, or a self-signed pair generated on first
+  run into `data_dir`; every start prints the certificate's SHA-256 fingerprint, to compare with
+  the browser's
+- One login password, generated on first run and printed once, kept only as its Argon2id hash in
+  `data_dir/login.argon2`; a session is a random token in an `HttpOnly`, `Secure`,
+  `SameSite=Strict` cookie, held by the bot only as a hash and ended by logging out or after twelve
+  hours. A client gets five attempts at once and one more every twelve seconds, and one password
+  check runs at a time
+- Every API route but the login needs the session; every request that changes state, and the live
+  feed, needs the console's own `Origin`; a request's body must arrive within ten seconds and hold
+  at most 4 KiB; every answer carries a strict Content-Security-Policy and the other security
+  headers. A refusal's body is `{"error": "<message>", "code": "<code>"}`: a client matches on the
+  code (such as `session_required`, `foreign_origin`, `rate_limited`, `body_timeout`,
+  `flatten_in_progress`, `account_halted` or `out_of_bounds`) and shows the message
+- A read API over every account in the config, in the config's order, and in total: balance,
+  equity, margin and the margin level, positions with their market's mark, their unrealised profit
+  as the engine values it, and where the account closes out, resting orders, unrealised profit
+  (equity less balance) and realised profit (over the account's whole fill history, after profit
+  fees), the latest fills, and the MONKEY entitlement in token base units, each from the node's
+  verified answers, read every `refresh_interval` through the same paced connections, at most at
+  half the node's per-address rate so the orders always have the rest, which makes a round of
+  reads over many accounts take longer; an answer signed by another key stops the bot as one it
+  reads for itself does. The vault's claimed amount needs a chain read the bot does not make yet.
+  Each account's status carries its state (`running`, `stopped`, `flattening` or `halted`), each
+  strategy's kind, parameters (`{kind, ...}`: whole numbers as numbers, decimals as strings),
+  `bounds` (each settable parameter's `[lowest, highest]`), warm-up and target, and, while the daily
+  loss limit holds it stopped, `day_stop` (`until_ms` and the day's `loss`). An account that could
+  not start is listed too, halted, with its reason and a `code` (`key_locked`, `account_refused`,
+  `account_unread`, `no_balance`, `position_elsewhere`, `controls_unreadable` or
+  `market_unsupported`), no figures and no controls, and, when its key would not unlock, a `label`
+  naming its key file in place of an address; the totals count it among `accounts`, not
+  `reporting`. Each account keeps an equity curve: the latest read of each minute for the last 24
+  hours, in memory, so a restart starts it again. An account's read carries the whole curve; the
+  list of accounts and the live feed carry only its newest point, as a `curve` of at most one, for a
+  client to append to the curve it read. `GET /api/session` says whether the session is live. A live
+  WebSocket feed sends what changes, once a second
+- A control API that starts and stops an account or one of its strategies, sets a strategy's
+  parameters within its `bounds`, and flattens an account: it stops it, waits for the log to pass
+  its last order, cancels its resting orders and closes every position, and no start goes through
+  until it ends. The runner acts on each request, and the controls are saved in
+  `data_dir/accounts/`, so a restart keeps a stop; a stop that cannot be saved holds, and says so. A
+  parameter change builds the strategy afresh and warms its series up again from the node's marks
+  history, so the strategy decides nothing until it has. No route moves funds away from an
+  account's own key or returns a key
+- The console app's build, `console/dist`, embedded at compile time and served at `/`, with any
+  page path routed to its `index.html`; a binary built without it serves a page saying so
+
 ## Repository Structure
 
+- `build.rs`: embeds the console app's build, `console/dist`, when there is one
+- `src/files.rs`: files only the bot's user can read, written whole
 - `src/main.rs`: the entry point
 - `src/lib.rs`: the command line and the runtime
 - `src/logging.rs`: the log, with every RPC endpoint's URL and key replaced in each line written,
@@ -163,6 +213,13 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `src/bot/day.rs`: an account's day loss and positions' opening times kept in a file
 - `src/bot/fleet.rs`: `Fleet`: the accounts, markets and series, and applying one log message
   (no IO)
+- `src/bot/params.rs`: a strategy's parameters changed while the bot runs, and its series warmed up
+  again
+- `src/bot/link.rs`: the accounts' side of the console: their status, built from the fleet, and
+  the runner's end of the console's requests
+- `src/bot/link/requests.rs`: the runner acting on the console's requests, and the flatten
+- `src/bot/link/saved.rs`: the controls the console set, saved per account; `link/tests.rs` tests
+  them
 - `src/bot/warm.rs`: the warm-up of each series from the marks history
 - `src/bot/fills.rs`: the accounts' fills and the check that they are the bot's own
 - `src/bot/run.rs`: `Runner`: the fleet's decisions turned into requests, in one task
@@ -171,11 +228,40 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `src/bot/reads.rs`: the reads of accounts, taken in the order they were started, and the writes of their state
 - `src/bot/startup.rs`: unlocking the keys, the startup reads, and the stop signals
 - `src/bot/stop.rs`: the stop: the wait for the log, then each account's signed cancel and close,
-  and the check
+  and the check; the flatten runs the same stop for one account
+- `src/config/bounds.rs`: the parameters the console may set for a strategy, each with its lowest and
+  highest value, and what a change must hold to; `bounds/tests.rs` tests them
+- `src/console/mod.rs`: preparing the console's data directory, and the server's accept loop
+- `src/console/tls.rs`: the configured or generated certificate, and its fingerprint
+- `src/console/login.rs`: the generated password, its Argon2id hash, and the login rate limit;
+  `login/tests.rs` tests them
+- `src/console/session.rs`: sessions and their cookie
+- `src/console/guard.rs`: the request span, the security headers, the limits on a body's time and
+  size, and the `Origin` and session checks
+- `src/console/routes.rs`: the API's routes
+- `src/console/server.rs`: the state the routes share
+- `src/console/live.rs`: the live WebSocket feed
+- `src/console/board.rs`: the figures, account views, totals and equity curves the API serves;
+  `board/tests.rs` tests them
+- `src/console/refresh.rs`: the reads of each account from the node, paced, and its fill history;
+  `refresh/tests.rs` tests the history's cursors and the pace
+- `src/console/assets.rs`: the embedded console app
 - `tests/common/mod.rs`: a local stand-in node that signs its answers and frames, with injected
   faults, and pings after each frame, so a test can wait until the bot has applied it
 - `tests/common/bot.rs`: the bot's config, run, the log and account the tests script, and the
   orders they check
+- `tests/common/reads.rs`: the stand-in's account reads: views, nonces, fill history and MONKEY
+  entitlement
+- `tests/common/console.rs`: the bot run with its console, and an HTTPS and WebSocket client for it
+- `tests/console_access.rs`: the login, its rate limit, sessions, the `Origin` check, the security
+  headers, that no answer carries a key or no route moves funds, and the unbuilt page
+- `tests/console_logs.rs`: that no log line carries the password
+- `tests/console_reads.rs`: the figures against the node's answers, marks and close-outs, the fill
+  history, the equity curve, failed reads, and the live feed
+- `tests/console_controls.rs`: stopping and starting an account and its strategy, parameters within
+  their bounds, the daily loss stop's status, a restart, and the flatten
+- `tests/console_many.rs`: the console over several accounts, one stopped while the other trades,
+  and accounts that could not start
 - `tests/node_answers.rs`, `tests/stream.rs`, `tests/bot.rs`: the binary against the stand-in
 - `tests/node_pacing.rs`: the pacer under the node's limit, retry-later answers, and the node's time
 - `tests/many_accounts.rs`: several accounts against the stand-in: one stream connection, each
@@ -214,10 +300,15 @@ cargo run -p trader -- accounts --config config/example.toml --account 0x… wit
 ```
 
 `scripts/dev-stack.sh` runs a local node and prints its `[node]` section; `scripts/dev-trade-one.sh`
-runs the bot against it end to end, `scripts/dev-strategies.sh` runs each strategy on its own account, and
-`scripts/dev-trade-many.sh` runs twenty accounts in one process. `scripts/dev-stack.sh --chain` adds a
-local chain with the vault and prints the `[chain]` section too; `scripts/dev-lifecycle.sh` runs the
-account lifecycle on it.
+runs the bot against it end to end, `scripts/dev-strategies.sh` runs each strategy on its own account,
+`scripts/dev-trade-many.sh` runs twenty accounts in one process, and `scripts/dev-console-api.sh` runs
+two accounts with the console. `scripts/dev-stack.sh --chain` adds a local chain with the vault and
+prints the `[chain]` section too; `scripts/dev-lifecycle.sh` runs the account lifecycle on it.
+
+With a `[console]` section, the bot prints its certificate's SHA-256 fingerprint at every start and,
+on the first, the login password: open `https://<host>:8443`, check the fingerprint the browser
+shows for the certificate against the printed one, and log in. Delete `data_dir/login.argon2` and
+restart for a new password.
 
 ## Configuration
 
@@ -241,7 +332,9 @@ know, and relative paths are read from the file's directory:
 - `[[account]]`: `key`, a keystore with its password from a file or an environment variable, or in
   a dev build a hex key file; `close_on_stop`; and one `[[account.strategy]]` per market, at most
   sixteen: `market` (a symbol), `bar` (whole minutes, 1m to 1d), `max_slippage_bps`, and the
-  strategy by `kind` with its parameters (see `trader-core`)
+  strategy by `kind` with its parameters (see `trader-core`), and `bounds`, each parameter's
+  `[lowest, highest]` that the console may set (whole numbers for a whole-number parameter, strings
+  for a decimal one; a parameter left out is the config's alone)
 - `[[account_dir]]`: `path` of a directory whose `.json` keystores are each an account, with one
   `password` source for all, `close_on_stop`, and `[[account_dir.strategy]]` tables as above
 - `[chain]` (optional): `rpc` (one or more JSON-RPC URLs), `rpc_timeout`, `receipt_timeout`,
@@ -249,6 +342,10 @@ know, and relative paths are read from the file's directory:
   `poll_interval`, `max_fee_gwei` (the highest fee per gas a transaction may offer)
 - `[funding]` (optional): `key`, as an `[[account]]`'s
 - `[claims]` (optional, needs `[chain]`): `threshold` (MONKEY), `interval`
+- `[console]`: `bind` (default `0.0.0.0:8443`), `data_dir` (default `data`), `refresh_interval`
+  (default `5s`, at least a second; each account's equity curve keeps the latest read of each
+  minute for the last 24 hours, in memory, served whole only in the account's own read), and
+  `tls = { cert, key }`, PEM files to serve instead of the generated certificate
 - `[logging]`: `level`, a tracing filter directive
 
 `CONFIG_PATH`: the config file, when `--config` is not given. The keystore password variable is the
@@ -263,6 +360,7 @@ cargo test -p trader --test hot_path -- --nocapture   # the benchmark's measurem
 ./scripts/dev-trade-many.sh   # twenty accounts, about seventeen minutes
 ./scripts/dev-strategies.sh   # another, about twenty minutes
 ./scripts/dev-lifecycle.sh    # the account lifecycle on a local chain, about fifteen minutes, up to forty
+./scripts/dev-console-api.sh  # two accounts with the console, about ten minutes
 ```
 
 ## Authors

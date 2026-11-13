@@ -250,13 +250,18 @@ jobs:
     strategy:
       fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
-        scenario: [dev-trade-one, dev-trade-many]
+        scenario: [dev-trade-one, dev-trade-many, dev-console-api]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup toolchain install --no-self-update
+      # The console's scenario builds the console app, which the bot embeds.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.scenario == 'dev-console-api'
+        with:
+          node-version-file: console/.nvmrc
       - name: Read the pinned engine commit
         id: engine
         run: |

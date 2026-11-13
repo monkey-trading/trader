@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 use trader_core::risk::RiskParams;
 use trader_core::sizing::Sizing;
 
-use crate::config::{Config, KeySource, NodeUrl, StrategySection, TlsPin};
+use crate::config::{Config, KeySource, NodeUrl, StrategySection, TlsPin, bounds};
 
 /// The shortest bar: the marks history the bot warms up from is in one-minute buckets.
 const MIN_BAR: Duration = Duration::from_secs(60);
@@ -21,6 +21,8 @@ const MAX_STRATEGIES: usize = 16;
 const MAX_CONNECTIONS: usize = 16;
 /// The widest slippage bound an order may name: the whole price.
 const MAX_SLIPPAGE_BPS: i64 = 10_000;
+/// The shortest interval between the console's rounds of reads of every account.
+const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 impl Config {
     /// Checks the values serde cannot: that some account is named, each account's strategies, the
@@ -32,6 +34,7 @@ impl Config {
     /// - a limit of zero, or connections outside 1 to `MAX_CONNECTIONS`
     /// - a log level that is not a tracing filter directive, or a zero timeout
     /// - a chain section that fails its checks (see `validate_chain`)
+    /// - a console refresh interval under a second
     pub(super) fn validate(&self, dev_build: bool) -> anyhow::Result<()> {
         ensure!(!self.account.is_empty() || !self.account_dir.is_empty(), "no [[account]] or [[account_dir]]");
         check_limits(&self.sizing, &self.risk)?;
@@ -56,6 +59,12 @@ impl Config {
             (1..=MAX_CONNECTIONS).contains(&limits.connections),
             "node.limits.connections: from 1 to {MAX_CONNECTIONS}"
         );
+        if let Some(console) = &self.console {
+            ensure!(
+                console.refresh_interval >= MIN_REFRESH_INTERVAL,
+                "console.refresh_interval: at least {MIN_REFRESH_INTERVAL:?}"
+            );
+        }
         EnvFilter::try_new(&self.logging.level).map_err(|e| anyhow!("logging.level: {e}"))?;
         ensure!(!self.node.request_timeout.is_zero(), "node.request_timeout: above zero");
         ensure!(!self.node.stream_timeout.is_zero(), "node.stream_timeout: above zero");
@@ -78,6 +87,8 @@ fn check_limits(sizing: &Sizing, risk: &RiskParams) -> anyhow::Result<()> {
 /// - a bar that is not whole minutes from one minute to one day
 /// - a size that is not above zero and within the engine's input bound
 /// - a slippage bound below zero or above 10,000 bps
+/// - bounds that name a parameter the strategy lacks, or leave out the value the config sets (see
+///   `bounds::check`)
 fn validate_strategies(strategies: &[StrategySection]) -> anyhow::Result<()> {
     ensure!((1..=MAX_STRATEGIES).contains(&strategies.len()), "strategy: from 1 to {MAX_STRATEGIES} per account");
     for (i, strategy) in strategies.iter().enumerate() {
@@ -96,6 +107,9 @@ fn validate_strategies(strategies: &[StrategySection]) -> anyhow::Result<()> {
             (0..=MAX_SLIPPAGE_BPS).contains(&strategy.max_slippage_bps),
             "strategy.max_slippage_bps: from 0 to {MAX_SLIPPAGE_BPS}"
         );
+        if let Some(bounds) = &strategy.bounds {
+            bounds::check(&strategy.params, bounds).map_err(|e| anyhow!("strategy.bounds: {e}"))?;
+        }
     }
     Ok(())
 }

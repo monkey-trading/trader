@@ -100,6 +100,11 @@ max_slippage_bps = 25
 #   donchian_breakout    entry, exit (20, 10): long on a close above the last entry closes' highest,
 #                        short below their lowest, flat on a close beyond the last exit closes
 # Decimal values are strings, such as width = "1.5".
+#
+# The parameters the console may set, each as [lowest, highest]: whole numbers for a whole-number
+# parameter, strings for a decimal one. A parameter left out is the config's alone, and with no
+# bounds the console cannot change the strategy.
+bounds = { fast = [2, 20], slow = [10, 100] }
 kind = "sma_crossover"
 fast = 5
 slow = 20
@@ -149,6 +154,27 @@ max_fee_gwei = "1"
 # [claims]
 # threshold = "100"
 # interval = "10m"
+
+# The console: the bot's figures and controls in a browser, over HTTPS, behind a login. Leave the
+# section out to serve no console. On first run the bot generates a self-signed certificate and a
+# login password, keeps the certificate and only a hash of the password in data_dir, and prints
+# the password once; every start prints the certificate's SHA-256 fingerprint, which the browser's
+# certificate details must show. Delete data_dir's login.argon2 for a new password. Nothing the
+# console can do moves funds away from an account's own key, and no route returns a key.
+[console]
+# Every interface, so the console is reachable at the host's IP: https://<host>:8443.
+bind = "0.0.0.0:8443"
+# The generated certificate and key, the login's hash, and the controls the console set, which a
+# restart keeps.
+data_dir = "data"
+# How often the console reads each account from the node, at least a second. Its reads take at most
+# half of `[node.limits] per_ip`, so with many accounts a round of them takes longer. Each
+# account's equity curve keeps the latest read of each minute for the last 24 hours, in memory: a
+# restart starts it again. The account's own read serves the whole curve; the list of accounts and
+# the live feed, its newest point.
+refresh_interval = "5s"
+# PEM files to serve instead of the generated certificate.
+# tls = { cert = "console.crt", key = "console.key" }
 
 [logging]
 level = "info"

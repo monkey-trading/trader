@@ -12,7 +12,10 @@ mod decide;
 mod fills;
 mod flatten;
 pub mod fleet;
+pub mod link;
+pub use link::AccountLink;
 mod orders;
+mod params;
 mod reads;
 mod run;
 mod startup;
@@ -26,10 +29,13 @@ use std::sync::Arc;
 use anyhow::bail;
 use engine_core::market::{MarketSpec, QuoteCurrency};
 use engine_core::types::{AccountId, Millis};
+use tokio::sync::oneshot;
 use tracing::{Instrument, Span, error, info};
 
 use crate::accounts::{Lifecycle, claim};
+use crate::bot::link::ConsoleEnd;
 use crate::config::Config;
+use crate::console::{Console, Prepared};
 use crate::keys::AccountKey;
 use crate::node::CallError;
 
@@ -79,7 +85,24 @@ pub async fn run(
     env: impl Fn(&str) -> Option<String> + Sync,
     stop: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
-    let started = match startup::start(&cfg, &env).await {
+    run_with_console(cfg, env, stop, None).await
+}
+
+/// Runs the bot as `run` does, with its console when `console` holds one prepared from the config's
+/// section: the console starts once the accounts have, serves them until the bot stops, and its
+/// failure stops the bot as `stop` would.
+/// Error cases:
+/// - see `run`
+/// - the console fails
+pub async fn run_with_console(
+    cfg: Config,
+    env: impl Fn(&str) -> Option<String> + Sync,
+    stop: impl Future<Output = ()>,
+    console: Option<Prepared>,
+) -> anyhow::Result<()> {
+    let console = console.zip(cfg.console.as_ref());
+    let data_dir = console.as_ref().map(|(_, section)| section.data_dir.as_path());
+    let started = match startup::start(&cfg, &env, data_dir).await {
         Ok(started) => started,
         Err(e) => {
             if let Some(CallError::WrongSigner { .. }) = e.downcast_ref::<CallError>() {
@@ -88,7 +111,7 @@ pub async fn run(
             return Err(e);
         }
     };
-    let startup::Started { fleet, node, mut stream, domain, failed } = started;
+    let startup::Started { fleet, node, mut stream, domain, failed, kept } = started;
     // With `[claims]`, a task claims every account's MONKEY alongside the trading: should it end, the
     // bot stops as on a stop signal and fails, or, when the node answered it with another key's
     // signature, halts.
@@ -101,18 +124,40 @@ pub async fn run(
         }
         None => None,
     };
+    let cap = cfg.node.limits.connections;
+    let mut runner = Runner::new(fleet, Arc::clone(&node), domain, cap);
+    let (console_failed, mut failed_console) = oneshot::channel::<anyhow::Error>();
+    // The console's tasks live in this watcher, which ends them when the bot is done with them.
+    let mut watcher = None;
+    if let Some((prepared, section)) = console {
+        let (end, mut links) = ConsoleEnd::new(&runner.fleet, kept);
+        runner.console = Some(end);
+        links.extend(ConsoleEnd::halted(&failed));
+        let mut console = Console::start(section, prepared, node, cfg.node.limits.per_ip, links).await?;
+        watcher = Some(tokio::spawn(async move {
+            let _ = console_failed.send(console.failed().await);
+        }));
+    }
     let mut claims_ended = None;
+    let mut failure = None;
     let stop = async {
-        match claims.as_mut() {
-            Some(task) => tokio::select! {
-                () = stop => {}
-                ended = task => claims_ended = Some(ended),
-            },
-            None => stop.await,
+        let claims_task = async {
+            match claims.as_mut() {
+                Some(task) => task.await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            () = stop => {}
+            ended = claims_task => claims_ended = Some(ended),
+            Ok(e) = &mut failed_console => {
+                if !signed_elsewhere(&e) {
+                    error!(alert = "console_failed", "the console stopped, so the bot stops too: {e:#}");
+                }
+                failure = Some(e);
+            }
         }
     };
-    let cap = cfg.node.limits.connections;
-    let mut runner = Runner::new(fleet, node, domain, cap);
     let followed = runner.follow(&mut stream, stop).await;
     // The claims end before the stop acts, and an end they came to first is not lost.
     if let Some(task) = claims.take()
@@ -127,11 +172,13 @@ pub async fn run(
     let claims_halted = matches!(&claims_ended, Some(Ok(e)) if claim::is_wrong_signer(e));
     let result = match followed {
         Ok(()) if claims_halted => Err(Halt::WrongSigner),
+        // The console read an answer another key signed: as with one the runner reads.
+        Ok(()) if failure.as_ref().is_some_and(signed_elsewhere) => Err(Halt::WrongSigner),
         Ok(()) => {
             if let Some(ended) = &claims_ended {
                 error!(alert = "bot_halted", "the MONKEY claims task ended: {ended:?}; stopping");
             }
-            runner.stop(&mut stream).await
+            stop_watching(&mut runner, &mut stream, &mut failed_console, &mut failure).await
         }
         // What the bot saw is not what it trades on: it changes nothing, and leaves the accounts to
         // their owners.
@@ -143,13 +190,20 @@ pub async fn run(
     };
     runner.flush_state().await;
     if let Err(Halt::WrongSigner) = &result {
-        error!(alert = "node_signer_mismatch", "{}", Halt::WrongSigner);
+        let at = failure.as_ref().filter(|e| signed_elsewhere(e)).map(|e| format!(" ({e:#})")).unwrap_or_default();
+        error!(alert = "node_signer_mismatch", "{}{at}", Halt::WrongSigner);
+    }
+    if let Some(watcher) = watcher {
+        watcher.abort();
     }
     let (requests, retry_later) = runner.node.counts();
     info!(requests, retry_later, "requests to the node");
     result?;
     if let Some(ended) = claims_ended {
         bail!("the MONKEY claims task ended: {ended:?}");
+    }
+    if let Some(e) = failure {
+        return Err(e.context("the console stopped"));
     }
     let stopped = runner.fleet.accounts.iter().filter(|a| a.failed.is_some()).count();
     anyhow::ensure!(
@@ -158,6 +212,44 @@ pub async fn run(
         failed.len()
     );
     Ok(())
+}
+
+/// Stops the accounts as `Runner::stop` does, while the console is still watched: an answer another
+/// key signed that the console reads meanwhile ends the stop before it sends anything more. Any other
+/// failure of the console is kept, and the stop goes on.
+/// Error cases:
+/// - see `Runner::stop`
+/// - the console read an answer another key signed
+async fn stop_watching(
+    runner: &mut Runner,
+    stream: &mut crate::stream::Stream,
+    failed_console: &mut oneshot::Receiver<anyhow::Error>,
+    failure: &mut Option<anyhow::Error>,
+) -> Result<(), Halt> {
+    let stopping = runner.stop(stream);
+    tokio::pin!(stopping);
+    let mut watching = failure.is_none();
+    loop {
+        tokio::select! {
+            result = &mut stopping => return result,
+            Ok(e) = &mut *failed_console, if watching => {
+                watching = false;
+                let signer = signed_elsewhere(&e);
+                if !signer {
+                    error!(alert = "console_failed", "the console stopped during the stop: {e:#}");
+                }
+                *failure = Some(e);
+                if signer {
+                    return Err(Halt::WrongSigner);
+                }
+            }
+        }
+    }
+}
+
+/// Whether the console stopped on an answer another key than the signer signed.
+fn signed_elsewhere(e: &anyhow::Error) -> bool {
+    matches!(e.downcast_ref::<CallError>(), Some(CallError::WrongSigner { .. }))
 }
 
 /// Checks the bot can follow `spec`'s index from the log: a market quoted in USD and priced from spot

@@ -179,6 +179,10 @@ impl Fleet {
         let state = &mut self.series[series as usize];
         state.live = Some(live);
         state.warm = Warm::Done;
+        for k in 0..self.series[series as usize].assignments.len() {
+            let a = self.series[series as usize].assignments[k];
+            self.mark_changed(self.assignments[a as usize].account);
+        }
         let feed = &mut self.markets[slot];
         feed.unwarmed -= 1;
         if feed.unwarmed == 0 {

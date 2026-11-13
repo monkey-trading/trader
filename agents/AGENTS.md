@@ -79,13 +79,32 @@ list.
   faults, and a stand-in chain (`tests/common/chain.rs`) that applies the bot's transactions,
   drives the fleet directly (`tests/fleet.rs`), holds the hot path to two allocations a message
   (`tests/alloc.rs`), and holds an hour of a synthetic log through 1,000 accounts to time and memory
-  budgets (`tests/hot_path.rs`). Its `README.md` lists every file.
-- **config/** — `example.toml`, the bot's documented example config, which the config tests load.
+  budgets (`tests/hot_path.rs`). The accounts' side of the console is `bot/link.rs`: each account's
+  status on a `watch` channel, built from the fleet (an account that could not start has a halted
+  status and no controls); one bounded request channel into the runner (start, stop, a strategy's
+  parameters within its `bounds`, flatten, in `link/requests.rs`), where a parameter change builds the
+  new strategy and warms its series up again from the marks history (`bot/params.rs`); and the
+  controls those requests set, saved per account under the console's data directory
+  (`link/saved.rs`), so a restart keeps a stop. A flatten runs the account's stop with its positions
+  closed (`stop.rs`). `console/` is the console server (with a `[console]` section): HTTPS on `bind`
+  (every interface, port 8443, by default) with a configured certificate or one generated into
+  `data_dir` on first run, whose SHA-256 fingerprint every start prints (`tls.rs`); one generated
+  password, printed once and kept as an Argon2id hash, with a per-client rate limit (`login.rs`);
+  in-memory sessions in a `__Host-` cookie (`session.rs`); the request span, security headers,
+  `Origin` check and session check (`guard.rs`); the API's routes (`routes.rs`) over shared state
+  (`server.rs`); the live WebSocket feed (`live.rs`); the figures, views, totals and in-memory equity
+  curves (`board.rs`) the refresher reads from the node through the bot's paced pool
+  (`refresh.rs`); and the embedded app (`assets.rs`), which `build.rs` lists from `console/dist`.
+  `files.rs` writes files only the bot's user can read. No route moves funds away from an account's
+  own key or returns a key. Its `README.md` lists every file.
+- **config/** — `example.toml`, the bot's documented example config, with a `[console]` section and a
+  strategy's `bounds`, which the config tests load.
 - **console/** — the Vite, React and TypeScript app (`src/` with `main.tsx`, `App.tsx`,
   `styles.css`, and its tests; `index.html`, the page that mounts `src/main.tsx`;
   `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`,
   `tsconfig.json`; Node.js from `.nvmrc`, exact versions pinned by `.npmrc` and
-  `package-lock.json`). `npm run build` writes the gitignored `dist/`.
+  `package-lock.json`). `npm run build` writes the gitignored `dist/`, which the `trader` binary
+  embeds when built after it.
 - **Cargo.toml** — workspace manifest, shared dependencies, and the Cargo profiles (release keeps
   overflow checks on); `Cargo.lock` is committed.
 - **rust-toolchain.toml** — the one stable toolchain for local builds and CI.
@@ -96,9 +115,10 @@ list.
   private reporting address, response times, disclosure, safe harbour, scope), and Apache License
   2.0.
 - **.github/workflows/** — `ci.yaml`: fmt, the file line cap, clippy, tests, `cargo-deny`, the dev
-  scenarios (`dev-scenarios`: `dev-trade-one` and `dev-trade-many`, and `dev-strategies`, which cache
-  the engine's built binaries by the pinned commit; and `dev-lifecycle`, which installs Foundry and
-  caches them with the commit's contracts), the
+  scenarios (`dev-scenarios`: `dev-trade-one`, `dev-trade-many` and `dev-console-api`, and
+  `dev-strategies`, which cache the engine's built binaries by the pinned commit, the console's
+  building the console app to embed it; and `dev-lifecycle`, which installs Foundry and caches them
+  with the commit's contracts), the
   console's audit, lint, type check, tests and build, the agent docs' links, the review-delta
   helper's test, the merge approval gate's test, and the CI scripts' test, on every push to `main`, every PR, and every
   merge group of the merge queue. On a PR, the first job, `changes`, sorts the changed files into
@@ -139,7 +159,10 @@ list.
   `dev-lifecycle.sh`, the account lifecycle on the chain stack: three accounts declared, funded from
   their wallets, trading until each has a MONKEY entitlement, claiming it through a funding key, and
   one withdrawing to its own wallet, every balance checked on chain and in the node;
-  `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
+  `dev-console-api.sh`, the console's scenario: the bot with the console app embedded and two
+  accounts, its printed fingerprint and password, refusals without the session or from a foreign
+  `Origin`, a stop through the console that stops one account's strategy while the other trades, and
+  the API's figures against the node's answers; `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
   `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
@@ -169,6 +192,8 @@ Run from the repo root:
   (also needs Foundry's `anvil` and `cast`, and `forge` once per engine commit), and its scenario
   `./scripts/dev-lifecycle.sh` (about fifteen minutes, up to forty: it trades until each account has
   a MONKEY entitlement)
+  (about twenty minutes, the same variables); the console's: `./scripts/dev-console-api.sh` (about
+  ten minutes; also needs Node.js and npm to build the app; the same variables)
 - Many accounts: `./scripts/dev-trade-many.sh` (twenty accounts, about seventeen minutes; same
   requirements as `dev-trade-one.sh`, and `lsof`); `trader addresses --config <file>` prints the
   accounts' addresses; the hot-path benchmark: `cargo test -p trader --test hot_path -- --nocapture`
