@@ -242,7 +242,8 @@ async fn a_stop_or_a_halt_ends_the_funding_jobs() {
             f.node.with(|i| i.other_signer_path = Some(format!("/v1/accounts/{}/emissions", address(0))));
             tokio::time::timeout(Duration::from_secs(30), f.running.task).await.expect("the bot halts").unwrap()
         } else {
-            f.running.stop().await
+            // The log moves on, so the stop need not wait for orders an earlier run may have signed.
+            f.running.stop_after(&f.node).await
         };
         assert!(ended.is_err(), "halts {halts}: the bot ends with an account that could not start, or halts");
         // The approval lands; the job, ended, sends no deposit after it.

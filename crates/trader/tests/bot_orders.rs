@@ -67,9 +67,9 @@ async fn an_order_refused_for_its_nonce_after_a_parameter_change_is_not_decided_
     let cookie = running.session().await;
     until_started(&running, &cookie).await;
     within(warm(&stand_in)).await;
-    // The order's answer, a refusal of its nonce, takes two seconds.
+    // The order's answer, a refusal of its nonce, takes a second, within the bot's wait for it.
     stand_in.with(|i| {
-        i.post_delay = Some(Duration::from_secs(2));
+        i.post_delay = Some(Duration::from_secs(1));
         i.statuses.push_back(409);
     });
     for (seq, minute, mid) in [(14, 1, "101"), (15, 2, "102")] {
@@ -87,7 +87,7 @@ async fn an_order_refused_for_its_nonce_after_a_parameter_change_is_not_decided_
     let params = json!({ "kind": "sma_crossover", "fast": 2, "slow": 3 });
     assert_eq!(running.call(Method::PUT, &path, SAME, Some(&cookie), Some(params)).await.status, 204);
     // The refusal comes, and the series warms up again from the marks history: no order follows.
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(posted(), 1, "the old parameters' target is not ordered again");
     running.stop_after(&stand_in).await.unwrap();
 }
