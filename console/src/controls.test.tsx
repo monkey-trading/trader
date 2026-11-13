@@ -110,6 +110,27 @@ describe("account controls", () => {
     expect(await screen.findByText("No open positions.")).toBeInTheDocument();
   });
 
+  it("does not flatten on a double-click: the second click lands on the confirm button the first brought up", async () => {
+    const api = stubApi();
+    const user = userEvent.setup();
+    mount(api, PAGE);
+
+    await user.dblClick(await screen.findByRole("button", { name: "Flatten account" }));
+    expect(await screen.findByRole("button", { name: "Confirm flatten" })).toBeInTheDocument();
+    expect(api.flatten).not.toHaveBeenCalled();
+    await user.dblClick(screen.getByRole("button", { name: "Confirm flatten" }));
+    expect(api.flatten).toHaveBeenCalledOnce();
+  });
+
+  it("does not stop and start again on a double-click", async () => {
+    const api = stubApi();
+    const user = userEvent.setup();
+    mount(api, PAGE);
+
+    await user.dblClick(await screen.findByRole("button", { name: "Stop account" }));
+    expect(api.setAccountRunning).toHaveBeenCalledExactlyOnceWith(ADDRESS, false);
+  });
+
   it("shows a failed flatten at the control, including a timeout the bot says may still act", async () => {
     const api = stubApi();
     api.flatten.mockResolvedValue({

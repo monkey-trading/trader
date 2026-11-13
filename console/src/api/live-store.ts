@@ -3,7 +3,7 @@ import { reconnectDelay } from "@/lib/backoff";
 
 import type { Outcome } from "./client";
 import { CURVE_RETRY_MS, CURVE_TRIES, ReadFailures } from "./read-failures";
-import { FEED_SILENCE_MS, Silence } from "./silence";
+import { Silence } from "./silence";
 import { EMPTY_BOOK, identityOf, keyOf, withAccount, withCurve, withFills, withMessage, type Book } from "./live-state";
 import { INITIAL_SNAPSHOT, type Connection, type FeedSocket, type LiveDeps, type LiveSnapshot } from "./live-types";
 import { parseWith, readLiveMessage } from "./parsers";
@@ -109,21 +109,14 @@ export class LiveStore {
     }
   }
 
-  /**
-   * Waits for the feed's next message. The bot reads every account at its refresh interval and pushes each read, so
-   * a feed that says nothing for a minute while accounts report has gone quiet without closing, as a half-open
-   * connection does: it is treated as lost, and the console connects again.
-   */
-  private armSilence(epoch: number): void {
-    if ([...this.book.accounts.values()].some((account) => account.figures !== null)) {
-      this.silence.restart(FEED_SILENCE_MS, () => {
-        if (epoch === this.epoch) {
-          void this.lostFeed();
-        }
-      });
-    } else {
-      this.silence.clear();
-    }
+  /** Starts over the wait for the feed's next message, which `Silence` judges. */
+  private armSilence(epoch: number, gapMs = 0): void {
+    const reporting = [...this.book.accounts.values()].some((account) => account.figures !== null);
+    this.silence.arm({ gapMs, wanted: this.connection !== "live" || reporting }, () => {
+      if (epoch === this.epoch) {
+        void this.lostFeed();
+      }
+    });
   }
 
   private stop(): void {
@@ -155,6 +148,7 @@ export class LiveStore {
       onOpen: () => {
         if (epoch === this.epoch) {
           this.connection = "syncing";
+          this.armSilence(epoch);
           this.publish();
         }
       },
@@ -213,6 +207,7 @@ export class LiveStore {
       return;
     }
     const message = parsed.value;
+    const before = message.type === "account" ? this.book.accounts.get(identityOf(message.account))?.figures?.timeMs : undefined;
     if (message.type === "account") {
       this.bump(this.viewVersions, identityOf(message.account));
     } else if (message.type === "fills") {
@@ -222,7 +217,8 @@ export class LiveStore {
       this.failures.clearFills(key);
     }
     this.book = withMessage(this.book, message);
-    this.armSilence(epoch);
+    const after = message.type === "account" ? message.account.figures?.timeMs : undefined;
+    this.armSilence(epoch, before !== undefined && after !== undefined ? Math.max(0, after - before) : 0);
     if (message.type === "snapshot") {
       this.loaded = true;
       this.attempt = 0;

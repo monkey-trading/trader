@@ -20,13 +20,14 @@ describe("withSnapshot", () => {
     expect(held.fills.get(OTHER)).toHaveLength(2);
   });
 
-  it("holds an account with no address under its label, in the bot's order, and replaces it in place", () => {
+  it("holds entries that could not start by their place in the bot's order, and replaces one in place", () => {
     const book = withSnapshot(EMPTY_BOOK, overview(failedBody(), viewBody(), failedBody({ label: "account_dir/b.json" })));
-    expect([...book.accounts.keys()]).toEqual(["label:keys/locked.json", ADDRESS, "label:account_dir/b.json"]);
+    expect([...book.accounts.keys()]).toEqual(["failed:0", ADDRESS, "failed:2"]);
 
     const next = withMessage(book, readLiveMessage({ type: "account", account: failedBody({ halt: "still locked" }) }));
     expect([...next.accounts.values()].map((a) => a.halt)).toEqual(["still locked", null, "the key would not unlock"]);
-    expect(identityOf({ address: null, label: "x", code: "key_locked" })).toBe("label:x");
+    expect(identityOf({ address: null, label: "x", code: "key_locked" }, 4)).toBe("failed:4");
+    expect(identityOf({ address: null, label: "x", code: null })).toBe("label:x");
   });
 
   it("keeps an entry that could not start apart from the account that trades under the same address", () => {

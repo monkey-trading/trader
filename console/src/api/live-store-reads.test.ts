@@ -1,6 +1,6 @@
 /** Tests of what the live store does when its reads fail or its feed goes quiet. */
-import { ADDRESS, fillBody, viewBody } from "./fixtures";
-import { accountMessage, harness, ok } from "./live-store-harness";
+import { ADDRESS, figuresBody, fillBody, viewBody } from "./fixtures";
+import { accountMessage, harness, ok, snapshot } from "./live-store-harness";
 import { readAccount } from "./parsers";
 import type { AccountView } from "./types";
 
@@ -42,11 +42,12 @@ describe("LiveStore reads", () => {
   it("takes a feed that says nothing for a minute while accounts report as lost, and connects again", async () => {
     const { store, feeds, silences, settle, open } = harness();
     await open();
-    expect(silences).toHaveLength(1);
+    expect(silences.length).toBeGreaterThan(0);
+    const waiting = silences.length;
     // A message restarts the wait: the first timer's epoch is still current, but the bot said something since.
     feeds[0]?.handlers.onMessage(accountMessage("10300"));
     await settle();
-    expect(silences).toHaveLength(2);
+    expect(silences.length).toBe(waiting + 1);
 
     silences.at(-1)?.callback();
     await settle();
@@ -65,4 +66,25 @@ describe("LiveStore reads", () => {
     await settle();
     expect(store.getSnapshot().fillFailures.has(ADDRESS)).toBe(false);
   });
+
+  it("waits longer than a minute when the bot pushes less often, and bounds the wait for a snapshot that never comes", async () => {
+    const { store, feeds, silences, settle } = harness();
+    store.start();
+    feeds[0]?.handlers.onOpen();
+    await settle();
+    // No snapshot yet: a wait of a minute is armed all the same.
+    expect(silences.at(-1)?.ms).toBe(60_000);
+    feeds[0]?.handlers.onMessage(snapshot());
+    await settle();
+    // Two pushes of one account 5 minutes apart: the bot's pace is five minutes, so four gaps.
+    const at = (timeMs: number) =>
+      JSON.stringify({ type: "account", account: viewBody({ figures: figuresBody({ time_ms: timeMs }) }) });
+    feeds[0]?.handlers.onMessage(at(1_000_000));
+    await settle();
+    feeds[0]?.handlers.onMessage(at(1_300_000));
+    await settle();
+    expect(silences.at(-1)?.ms).toBe(900_000);
+    expect(store.getSnapshot().connection).toBe("live");
+  });
 });
+

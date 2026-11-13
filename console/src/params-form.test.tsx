@@ -41,6 +41,26 @@ describe("parameter form", () => {
     await waitFor(() => { expect(screen.getByText("Done.")).toHaveFocus(); });
   });
 
+  it("keeps saying a save worked after the saved values arrive and the form is made over", async () => {
+    const api = stubApi();
+    const user = userEvent.setup();
+    const { feeds } = mount(api, PAGE);
+
+    const field = await screen.findByLabelText("fast");
+    await user.clear(field);
+    await user.type(field, "7");
+    api.setParams.mockImplementation(() => {
+      // The bot's push brings the new values while the save's answer is on its way.
+      feeds[0]?.onMessage(JSON.stringify({ type: "account", account: viewBody({ strategies: [{ ...strategyBody(), params: { fast: 7, slow: 20 } }] }) }));
+      return Promise.resolve({ status: "ok", value: null });
+    });
+    await user.click(screen.getByRole("button", { name: "Save parameters" }));
+
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    await waitFor(() => { expect(screen.getByLabelText("fast")).toHaveValue("7"); });
+    expect(screen.getByText("Saved.")).toBeInTheDocument();
+  });
+
   it("sends every parameter with the strategy's kind, the edited one changed", async () => {
     const api = stubApi();
     const user = userEvent.setup();

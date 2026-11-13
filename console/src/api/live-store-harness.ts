@@ -37,7 +37,7 @@ export function harness(api: Partial<Api> = {}) {
       return () => undefined;
     },
     timeout: (callback, ms) => {
-      (ms === 60_000 ? silences : timers).push({ callback, ms });
+      (ms >= 60_000 ? silences : timers).push({ callback, ms });
       return () => undefined;
     },
     random: () => 0,

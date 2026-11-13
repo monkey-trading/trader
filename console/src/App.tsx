@@ -10,6 +10,9 @@ import { AccountPage } from "@/pages/AccountPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { OverviewPage } from "@/pages/OverviewPage";
 
+/** How long after the bot did not answer the session check it is asked again. */
+const SESSION_RETRY_MS = 3000;
+
 /** The page the URL names, shown once signed in. */
 function Pages() {
   const route = useRoute();
@@ -67,6 +70,18 @@ export function App() {
   useEffect(() => {
     void session.check();
   }, [session]);
+  // An unreachable bot is asked again, so the page comes up on its own once it answers.
+  useEffect(() => {
+    if (status !== "unreachable") {
+      return undefined;
+    }
+    const retry = setTimeout(() => {
+      void session.check();
+    }, SESSION_RETRY_MS);
+    return () => {
+      clearTimeout(retry);
+    };
+  }, [session, status]);
   return (
     <>
       <a
@@ -80,6 +95,7 @@ export function App() {
       </header>
       <main id="main" tabIndex={-1} className="p-4 outline-none">
         {status === "checking" ? <p className="text-muted">Checking the session…</p> : null}
+        {status === "unreachable" ? <p role="alert" className="text-loss">The bot did not answer. Trying again…</p> : null}
         {status === "anonymous" ? <LoginPage /> : null}
         {status === "authenticated" ? <SignedIn /> : null}
       </main>

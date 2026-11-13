@@ -25,8 +25,10 @@ trade_seconds="${TRADE_SECONDS:-120}"
 keys=("$(printf '%064x' $((0x1001)))" "$(printf '%064x' $((0x1002)))" "$(printf '%064x' $((0x1003)))")
 accounts=()
 bot_pid=""
+vite_pid=""
 
 cleanup() {
+  if [[ -n "$vite_pid" ]]; then kill "$vite_pid" 2>/dev/null || true; wait "$vite_pid" 2>/dev/null || true; fi
   if [[ -n "$bot_pid" ]]; then kill "$bot_pid" 2>/dev/null || true; wait "$bot_pid" 2>/dev/null || true; fi
   if [[ -n "${SCENARIO_ARTIFACTS:-}" && -n "${dev_stack_work:-}" ]]; then
     mkdir -p "$SCENARIO_ARTIFACTS"
@@ -219,7 +221,7 @@ CONSOLE_URL="$console" CONSOLE_PASSWORD="$password" PLAYWRIGHT_DIR="$PLAYWRIGHT_
 
 step "the dev server's proxy reaches the bot's console: login and session through it"
 dev_port="$(dev_stack_free_port)"
-(cd "$root/console" && CONSOLE_BOT_URL="$console" exec npx vite --port "$dev_port" --strictPort --host 127.0.0.1 > "$work/vite.log" 2>&1) &
+(cd "$root/console" && CONSOLE_BOT_URL="$console" exec node node_modules/vite/bin/vite.js --port "$dev_port" --strictPort --host 127.0.0.1 > "$work/vite.log" 2>&1) &
 vite_pid=$!
 for _ in $(seq 1 100); do
   curl -s -o /dev/null "http://127.0.0.1:$dev_port/" && break
@@ -234,6 +236,7 @@ status="$(curl -s -o /dev/null -w '%{http_code}' -b "$work/dev-cookies" "$dev/ap
 [[ "$status" == 204 ]] || fail "the session check through the dev server answered $status"
 kill "$vite_pid" 2>/dev/null || true
 wait "$vite_pid" 2>/dev/null || true
+vite_pid=""
 
 step "stop the bot: it exits 0"
 kill -TERM "$bot_pid"

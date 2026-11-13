@@ -20,6 +20,7 @@ const KIND_NAMES: Readonly<Record<string, string>> = {
 export function StrategyCard({ address, strategy }: { readonly address: string; readonly strategy: Strategy }) {
   const { api } = useServices();
   const toggle = useAction(address);
+  const save = useAction(address);
   const running = strategy.running;
   const name = KIND_NAMES[strategy.kind] ?? strategy.kind;
   return (
@@ -46,6 +47,7 @@ export function StrategyCard({ address, strategy }: { readonly address: string; 
         strategyId={strategy.id}
         kind={strategy.kind}
         params={strategy.params}
+        action={save}
       />
     </section>
   );

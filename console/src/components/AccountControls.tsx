@@ -27,7 +27,11 @@ function FlattenControl({ address, action }: { readonly address: string; readonl
           type="button"
           className={BUTTON_CLASS}
           disabled={action.pending}
-          onClick={() => {
+          onClick={(event) => {
+            // The second click of a double-click lands on the confirm button that the first brought up.
+            if (event.detail > 1) {
+              return;
+            }
             setConfirming(true);
             // The confirm button mounts on the next render; focus follows it.
             requestAnimationFrame(() => confirm.current?.focus());
@@ -48,7 +52,10 @@ function FlattenControl({ address, action }: { readonly address: string; readonl
           type="button"
           className={BUTTON_CLASS}
           disabled={action.pending}
-          onClick={() => {
+          onClick={(event) => {
+            if (event.detail > 1) {
+              return;
+            }
             action.run(() => api.flatten(address));
             setConfirming(false);
             // The confirm button goes with this render; focus stays on the status line, which says how it ended.

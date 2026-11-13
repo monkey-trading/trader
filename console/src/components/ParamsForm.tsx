@@ -6,7 +6,7 @@ import { checkParams, wireValue } from "@/lib/params";
 
 import { BUTTON_CLASS } from "./ActionButton";
 import { useServices } from "./app-context";
-import { useAction } from "./use-action";
+import type { Action } from "./use-action";
 
 interface ParamsFormProps {
   readonly address: string;
@@ -14,16 +14,17 @@ interface ParamsFormProps {
   /** The strategy's kind, which the bot's parameter body names as the config does. */
   readonly kind: string;
   readonly params: readonly Param[];
+  /** The save's state, held by the strategy's card: a save changes the saved values, which remounts this form. */
+  readonly action: Action;
 }
 
 /** Edits the periods. The parent keys this by the saved values, so a save resets the drafts. */
-export function ParamsForm({ address, strategyId, kind, params }: ParamsFormProps) {
+export function ParamsForm({ address, strategyId, kind, params, action }: ParamsFormProps) {
   const { api } = useServices();
   const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>(
     () => Object.fromEntries(params.map((param) => [param.name, param.value])),
   );
   const [problems, setProblems] = useState<Readonly<Record<string, string>>>({});
-  const action = useAction(address);
   const prefix = useId();
 
   const editable = params.flatMap((param) => (param.bounds === null ? [] : [{ ...param, bounds: param.bounds }]));

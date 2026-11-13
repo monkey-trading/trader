@@ -51,8 +51,11 @@ export function ActionButton({ label, pendingLabel, action, call }: ActionButton
         type="button"
         className={BUTTON_CLASS}
         disabled={action.pending}
-        onClick={() => {
-          action.run(call);
+        onClick={(event) => {
+          // The second click of a double-click lands on the button as the first left it, or on the opposite one.
+          if (event.detail <= 1) {
+            action.run(call);
+          }
         }}
       >
         {action.pending ? pendingLabel : label}

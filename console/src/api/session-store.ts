@@ -2,7 +2,7 @@
 import type { Api, Outcome } from "./client";
 
 /** Whether a login is needed. */
-export type SessionStatus = "checking" | "anonymous" | "authenticated";
+export type SessionStatus = "checking" | "anonymous" | "authenticated" | "unreachable";
 
 /** What a login attempt came to, for the form to show. */
 export type LoginResult =
@@ -42,7 +42,8 @@ export class SessionStore {
     const before = this.transitions;
     const outcome = await this.api.session();
     if (this.transitions === before) {
-      this.set(outcome.status === "ok" ? "authenticated" : "anonymous");
+      // A bot that did not answer says nothing of the session: the login page would hide an outage.
+      this.set(outcome.status === "ok" ? "authenticated" : outcome.status === "unavailable" ? "unreachable" : "anonymous");
     }
   }
 

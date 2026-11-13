@@ -37,6 +37,12 @@ describe("SessionStore", () => {
     expect(store.getSnapshot()).toBe("authenticated");
   });
 
+  it("says the bot is unreachable when it did not answer the check, not that the session is gone", async () => {
+    const store = storeWith({ session: () => Promise.resolve({ status: "unavailable", message: "down" }) });
+    await store.check();
+    expect(store.getSnapshot()).toBe("unreachable");
+  });
+
   it("ignores a check that began before a login and ends after it", async () => {
     let answer: (outcome: typeof ok | { status: "unauthenticated"; code: null }) => void = () => undefined;
     const store = storeWith({

@@ -138,7 +138,9 @@ try {
   await page.setViewportSize({ width: 1000, height: 800 });
 
   // Account page: stop and start a strategy, then see the API agree.
-  const first = listed[0];
+  // The first account that started: one listed after a failure has no controls to press.
+  const first = listed.find((a) => a.figures !== null);
+  check(first !== undefined, "no account reported figures");
   const running = async () => (await api(`/api/accounts/${first.address}`)).strategies[0].running;
   await page.getByRole("link", { name: short(first.address) }).click();
   await page.getByRole("heading", { level: 1, name: short(first.address) }).waitFor();

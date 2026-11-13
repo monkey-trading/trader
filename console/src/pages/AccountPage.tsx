@@ -61,7 +61,7 @@ function Unread() {
 /** The page of the account at `address`. */
 export function AccountPage({ address }: { readonly address: string }) {
   const { live } = useServices();
-  const { accounts, curves, fills, fillFailures, curveFailures, loaded, connection } = useLive();
+  const { accounts, curves, fills, fillFailures, curveFailures, loaded } = useLive();
   useEffect(() => live.track(address), [live, address]);
   const key = keyOf(address);
   const account = accounts.find((candidate) => candidate.address !== null && keyOf(candidate.address) === key);
@@ -75,7 +75,7 @@ export function AccountPage({ address }: { readonly address: string }) {
       {account === undefined ? (
         <p className="text-muted">{loaded ? "The bot has no such account." : "Loading account…"}</p>
       ) : (
-        <div className={`flex flex-col gap-6 ${connection === "live" ? "" : "opacity-70"}`}>
+        <div className="flex flex-col gap-6">
           <p className="break-all text-sm text-muted">
             {address} · {account.state}
             {account.halt === null ? "" : ` (${account.halt})`}
@@ -109,7 +109,7 @@ export function AccountPage({ address }: { readonly address: string }) {
           </Section>
           <Section id="fills" title="Fills">
             {failure === undefined ? null : <p className="mb-2 text-loss">{`Fills could not be read: ${failure}`}</p>}
-            <FillsTable fills={accountFills} />
+            {fills.has(key) ? <FillsTable fills={accountFills} /> : failure === undefined ? <Unread /> : null}
           </Section>
         </div>
       )}

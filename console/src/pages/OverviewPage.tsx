@@ -67,7 +67,7 @@ function AccountRow({ account }: { readonly account: AccountView }) {
 
 /** Lists the accounts and their totals. */
 export function OverviewPage() {
-  const { accounts, totals, loaded, connection } = useLive();
+  const { accounts, totals, loaded } = useLive();
   const positions = accounts.reduce((sum, account) => sum + (account.figures?.positions.length ?? 0), 0);
   return (
     <>
@@ -77,7 +77,7 @@ export function OverviewPage() {
       ) : accounts.length === 0 ? (
         <p className="text-muted">The bot has no accounts.</p>
       ) : (
-        <div className={connection === "live" ? "" : "opacity-70"}>
+        <div>
           <DataTable label="Accounts" head={HEAD} numeric={NUMERIC}>
             {accounts.map((account, index) => (
               <AccountRow key={identityOf(account, index)} account={account} />

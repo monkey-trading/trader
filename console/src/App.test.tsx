@@ -228,6 +228,16 @@ describe("App", () => {
     expect(screen.queryByText("No open positions.")).not.toBeInTheDocument();
   });
 
+  it("says the bot is unreachable and asks again, instead of showing the login page", async () => {
+    const api = stubApi();
+    api.session.mockResolvedValueOnce({ status: "unavailable", message: "The bot did not answer." });
+    mount(api);
+
+    expect(await screen.findByText("The bot did not answer. Trying again…")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 1, name: "Sign in" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: "Accounts" }, { timeout: 5000 })).toBeInTheDocument();
+  }, 10_000);
+
   it("stays on the page and says so at the button when the bot did not end the session", async () => {
     const api = stubApi();
     api.logout.mockResolvedValue({ status: "unavailable", message: "The bot did not answer." });

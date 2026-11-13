@@ -32,13 +32,13 @@ const STOPPED_CODE = "account_stopped";
 /**
  * The key an account is held under: its address when it trades, its label when it has no address, and its place
  * in the bot's list when it could not start: a key listed twice has an address of its own twice, and the second
- * entry must not take the trading account's place.
+ * entry must not take the trading account's place, nor an entry without an address another's.
  */
 export function identityOf(
   account: { readonly address: string | null; readonly label: string | null; readonly code: string | null },
   index = 0,
 ): string {
-  if (account.address !== null && account.code !== null && account.code !== STOPPED_CODE) {
+  if (account.code !== null && account.code !== STOPPED_CODE) {
     return `failed:${String(index)}`;
   }
   return account.address === null ? `label:${account.label ?? ""}` : keyOf(account.address);
@@ -97,7 +97,7 @@ function keyHeld(book: Book, account: AccountView): string | null {
     return key;
   }
   const same = [...book.accounts].find(
-    ([held, view]) => held.startsWith("failed:") && view.address?.toLowerCase() === account.address?.toLowerCase() && view.code === account.code,
+    ([held, view]) => held.startsWith("failed:") && view.address?.toLowerCase() === account.address?.toLowerCase() && view.label === account.label && view.code === account.code,
   );
   return same?.[0] ?? null;
 }
