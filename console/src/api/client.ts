@@ -81,6 +81,16 @@ function fallbackMessage(status: number): string {
   }
 }
 
+/** Why there is no answer: the deadline passed, or the bot could not be reached. A control may still have acted. */
+function unanswered(signal: AbortSignal, method: "GET" | "POST" | "PUT"): string {
+  if (!signal.aborted) {
+    return "The bot did not answer.";
+  }
+  return method === "GET"
+    ? "The bot did not answer in time."
+    : "The bot did not answer in time; it may still act on the request.";
+}
+
 /** Turns a parse result into an outcome; a body that fails its check is an outage, never data. */
 function checked<T>(parsed: Parsed<T>): Outcome<T> {
   return parsed.status === "ok"
@@ -88,14 +98,21 @@ function checked<T>(parsed: Parsed<T>): Outcome<T> {
     : { status: "unavailable", message: `The bot sent an answer this console cannot read (${parsed.message}).` };
 }
 
-/** One request; `read` checks the success body. */
+/** How long a request may take, answer included, before the console gives up on it. */
+const DEADLINE_MS = 15_000;
+/** A flatten waits for the log and makes several calls to the node: the bot itself allows it two minutes. */
+const FLATTEN_DEADLINE_MS = 130_000;
+
+/** One request; `read` checks the success body; it is abandoned after `deadlineMs`, answer body included. */
 async function call<T>(
   fetchFn: Fetch,
   method: "GET" | "POST" | "PUT",
   path: string,
   body: unknown,
   read: (body: unknown) => T,
+  deadlineMs = DEADLINE_MS,
 ): Promise<Outcome<T>> {
+  const signal = AbortSignal.timeout(deadlineMs);
   let response: Response;
   try {
     response = await fetchFn(path, {
@@ -103,11 +120,21 @@ async function call<T>(
       credentials: "same-origin",
       headers: body === undefined ? undefined : { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
   } catch {
-    return { status: "unavailable", message: "The bot did not answer." };
+    return { status: "unavailable", message: unanswered(signal, method) };
   }
-  const json: unknown = await response.json().catch(() => null);
+  let json: unknown;
+  try {
+    json = await response.json();
+  } catch {
+    // An answer that stalled or is no JSON: a stalled one is the deadline's, and is no answer.
+    if (signal.aborted) {
+      return { status: "unavailable", message: unanswered(signal, method) };
+    }
+    json = null;
+  }
   if (response.status === 401) {
     return { status: "unauthenticated", code: readError(json)?.code ?? null };
   }
@@ -132,18 +159,25 @@ function flattenOutcome(outcome: Outcome<Warned | null>): Outcome<Warned | null>
     : outcome;
 }
 
-/** Builds the API client over `fetchFn` (the page's `fetch`; tests pass a stand-in). */
-export function createApi(fetchFn: Fetch): Api {
-  const control = (method: "POST" | "PUT", path: string, body: unknown): Promise<Outcome<Warned | null>> =>
-    call(fetchFn, method, path, body, nothing);
+/**
+ * Builds the API client over `fetchFn` (the page's `fetch`; tests pass a stand-in). `deadlineMs` replaces every
+ * request's deadline, for tests.
+ */
+export function createApi(fetchFn: Fetch, deadlineMs?: number): Api {
+  const control = (
+    method: "POST" | "PUT",
+    path: string,
+    body: unknown,
+    limit?: number,
+  ): Promise<Outcome<Warned | null>> => call(fetchFn, method, path, body, nothing, deadlineMs ?? limit);
   return {
-    session: () => call(fetchFn, "GET", routes.session, undefined, nothing),
-    login: (password) => call(fetchFn, "POST", routes.login, { password }, nothing),
-    logout: () => call(fetchFn, "POST", routes.logout, {}, nothing),
-    account: (address) => call(fetchFn, "GET", routes.account(address), undefined, readAccount),
-    fills: (address) => call(fetchFn, "GET", routes.fills(address), undefined, readFills),
+    session: () => call(fetchFn, "GET", routes.session, undefined, nothing, deadlineMs),
+    login: (password) => call(fetchFn, "POST", routes.login, { password }, nothing, deadlineMs),
+    logout: () => call(fetchFn, "POST", routes.logout, {}, nothing, deadlineMs),
+    account: (address) => call(fetchFn, "GET", routes.account(address), undefined, readAccount, deadlineMs),
+    fills: (address) => call(fetchFn, "GET", routes.fills(address), undefined, readFills, deadlineMs),
     setAccountRunning: (address, running) => control("POST", routes.accountRun(address, running ? "start" : "stop"), {}),
-    flatten: async (address) => flattenOutcome(await control("POST", routes.flatten(address), {})),
+    flatten: async (address) => flattenOutcome(await control("POST", routes.flatten(address), {}, FLATTEN_DEADLINE_MS)),
     setStrategyRunning: (address, id, running) => control("POST", routes.strategyRun(address, id, running ? "start" : "stop"), {}),
     setParams: (address, id, params) => control("PUT", routes.strategyParams(address, id), params),
   };

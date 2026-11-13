@@ -3,10 +3,13 @@
 #   1. the console app is built and embedded in the bot, which runs three accounts with its console on
 #      a free loopback port, all trading BTC-USD on one-minute bars with parameter bounds;
 #   2. after TRADE_SECONDS (default 120) of trading, the browser test (console/browser-test/run.mjs)
-#      signs in with the printed password, checks each account's row and page against the API, stops
-#      and starts a strategy, shows a refusal in place, flattens an account, and checks phone width
-#      and the keyboard;
-#   3. the bot stops on SIGTERM with exit 0.
+#      signs in with the printed password, checks each account's row against the API, opens each
+#      account's page, stops and starts a strategy, flattens an account, and checks phone width and the
+#      keyboard (its refusal-in-place check needs an account whose strategies refuse to start, which the
+#      stand-in API has: `npm run stub`);
+#   3. the Vite dev server, proxying to the bot, takes the same login and a session check, which the
+#      bot's Origin check would refuse without the proxy's rewrite of the Origin;
+#   4. the bot stops on SIGTERM with exit 0.
 #
 # Needs what scripts/dev-stack.sh needs, Node.js with npm, and Playwright 1.64.0 installed in a scratch
 # directory outside the repository, named by PLAYWRIGHT_DIR (Playwright is no dependency of the repository;
@@ -213,6 +216,24 @@ done
 step "run the browser test against the console"
 CONSOLE_URL="$console" CONSOLE_PASSWORD="$password" PLAYWRIGHT_DIR="$PLAYWRIGHT_DIR" EXPECT_ACCOUNTS="${#accounts[@]}" \
   node "$root/console/browser-test/run.mjs" || fail "the browser test failed"
+
+step "the dev server's proxy reaches the bot's console: login and session through it"
+dev_port="$(dev_stack_free_port)"
+(cd "$root/console" && CONSOLE_BOT_URL="$console" exec npx vite --port "$dev_port" --strictPort --host 127.0.0.1 > "$work/vite.log" 2>&1) &
+vite_pid=$!
+for _ in $(seq 1 100); do
+  curl -s -o /dev/null "http://127.0.0.1:$dev_port/" && break
+  kill -0 "$vite_pid" 2>/dev/null || fail "the dev server exited: $(tail -n 5 "$work/vite.log")"
+  sleep 0.2
+done
+dev="http://127.0.0.1:$dev_port"
+status="$(curl -s -o /dev/null -w '%{http_code}' -c "$work/dev-cookies" -H "Origin: $dev" -H 'content-type: application/json' \
+  -d "{\"password\":\"$password\"}" "$dev/api/login")"
+[[ "$status" == 204 ]] || fail "the login through the dev server answered $status"
+status="$(curl -s -o /dev/null -w '%{http_code}' -b "$work/dev-cookies" "$dev/api/session")"
+[[ "$status" == 204 ]] || fail "the session check through the dev server answered $status"
+kill "$vite_pid" 2>/dev/null || true
+wait "$vite_pid" 2>/dev/null || true
 
 step "stop the bot: it exits 0"
 kill -TERM "$bot_pid"

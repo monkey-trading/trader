@@ -10,6 +10,9 @@ export class ShapeError extends Error {}
 /** The longest text any field may hold. */
 export const MAX_TEXT = 200;
 
+/** The longest diagnostic text kept whole; longer is cut, since the bot's own error chains have no bound. */
+export const MAX_NOTE = 2000;
+
 /** Reads `value` as an object, naming `where` if it is not one. */
 export function object(value: unknown, where: string): Fields {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -33,6 +36,20 @@ export function text(fields: Fields, key: string): string {
     throw new ShapeError(`${key} is not a text`);
   }
   return value;
+}
+
+/** Reads a diagnostic text, such as a reason or an error: a long one is cut for display, not refused. */
+export function note(fields: Fields, key: string): string {
+  const value = fields[key];
+  if (typeof value !== "string") {
+    throw new ShapeError(`${key} is not a text`);
+  }
+  return value.length > MAX_NOTE ? `${value.slice(0, MAX_NOTE)}…` : value;
+}
+
+/** Reads a diagnostic text that may be null. */
+export function nullableNote(fields: Fields, key: string): string | null {
+  return fields[key] === null ? null : note(fields, key);
 }
 
 /** Reads a text field that may be null. */

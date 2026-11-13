@@ -1,7 +1,7 @@
 /** The console's page frame and its pages. */
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
-import { BUTTON_CLASS } from "@/components/ActionButton";
+import { ActionError, BUTTON_CLASS } from "@/components/ActionButton";
 import { useServices, useSession } from "@/components/app-context";
 import { ConnectionStatus } from "@/components/ConnectionStatus";
 import { Link } from "@/components/Link";
@@ -31,20 +31,29 @@ function Pages() {
 /** Opens the live feed while signed in, and offers sign out. */
 function SignedIn() {
   const { live, session } = useServices();
+  const [failure, setFailure] = useState<string | null>(null);
   useEffect(() => live.start(), [live]);
   return (
     <>
       <div className="flex flex-wrap items-center justify-between gap-2 pb-4">
         <ConnectionStatus />
-        <button
-          type="button"
-          className={BUTTON_CLASS}
-          onClick={() => {
-            void session.logout();
-          }}
-        >
-          Sign out
-        </button>
+        <div className="text-right">
+          <button
+            type="button"
+            className={BUTTON_CLASS}
+            onClick={() => {
+              setFailure(null);
+              void session.logout().then((result) => {
+                if (result.status === "failed") {
+                  setFailure(result.message);
+                }
+              });
+            }}
+          >
+            Sign out
+          </button>
+          <ActionError error={failure === null ? null : `The bot did not end the session. ${failure}`} />
+        </div>
       </div>
       <Pages />
     </>

@@ -5,13 +5,16 @@ import type { AccountView } from "@/api/types";
 
 import { ActionButton, ActionError, BUTTON_CLASS } from "./ActionButton";
 import { useServices } from "./app-context";
-import { useAction } from "./use-action";
+import { useAction, type Action } from "./use-action";
 
-/** Closes every position and cancels every order of the account, after a confirming press. */
-function FlattenControl({ address }: { readonly address: string }) {
+/**
+ * Closes every position and cancels every order of the account, after a confirming press. Its action is the
+ * parent's, which outlives the control: the account reads `flattening` while the request is out, and the answer
+ * must show where it was asked for, whatever the account's state became meanwhile.
+ */
+function FlattenControl({ address, action }: { readonly address: string; readonly action: Action }) {
   const { api } = useServices();
   const [confirming, setConfirming] = useState(false);
-  const action = useAction(address);
   const ask = useRef<HTMLButtonElement>(null);
   const confirm = useRef<HTMLButtonElement>(null);
 
@@ -71,8 +74,14 @@ export function AccountControls({ account, address }: { readonly account: Accoun
   const { api } = useServices();
   const running = account.state === "running";
   const toggle = useAction(address);
+  const flatten = useAction(address);
   if (account.state !== "running" && account.state !== "stopped") {
-    return <p className="text-sm text-muted">{WAITING[account.state]}</p>;
+    return (
+      <div>
+        <p className="text-sm text-muted">{WAITING[account.state]}</p>
+        <ActionError error={flatten.error} warning={flatten.warning} />
+      </div>
+    );
   }
   return (
     <div className="flex flex-wrap items-start gap-4">
@@ -82,7 +91,7 @@ export function AccountControls({ account, address }: { readonly account: Accoun
         action={toggle}
         call={() => api.setAccountRunning(address, !running)}
       />
-      <FlattenControl address={address} />
+      <FlattenControl address={address} action={flatten} />
     </div>
   );
 }

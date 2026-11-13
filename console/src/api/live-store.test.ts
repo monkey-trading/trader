@@ -194,6 +194,31 @@ describe("LiveStore", () => {
     expect(store.getSnapshot().fillFailures.get(ADDRESS)).toBe("node down");
   });
 
+  it("says the whole curve is missing when the account cannot be read, tries again a few times, and clears it on success", async () => {
+    let answers = 0;
+    const { store, timers, settle, open } = harness({
+      account: () => {
+        answers += 1;
+        return Promise.resolve(answers <= 3 ? { status: "unavailable", message: "node down" } : ok<AccountView>(readAccount(viewBody())));
+      },
+    });
+    await open();
+    store.track(ADDRESS);
+    await settle();
+    expect(store.getSnapshot().curveFailures.get(ADDRESS)).toBe("node down");
+    for (let retry = 0; retry < 2; retry += 1) {
+      timers.splice(0).at(-1)?.callback();
+      await settle();
+    }
+    // The third failure is the last try: no further retry is scheduled.
+    expect(answers).toBe(3);
+    expect(timers.filter((t) => t.ms === 5000)).toHaveLength(0);
+    expect(store.getSnapshot().curveFailures.get(ADDRESS)).toBe("node down");
+    await store.refresh(ADDRESS);
+    await settle();
+    expect(store.getSnapshot().curveFailures.has(ADDRESS)).toBe(false);
+  });
+
   it("prefers a feed fills message over a read that began before it", async () => {
     let finish: (outcome: Outcome<readonly Fill[]>) => void = () => undefined;
     const { store, feeds, settle, open } = harness({ fills: () => new Promise((resolve) => { finish = resolve; }) });

@@ -37,7 +37,7 @@ describe("SessionStore", () => {
     expect(store.getSnapshot()).toBe("authenticated");
   });
 
-  it("signs out here even when the bot cannot be reached, and tells subscribers once", async () => {
+  it("stays signed in when the bot did not end the session, and says why", async () => {
     const store = storeWith({
       login: () => Promise.resolve(ok),
       logout: () => Promise.resolve({ status: "unavailable", message: "down" }),
@@ -45,9 +45,21 @@ describe("SessionStore", () => {
     await store.login("a");
     let heard = 0;
     store.subscribe(() => { heard += 1; });
-    await store.logout();
-    store.expire();
-    expect(store.getSnapshot()).toBe("anonymous");
-    expect(heard).toBe(1);
+    expect(await store.logout()).toEqual({ status: "failed", message: "down" });
+    expect(store.getSnapshot()).toBe("authenticated");
+    expect(heard).toBe(0);
+  });
+
+  it("signs out when the bot ended the session or says it is already gone, and tells subscribers once", async () => {
+    for (const outcome of [ok, { status: "unauthenticated", code: null } as const]) {
+      const store = storeWith({ login: () => Promise.resolve(ok), logout: () => Promise.resolve(outcome) });
+      await store.login("a");
+      let heard = 0;
+      store.subscribe(() => { heard += 1; });
+      expect(await store.logout()).toEqual({ status: "signed-out" });
+      store.expire();
+      expect(store.getSnapshot()).toBe("anonymous");
+      expect(heard).toBe(1);
+    }
   });
 });

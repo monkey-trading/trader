@@ -37,7 +37,7 @@ function FigureList({ figures }: { readonly figures: Figures }) {
       <Figure label="Margin level">{figures.marginLevelBps === null ? "—" : formatBpsPercent(figures.marginLevelBps)}</Figure>
       <Figure label="Margin required (USDC)">{formatUsdc(figures.margin)}</Figure>
       <Figure label="MONKEY earned">{formatMonkey(monkey.newestEntitled)}</Figure>
-      <Figure label="MONKEY claimable now">{formatMonkey(monkey.entitled)}</Figure>
+      <Figure label="MONKEY entitled to date">{formatMonkey(monkey.entitled)}</Figure>
       <Figure label="MONKEY claimed">{monkey.claimed === null ? "Not read yet" : formatMonkey(monkey.claimed)}</Figure>
     </dl>
   );
@@ -53,10 +53,15 @@ function Section({ id, title, children }: { readonly id: string; readonly title:
   );
 }
 
+/** What a table says before the bot has read the account: not that it is empty. */
+function Unread() {
+  return <p className="text-muted">Waiting for the bot to read this account.</p>;
+}
+
 /** The page of the account at `address`. */
 export function AccountPage({ address }: { readonly address: string }) {
   const { live } = useServices();
-  const { accounts, curves, fills, fillFailures, loaded, connection } = useLive();
+  const { accounts, curves, fills, fillFailures, curveFailures, loaded, connection } = useLive();
   useEffect(() => live.track(address), [live, address]);
   const key = keyOf(address);
   const account = accounts.find((candidate) => candidate.address !== null && keyOf(candidate.address) === key);
@@ -79,7 +84,12 @@ export function AccountPage({ address }: { readonly address: string }) {
           {account.error === null ? null : <p className="text-loss">{`The last read of the node failed: ${account.error}`}</p>}
           <AccountControls account={account} address={address} />
           {account.figures === null ? <p className="text-muted">The bot has not read this account's figures yet.</p> : <FigureList figures={account.figures} />}
-          <Section id="curve" title="Equity"><EquityCurve points={curves.get(key) ?? []} /></Section>
+          <Section id="curve" title="Equity">
+            {curveFailures.get(key) === undefined ? null : (
+              <p className="mb-2 text-loss">{`The whole day's curve could not be read: ${curveFailures.get(key) ?? ""}`}</p>
+            )}
+            <EquityCurve points={curves.get(key) ?? []} />
+          </Section>
           <Section id="strategies" title="Strategies">
             <div className="grid gap-3 md:grid-cols-2">
               {account.strategies.map((strategy) => (
@@ -87,12 +97,15 @@ export function AccountPage({ address }: { readonly address: string }) {
               ))}
             </div>
           </Section>
-          <Section id="positions" title="Positions"><PositionsTable positions={account.figures?.positions ?? []} /></Section>
+          <Section id="positions" title="Positions">
+            {account.figures === null ? <Unread /> : <PositionsTable positions={account.figures.positions} />}
+          </Section>
           <Section id="orders" title="Orders">
-            <OrdersTable
-              orders={account.figures?.orders ?? []}
-              symbols={symbolsOf(account.figures?.positions ?? [], accountFills)}
-            />
+            {account.figures === null ? (
+              <Unread />
+            ) : (
+              <OrdersTable orders={account.figures.orders} symbols={symbolsOf(account.figures.positions, accountFills)} />
+            )}
           </Section>
           <Section id="fills" title="Fills">
             {failure === undefined ? null : <p className="mb-2 text-loss">{`Fills could not be read: ${failure}`}</p>}

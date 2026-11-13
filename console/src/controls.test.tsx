@@ -1,5 +1,5 @@
 /** Tests of the account page's controls: what the user does, and what shows when the bot refuses. */
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { Outcome } from "@/api/client";
@@ -122,6 +122,35 @@ describe("account controls", () => {
     await user.click(await screen.findByRole("button", { name: "Confirm flatten" }));
 
     expect(await screen.findByText("Failed: the account has not answered yet; it may still act on the request")).toBeInTheDocument();
+  });
+});
+
+describe("a flatten whose account changes state while it is out", () => {
+  it("shows the failure or the warning where it was asked for, though the account reads flattening meanwhile", async () => {
+    for (const [answer, shown] of [
+      [{ status: "unavailable", message: "the flatten left a position open" }, "Failed: the flatten left a position open"],
+      [{ status: "ok", value: { warning: "the stop was not saved" } }, "Done, with a warning: the stop was not saved"],
+    ] as const) {
+      const api = stubApi();
+      const held = deferred<Outcome<{ warning: string } | null>>();
+      api.flatten.mockReturnValue(held.promise);
+      const user = userEvent.setup();
+      const { feeds, unmount } = mount(api, PAGE);
+
+      await user.click(await screen.findByRole("button", { name: "Flatten account" }));
+      await user.click(await screen.findByRole("button", { name: "Confirm flatten" }));
+      // The bot publishes `flattening` as soon as the runner queues the flatten, before the answer.
+      feeds[0]?.onMessage(JSON.stringify({ type: "account", account: viewBody({ state: "flattening" }) }));
+      expect(await screen.findByText("The account is closing its positions.")).toBeInTheDocument();
+      feeds[0]?.onMessage(JSON.stringify({ type: "account", account: viewBody({ state: "stopped" }) }));
+      await act(async () => {
+        held.resolve(answer);
+        await held.promise;
+      });
+
+      await waitFor(() => { expect(screen.getByText(shown)).toBeInTheDocument(); });
+      unmount();
+    }
   });
 });
 

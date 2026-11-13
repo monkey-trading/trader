@@ -3,6 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { failedBody, figuresBody, overviewBody, totalsBody, viewBody } from "@/api/fixtures";
+import { readAccount } from "@/api/parsers";
 import { ADDRESS, mount, stubApi } from "@/test-harness";
 
 describe("App", () => {
@@ -153,7 +154,7 @@ describe("App", () => {
     expect(await screen.findByRole("table", { name: "Recent fills" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /^Equity now 10,100.50 USDC; lowest 10,000.00, highest 10,100.50 over 3 readings/ })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "SMA crossover on BTC-USD" })).toBeInTheDocument();
-    expect(screen.getByText("MONKEY claimable now").nextSibling?.textContent).toBe("5.00");
+    expect(screen.getByText("MONKEY entitled to date").nextSibling?.textContent).toBe("5.00");
   });
 
   it("shows a position's mark, unrealised profit and close-out price", async () => {
@@ -216,5 +217,26 @@ describe("App", () => {
 
     await waitFor(() => { expect(api.logout).toHaveBeenCalledTimes(1); });
     expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("says the bot has not read an account yet, instead of showing empty positions and orders", async () => {
+    const api = stubApi();
+    api.account.mockResolvedValue({ status: "ok", value: readAccount(viewBody({ figures: null })) });
+    mount(api, `/accounts/${ADDRESS}`);
+
+    expect(await screen.findAllByText("Waiting for the bot to read this account.")).toHaveLength(2);
+    expect(screen.queryByText("No open positions.")).not.toBeInTheDocument();
+  });
+
+  it("stays on the page and says so at the button when the bot did not end the session", async () => {
+    const api = stubApi();
+    api.logout.mockResolvedValue({ status: "unavailable", message: "The bot did not answer." });
+    const user = userEvent.setup();
+    mount(api);
+
+    await user.click(await screen.findByRole("button", { name: "Sign out" }));
+
+    expect(await screen.findByText("Failed: The bot did not end the session. The bot did not answer.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Accounts" })).toBeInTheDocument();
   });
 });

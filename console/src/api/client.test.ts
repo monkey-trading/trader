@@ -12,6 +12,34 @@ function fakeFetch(status: number, body: unknown, headers: Record<string, string
   return { fetchFn, calls };
 }
 
+describe("createApi's deadlines", () => {
+  /** A fetch that never answers until its signal aborts, then rejects as the browser's does. */
+  const hanging = (path: string, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => { reject(new DOMException("aborted", "TimeoutError")); });
+    });
+
+  it("gives up on a call that never answers, saying a control may still act", async () => {
+    const api = createApi(hanging, 20);
+    expect(await api.account("0xabc")).toEqual({ status: "unavailable", message: "The bot did not answer in time." });
+    expect(await api.setAccountRunning("0xabc", false)).toEqual({
+      status: "unavailable", message: "The bot did not answer in time; it may still act on the request.",
+    });
+  });
+
+  it("gives up on an answer whose body never finishes", async () => {
+    const stalled = (path: string, init?: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener("abort", () => { controller.error(new DOMException("aborted", "TimeoutError")); });
+        },
+      });
+      return Promise.resolve(new Response(body, { status: 200 }));
+    };
+    expect(await createApi(stalled, 20).account("0xabc")).toEqual({ status: "unavailable", message: "The bot did not answer in time." });
+  });
+});
+
 describe("createApi", () => {
   it("sends a JSON POST with the cookie, and a 204 is success", async () => {
     const fetchFn = (path: string, init?: RequestInit) => {
@@ -25,7 +53,10 @@ describe("createApi", () => {
     expect(calls).toEqual([
       {
         path: "/api/accounts/0xabc/flatten",
-        init: { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: "{}" },
+        init: {
+          method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: "{}",
+          signal: expect.any(AbortSignal) as unknown,
+        },
       },
     ]);
   });

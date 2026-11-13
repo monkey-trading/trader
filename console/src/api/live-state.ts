@@ -26,24 +26,45 @@ export function keyOf(address: string): string {
   return address.toLowerCase();
 }
 
-/** The key an account is held under: its address when it has one, its label otherwise. */
-export function identityOf(account: { readonly address: string | null; readonly label: string | null }): string {
+/** The code of an account the bot's own run halted, as opposed to one that could not start. */
+const STOPPED_CODE = "account_stopped";
+
+/**
+ * The key an account is held under: its address when it trades, its label when it has no address, and its place
+ * in the bot's list when it could not start: a key listed twice has an address of its own twice, and the second
+ * entry must not take the trading account's place.
+ */
+export function identityOf(
+  account: { readonly address: string | null; readonly label: string | null; readonly code: string | null },
+  index = 0,
+): string {
+  if (account.address !== null && account.code !== null && account.code !== STOPPED_CODE) {
+    return `failed:${String(index)}`;
+  }
   return account.address === null ? `label:${account.label ?? ""}` : keyOf(account.address);
 }
 
+/** The bot keeps one curve point per minute, the latest read in it. */
+const CURVE_STEP_MS = 60_000;
+
 /**
- * Merges curve points into a held curve: one point per time (the incoming one wins), oldest first, kept to
- * `CURVE_WINDOW_MS` before the newest point and to `CURVE_CAP` points.
+ * Merges curve points into a held curve as the bot keeps it: one point per minute, the latest in it, oldest first,
+ * kept to `CURVE_WINDOW_MS` before the newest point and to `CURVE_CAP` points. The feed brings a point at every
+ * read, each in the minute of the last; keeping all of them would push the day's history out of the cap.
  */
 export function mergeCurve(held: readonly CurvePoint[], incoming: readonly CurvePoint[]): readonly CurvePoint[] {
   if (incoming.length === 0) {
     return held;
   }
-  const byTime = new Map(held.map((point) => [point.timeMs, point]));
-  for (const point of incoming) {
-    byTime.set(point.timeMs, point);
+  const byMinute = new Map<number, CurvePoint>();
+  for (const point of [...held, ...incoming]) {
+    const minute = Math.floor(point.timeMs / CURVE_STEP_MS);
+    const kept = byMinute.get(minute);
+    if (kept === undefined || point.timeMs >= kept.timeMs) {
+      byMinute.set(minute, point);
+    }
   }
-  const sorted = [...byTime.values()].sort((a, b) => a.timeMs - b.timeMs);
+  const sorted = [...byMinute.values()].sort((a, b) => a.timeMs - b.timeMs);
   const newest = sorted.at(-1)?.timeMs ?? 0;
   return sorted.filter((point) => point.timeMs >= newest - CURVE_WINDOW_MS).slice(-CURVE_CAP);
 }
@@ -55,12 +76,12 @@ export function withCurve(book: Book, key: string, points: readonly CurvePoint[]
 
 /** Takes the feed's opening snapshot: the accounts and totals replace what was known, fills and curves of kept accounts stay. */
 export function withSnapshot(book: Book, overview: Overview): Book {
-  const accounts = new Map(overview.accounts.map((account) => [identityOf(account), account]));
+  const accounts = new Map(overview.accounts.map((account, index) => [identityOf(account, index), account]));
   const fills = new Map([...book.fills].filter(([key]) => accounts.has(key)));
   const kept = new Map([...book.curves].filter(([key]) => accounts.has(key)));
   let next: Book = { accounts, curves: kept, totals: overview.totals, fills };
-  for (const account of overview.accounts) {
-    next = withCurve(next, identityOf(account), account.curve);
+  for (const [index, account] of overview.accounts.entries()) {
+    next = withCurve(next, identityOf(account, index), account.curve);
   }
   return next;
 }

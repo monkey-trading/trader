@@ -15,9 +15,15 @@ const INITIAL: LiveSnapshot = {
   curves: new Map(),
   fills: new Map(),
   fillFailures: new Map(),
+  curveFailures: new Map(),
 };
 
 /** Holds the book of accounts and keeps it current from the feed. */
+/** How many times an account's full curve is read before the console stops trying until the next feed snapshot. */
+const CURVE_TRIES = 3;
+/** How long after a failed read of the full curve it is tried again. */
+const CURVE_RETRY_MS = 5000;
+
 export class LiveStore {
   private readonly deps: LiveDeps;
   private snapshot: LiveSnapshot = INITIAL;
@@ -26,6 +32,9 @@ export class LiveStore {
   private dropped = 0;
   private loaded = false;
   private failures: ReadonlyMap<string, string> = new Map();
+  /** Why each tracked account's full curve could not be read, and how many tries it has had since it last was. */
+  private curveFailures: ReadonlyMap<string, string> = new Map();
+  private readonly curveTries = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
   private readonly tracked = new Map<string, number>();
   /** Per account, how many feed messages have set its view or its fills; a read that began before one is stale. */
@@ -98,9 +107,24 @@ export class LiveStore {
         (this.viewVersions.get(key) ?? 0) === version
           ? withAccount(this.book, outcome.value)
           : withCurve(this.book, key, outcome.value.curve);
+      this.curveFailures = new Map([...this.curveFailures].filter(([failed]) => failed !== key));
+      this.curveTries.delete(key);
       this.publish();
     } else if (outcome.status === "unauthenticated") {
       this.endSession();
+    } else {
+      // The account read alone brings the whole curve: say it is missing, and try again a few times.
+      this.curveFailures = new Map(this.curveFailures).set(key, outcome.message);
+      const tries = (this.curveTries.get(key) ?? 0) + 1;
+      this.curveTries.set(key, tries);
+      if (tries < CURVE_TRIES) {
+        this.deps.timeout(() => {
+          if (epoch === this.epoch && this.tracked.has(address)) {
+            void this.refresh(address);
+          }
+        }, CURVE_RETRY_MS);
+      }
+      this.publish();
     }
   }
 
@@ -113,6 +137,8 @@ export class LiveStore {
     this.book = EMPTY_BOOK;
     this.loaded = false;
     this.failures = new Map();
+    this.curveFailures = new Map();
+    this.curveTries.clear();
     this.viewVersions.clear();
     this.fillVersions.clear();
     this.connection = "stopped";
@@ -199,8 +225,8 @@ export class LiveStore {
       this.loaded = true;
       this.attempt = 0;
       this.connection = "live";
-      for (const account of message.overview.accounts) {
-        this.bump(this.viewVersions, identityOf(account));
+      for (const [index, account] of message.overview.accounts.entries()) {
+        this.bump(this.viewVersions, identityOf(account, index));
       }
       for (const address of this.tracked.keys()) {
         void this.readFills(address, epoch);
@@ -260,6 +286,7 @@ export class LiveStore {
         curves: this.book.curves,
         fills: this.book.fills,
         fillFailures: this.failures,
+        curveFailures: this.curveFailures,
       };
       for (const listener of this.listeners) {
         listener();

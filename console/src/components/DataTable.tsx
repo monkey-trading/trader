@@ -15,7 +15,9 @@ export const CELL = "px-2 py-1 whitespace-nowrap";
 /** A real `<table>` with column headers. */
 export function DataTable({ label, head, numeric = [], children }: DataTableProps) {
   return (
-    <div role="region" aria-label={label} className="relative overflow-x-auto rounded border border-line focus-visible:outline-2 focus-visible:outline-accent">
+    // A region that scrolls sideways must take focus, or a keyboard user cannot reach its hidden columns (WCAG 2.1.1).
+    // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
+    <div role="region" aria-label={label} tabIndex={0} className="relative overflow-x-auto rounded border border-line focus-visible:outline-2 focus-visible:outline-accent">
       <table className="w-full border-collapse text-left text-sm">
         <caption className="sr-only">{label}</caption>
         <thead className="bg-surface">

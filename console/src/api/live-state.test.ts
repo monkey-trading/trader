@@ -26,7 +26,14 @@ describe("withSnapshot", () => {
 
     const next = withMessage(book, readLiveMessage({ type: "account", account: failedBody({ halt: "still locked" }) }));
     expect([...next.accounts.values()].map((a) => a.halt)).toEqual(["still locked", null, "the key would not unlock"]);
-    expect(identityOf({ address: null, label: "x" })).toBe("label:x");
+    expect(identityOf({ address: null, label: "x", code: "key_locked" })).toBe("label:x");
+  });
+
+  it("keeps an entry that could not start apart from the account that trades under the same address", () => {
+    const refused = viewBody({ code: "account_refused", halt: "listed twice", figures: null, strategies: [], state: "halted" });
+    const book = withSnapshot(EMPTY_BOOK, overview(viewBody(), refused));
+    expect([...book.accounts.keys()]).toEqual([ADDRESS, "failed:1"]);
+    expect(book.accounts.get(ADDRESS)?.state).toBe("running");
   });
 
   it("keeps the fills of an account that stays", () => {
@@ -35,19 +42,38 @@ describe("withSnapshot", () => {
   });
 
   it("starts an account's curve from the newest point the snapshot carries and keeps one it already had", () => {
-    const first = withSnapshot(EMPTY_BOOK, overview(viewBody({ curve: [{ time_ms: 1000, equity: "1" }] })));
-    const second = withSnapshot(first, overview(viewBody({ curve: [{ time_ms: 2000, equity: "2" }] })));
-    expect(first.curves.get(ADDRESS)).toEqual([{ timeMs: 1000, equity: "1" }]);
-    expect(second.curves.get(ADDRESS)?.map((p) => p.timeMs)).toEqual([1000, 2000]);
+    const first = withSnapshot(EMPTY_BOOK, overview(viewBody({ curve: [{ time_ms: 60_000, equity: "1" }] })));
+    const second = withSnapshot(first, overview(viewBody({ curve: [{ time_ms: 120_000, equity: "2" }] })));
+    expect(first.curves.get(ADDRESS)).toEqual([{ timeMs: 60_000, equity: "1" }]);
+    expect(second.curves.get(ADDRESS)?.map((p) => p.timeMs)).toEqual([60_000, 120_000]);
     expect(withSnapshot(second, overview(viewBody({ address: OTHER }))).curves.has(ADDRESS)).toBe(false);
   });
 });
 
 describe("mergeCurve", () => {
+  const MINUTE = 60_000;
   const point = (timeMs: number, equity = "1"): CurvePoint => ({ timeMs, equity });
 
-  it("keeps one point per time, the incoming one winning, oldest first", () => {
-    expect(mergeCurve([point(2, "old"), point(1)], [point(3), point(2, "new")])).toEqual([point(1), point(2, "new"), point(3)]);
+  it("keeps one point per minute as the bot does, the latest in it winning, oldest first", () => {
+    const merged = mergeCurve([point(2 * MINUTE + 5, "old"), point(MINUTE)], [point(3 * MINUTE), point(2 * MINUTE + 9, "new")]);
+    expect(merged).toEqual([point(MINUTE), point(2 * MINUTE + 9, "new"), point(3 * MINUTE)]);
+  });
+
+  it("does not let a stale answer replace a newer point of the same minute", () => {
+    expect(mergeCurve([point(MINUTE + 30, "newer")], [point(MINUTE + 10, "older")])).toEqual([point(MINUTE + 30, "newer")]);
+  });
+
+  it("holds the day's history through many reads a minute: the feed's points do not crowd it out", () => {
+    const day = Array.from({ length: 24 * 60 }, (_, i) => point(i * MINUTE));
+    let curve = mergeCurve([], day);
+    const start = 24 * 60 * MINUTE;
+    for (let read = 0; read < 3000; read += 1) {
+      curve = mergeCurve(curve, [point(start + read * 5_000, String(read))]);
+    }
+    // 3,000 reads at 5 s apart span 250 minutes: the curve keeps one point per minute within the window.
+    expect(curve.length).toBeLessThanOrEqual(CURVE_CAP);
+    expect(curve[0]?.timeMs).toBeGreaterThanOrEqual((start + 2999 * 5_000) - CURVE_WINDOW_MS);
+    expect(curve.length).toBeGreaterThan(24 * 60 - 260);
   });
 
   it("returns the held curve itself when nothing arrives", () => {
@@ -57,13 +83,15 @@ describe("mergeCurve", () => {
 
   it("trims to 24 hours before the newest point, the boundary point staying", () => {
     const newest = 10 * CURVE_WINDOW_MS;
-    const merged = mergeCurve([point(newest - CURVE_WINDOW_MS - 1), point(newest - CURVE_WINDOW_MS)], [point(newest)]);
+    const merged = mergeCurve([point(newest - CURVE_WINDOW_MS - MINUTE), point(newest - CURVE_WINDOW_MS)], [point(newest)]);
     expect(merged.map((p) => p.timeMs)).toEqual([newest - CURVE_WINDOW_MS, newest]);
   });
 
-  it("keeps at most the cap, dropping the oldest", () => {
-    const merged = mergeCurve([], Array.from({ length: CURVE_CAP + 3 }, (_, i) => point(i)));
-    expect([merged.length, merged[0]?.timeMs]).toEqual([CURVE_CAP, 3]);
+  it("keeps a day of minutes, within the cap, dropping the older", () => {
+    const merged = mergeCurve([], Array.from({ length: CURVE_CAP + 3 }, (_, i) => point(i * MINUTE)));
+    expect(merged.length).toBeLessThanOrEqual(CURVE_CAP);
+    expect(merged.length).toBe(24 * 60 + 1);
+    expect(merged.at(-1)?.timeMs).toBe((CURVE_CAP + 2) * MINUTE);
   });
 });
 

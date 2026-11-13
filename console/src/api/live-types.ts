@@ -20,6 +20,8 @@ export interface LiveSnapshot {
   readonly fills: ReadonlyMap<string, readonly Fill[]>;
   /** Why an account's fills could not be read, by lower-case address. */
   readonly fillFailures: ReadonlyMap<string, string>;
+  /** Why an account's full equity curve could not be read, by lower-case address. */
+  readonly curveFailures: ReadonlyMap<string, string>;
 }
 
 /** One open feed connection. */

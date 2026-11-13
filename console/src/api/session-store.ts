@@ -9,6 +9,11 @@ export type LoginResult =
   | { readonly status: "signed-in" }
   | { readonly status: "refused"; readonly message: string };
 
+/** What a sign out came to, for the control to show. */
+export type LogoutResult =
+  | { readonly status: "signed-out" }
+  | { readonly status: "failed"; readonly message: string };
+
 /** Holds the session status for components. */
 export class SessionStore {
   private readonly api: Api;
@@ -46,10 +51,17 @@ export class SessionStore {
     return { status: "refused", message: loginMessage(outcome) };
   }
 
-  /** Ends the session at the bot, then here; the status changes even if the bot cannot be reached. */
-  async logout(): Promise<void> {
-    await this.api.logout();
-    this.set("anonymous");
+  /**
+   * Ends the session at the bot, then here. A bot that could not be reached or refused still holds the session, so
+   * the console stays signed in and says so: showing the login page would hide a cookie that is good for hours.
+   */
+  async logout(): Promise<LogoutResult> {
+    const outcome = await this.api.logout();
+    if (outcome.status === "ok" || outcome.status === "unauthenticated") {
+      this.set("anonymous");
+      return { status: "signed-out" };
+    }
+    return { status: "failed", message: outcome.message };
   }
 
   /** Marks the session gone, after the bot answered 401. */

@@ -2,7 +2,7 @@
 import { isDecimal } from "@/lib/decimal";
 import {
   baseUnits, choice, count, decimal, flag, items, list, MAX_TEXT, nullableBaseUnits, nullableDecimal, nullableInteger,
-  nullableText, object, ShapeError, text, type Fields,
+  nullableNote, nullableText, note, object, ShapeError, text, type Fields,
 } from "@/lib/shape";
 
 import type {
@@ -145,7 +145,7 @@ function dayStopOf(fields: Fields): DayStop {
 
 function accountOf(fields: Fields): AccountView {
   const address = nullableText(fields, "address");
-  const label = fields["label"] === undefined ? null : nullableText(fields, "label");
+  const label = fields["label"] === undefined ? null : nullableNote(fields, "label");
   if (address === null && label === null) {
     // Without either, an account could be neither listed apart from the others nor opened.
     throw new ShapeError("an account has neither an address nor a label");
@@ -155,11 +155,11 @@ function accountOf(fields: Fields): AccountView {
     label,
     code: fields["code"] === undefined ? null : nullableText(fields, "code"),
     state: choice(fields, "state", ["starting", "running", "stopped", "flattening", "halted"]),
-    halt: nullableText(fields, "halt"),
+    halt: nullableNote(fields, "halt"),
     dayStop: fields["day_stop"] === null ? null : dayStopOf(object(fields["day_stop"], "day_stop")),
     strategies: items(fields, "strategies", strategyOf),
     figures: fields["figures"] === null ? null : figuresOf(object(fields["figures"], "figures")),
-    error: nullableText(fields, "error"),
+    error: nullableNote(fields, "error"),
     curve: items(fields, "curve", pointOf),
   };
 }
@@ -237,7 +237,7 @@ export interface ErrorBody {
 export function readError(body: unknown): ErrorBody | null {
   const parsed = parseWith((value) => {
     const fields = object(value, "error body");
-    return { message: text(fields, "error"), code: fields["code"] === undefined ? null : nullableText(fields, "code") };
+    return { message: note(fields, "error"), code: fields["code"] === undefined ? null : nullableText(fields, "code") };
   }, body);
   return parsed.status === "ok" ? parsed.value : null;
 }

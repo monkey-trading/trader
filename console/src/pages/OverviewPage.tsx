@@ -79,8 +79,8 @@ export function OverviewPage() {
       ) : (
         <div className={connection === "live" ? "" : "opacity-70"}>
           <DataTable label="Accounts" head={HEAD} numeric={NUMERIC}>
-            {accounts.map((account) => (
-              <AccountRow key={identityOf(account)} account={account} />
+            {accounts.map((account, index) => (
+              <AccountRow key={identityOf(account, index)} account={account} />
             ))}
             <tr className="border-t-2 border-line font-semibold">
               <th scope="row" className={CELL}>Total</th>
