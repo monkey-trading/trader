@@ -79,7 +79,7 @@ list.
   gas and funds `depositFor`. `chain/` reads the chain over one or more JSON-RPC endpoints (after a
   transaction lands, only from one that has reached its block) and sends each transaction to all of
   them, estimated first, one per key at a time, its steps reported to a job that shows them
-  (`progress.rs`), followed to its receipt, signed again only once another transaction has
+  (`progress.rs`), followed to its receipt, and after its job ended without one, until it is mined (`console/funding/`), signed again only once another transaction has
   spent its nonce (a deposit only once the vault holds none of its transactions at a block by which
   the nonce was taken), a revert reported with its reason; `logging.rs` replaces every endpoint's
   URL and key in each log line, output and error; its bindings come from `abi/`, the entries of the pinned engine's vault and
@@ -105,7 +105,7 @@ list.
   curves (`board.rs`) the refresher reads from the node through the bot's paced pool
   (`refresh.rs`); and the embedded app (`assets.rs`), which `build.rs` lists from `console/dist`.
   `files.rs` writes files only the bot's user can read. The funding routes (`console/funding/`,
-  with `[chain]`) declare, deposit, claim and withdraw for the accounts named, as jobs, and read
+  with `[chain]`) declare, deposit, claim and withdraw for the accounts named (up to every account the bot has in one request), as jobs that hold one of four places only while they work, not while they wait for the node to credit or pay (`chain/idle.rs`), and read
   their figures in the background while the console watches; no request names a destination. No route moves funds away from an account's own key or returns a key. Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, with a `[console]` section and a
   strategy's `bounds`, which the config tests load, and `README.md`, the config reference, which
@@ -182,7 +182,7 @@ list.
   under `~/.cache/monkeytrading-trader/engine/`), builds the node and its scenario tools once per
   commit into its `dist/` with the commit's dev config (with `DEV_STACK_CARGO` as the cargo command,
   such as a build lock), and runs the
-  engine's `config/dev.toml` on free ports and private temporary data with its synthetic access
+  engine's `config/dev.toml` on free ports (one picker for a run's ports, from below the system's outgoing-connection range, never handing one out twice, and a start that loses a port to another process is run again on new ones) and private temporary data with its synthetic access
   source, printing the bot's `[node]` config; sourced, it gives scenarios functions to start and
   stop it, fund and declare an account, and sign admin commands. With `--chain` it also builds the
   commit's contracts into the cache (checking `crates/trader/abi/` against them), starts Anvil on a
@@ -211,7 +211,7 @@ list.
   its own wallet, one from the funding key's), claimed for and withdrawn from through the Funding page,
   every balance checked on chain and in the node (run by hand: Playwright and Foundry); `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
-  `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo;
+  `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo and its port picker and retry;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
   running it against a stubbed GitHub API; `ci-areas.sh`, the path classifier, and
   `check-ci-passed.sh`, the `ci-passed` predicate, with `ci-test.sh` testing both and checking

@@ -96,18 +96,27 @@ min_hold = "0s"
 }
 
 /// The secret of test account `n`, obviously fake: the first, `account()`'s, is `ACCOUNT_SECRET`.
-pub fn secret(n: u8) -> [u8; 32] {
-    if n == 0 { ACCOUNT_SECRET } else { [0x20 + n; 32] }
+pub fn secret(n: u16) -> [u8; 32] {
+    match n {
+        0 => ACCOUNT_SECRET,
+        1..=200 => [0x20 + n as u8; 32],
+        // Past the single-byte accounts: a different first byte keeps them apart, and a valid scalar.
+        _ => {
+            let mut secret = [0x10; 32];
+            secret[30..].copy_from_slice(&n.to_be_bytes());
+            secret
+        }
+    }
 }
 
 /// Test account `n`'s address.
-pub fn address(n: u8) -> AccountId {
+pub fn address(n: u16) -> AccountId {
     eip712::address(SigningKey::from_slice(&secret(n)).unwrap().verifying_key())
 }
 
 /// A config for the stand-in with test accounts `accounts`, each trading BTC-USD in `bar` bars as
 /// `config`'s does and closing on stop, and `extra` TOML after the rest.
-pub fn config_many(stand_in: &StandIn, dir: &Path, bar: &str, accounts: &[u8], extra: &str) -> Config {
+pub fn config_many(stand_in: &StandIn, dir: &Path, bar: &str, accounts: &[u16], extra: &str) -> Config {
     let mut text = format!(
         r#"
 [node]

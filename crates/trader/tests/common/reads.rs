@@ -99,3 +99,21 @@ pub fn emissions_answer(account: &str, entitled: &str, newest: &str) -> Value {
     json!({ "seq": 40, "root": format!("0x{}", "00".repeat(32)), "account": account, "entitled": entitled,
         "siblings": [], "accepted_seq": 40, "newest_seq": 50, "newest_entitled": newest, "claimable": true })
 }
+
+/// The marks history, served by window and page as the node serves it.
+pub async fn marks(State(s): State<Arc<StandIn>>, Query(query): Query<BTreeMap<String, String>>) -> Response {
+    let number = |key: &str| query.get(key).and_then(|v| v.parse::<i64>().ok());
+    let (from, to) = (number("from_ms").unwrap_or(i64::MIN), number("to_ms").unwrap_or(i64::MAX));
+    let limit = number("limit").map_or(500, |limit| limit as usize);
+    let (entries, next) = s.with(|i| {
+        i.marks_reads += 1;
+        let window: Vec<Value> =
+            i.marks.iter().filter(|b| (from..=to).contains(&b["ts"].as_i64().unwrap())).cloned().collect();
+        let page = limit.min(i.marks_page.unwrap_or(limit));
+        let next = (window.len() > page).then(|| window[page - 1]["ts"].as_i64().unwrap() + 1);
+        (window.into_iter().take(page).collect::<Vec<_>>(), i.marks_next.or(next))
+    });
+    axum::Json(json!({ "market": 1, "resolution": query.get("resolution"), "entries": entries, "next": next,
+        "max_limit": 2000 }))
+    .into_response()
+}

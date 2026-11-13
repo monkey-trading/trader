@@ -17,6 +17,7 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use alloy_primitives::B256;
 use engine_core::Fixed;
 use engine_core::access::EligibilityClass;
 use engine_core::types::AccountId;
@@ -31,6 +32,7 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use crate::accounts::Lifecycle;
 use crate::accounts::claim::is_wrong_signer;
 use crate::accounts::deposit::Source;
+use crate::chain::idle::{self, Place};
 use crate::chain::progress;
 use crate::config::RateSection;
 use crate::console::funding::jobs::{Jobs, Outcome};
@@ -39,12 +41,16 @@ use crate::node::CallError;
 
 pub(super) use routes::routes;
 
-/// The most accounts one request may name, and the most bytes a request naming them takes: an address
-/// is 44 bytes of JSON, and a declaration's statement is short.
-const MOST_ACCOUNTS: usize = 500;
-pub(super) const MAX_BODY: usize = 32 * 1024;
-/// The most jobs run at once: each holds a node connection and may hold a chain transaction.
+/// The most bytes a request may take. A request names at most every account the bot has, so that a
+/// selection of the whole fleet is one request that starts every job or none: an address is 44 bytes of
+/// JSON, and a declaration's statement is short, so this holds a fleet of tens of thousands.
+pub(super) const MAX_BODY: usize = 4 * 1024 * 1024;
+/// The most jobs that hold a place at once: each holds a node connection and may hold a chain
+/// transaction. A job holds one only while it signs, sends or follows a transaction or makes its
+/// requests to the node, and frees it while it waits for the node to credit or pay (`chain::idle`).
 const JOBS_AT_ONCE: usize = 4;
+/// How long a transaction a job sent is followed for after the job ended without its receipt.
+const FOLLOW_FOR: Duration = Duration::from_secs(60 * 60);
 /// The most statuses read at once, how long one read may take, how old a read may be before it is made
 /// again, and how long after the console last asked the reads go on.
 const READS_AT_ONCE: usize = 2;
@@ -75,7 +81,7 @@ pub enum Action {
 /// Why a request was refused.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// No account is named, or too many.
+    /// No account is named, or more than the bot has.
     Accounts(String),
     /// The address is none of the bot's accounts.
     Unknown(AccountId),
@@ -93,7 +99,7 @@ pub struct Funding {
     /// Every account with an unlocked key, in the config's order.
     keys: Vec<Arc<AccountKey>>,
     by_address: BTreeMap<AccountId, usize>,
-    running: Semaphore,
+    running: Arc<Semaphore>,
     state: Mutex<State>,
     /// The target of an answer another key signed, once one has been read.
     signed_elsewhere: watch::Sender<Option<String>>,
@@ -130,7 +136,7 @@ impl Funding {
             lifecycle,
             keys: unique,
             by_address,
-            running: Semaphore::new(JOBS_AT_ONCE),
+            running: Arc::new(Semaphore::new(JOBS_AT_ONCE)),
             state: Mutex::default(),
             signed_elsewhere: watch::channel(None).0,
         })
@@ -145,8 +151,9 @@ impl Funding {
     /// Error cases:
     /// - see `Refused`
     pub fn submit(self: &Arc<Self>, action: Action, accounts: &[AccountId]) -> Result<Vec<Value>, Refused> {
-        if accounts.is_empty() || accounts.len() > MOST_ACCOUNTS {
-            return Err(Refused::Accounts(format!("name between one and {MOST_ACCOUNTS} accounts")));
+        if accounts.is_empty() || accounts.len() > self.keys.len() {
+            let most = self.keys.len();
+            return Err(Refused::Accounts(format!("name between one and {most} accounts, the bot's own")));
         }
         if matches!(action, Action::Deposit { from: Source::Funding, .. }) && !self.lifecycle.has_funding() {
             return Err(Refused::NoFundingKey);
@@ -192,11 +199,12 @@ impl Funding {
         }
     }
 
-    /// Runs one job: waits for a place, acts, and records how it ended. A job that stops before it
-    /// ends, by a panic or the runtime's end, is recorded as failed, frees its account and is logged.
+    /// Runs one job: waits for a place, acts, and records how it ended. The job holds its place only while
+    /// it works, not while it waits for the node (`idle::wait`). A job that stops before it ends, by a
+    /// panic or the runtime's end, is recorded as failed, frees its account and is logged.
     async fn run_job(self: Arc<Self>, id: u64, action: Action, account: AccountId) {
         let mut finish = Finish { funding: &self, id, account, ended: false };
-        let _place = self.running.acquire().await.expect("the semaphore is never closed");
+        let place = Place::take(Arc::clone(&self.running)).await;
         self.state().jobs.running(id);
         info!("started");
         let key = &self.keys[self.by_address[&account]];
@@ -204,7 +212,7 @@ impl Funding {
             let funding = Arc::clone(&self);
             Arc::new(move |step| funding.state().jobs.progress(id, step))
         };
-        let outcome = progress::with_sink(sink, jobs::act(&self.lifecycle, key, action)).await;
+        let outcome = progress::with_sink(sink, idle::with_place(place, jobs::act(&self.lifecycle, key, action))).await;
         match &outcome {
             Outcome::Landed(summary) => info!("landed: {summary}"),
             Outcome::Failed { reason, signed_elsewhere } => {
@@ -214,8 +222,31 @@ impl Funding {
                 }
             }
         }
+        let unsettled = self.state().jobs.unsettled(id);
         finish.ended = true;
         self.end(id, account, outcome);
+        self.follow(id, unsettled);
+    }
+
+    /// Follows the transactions job `id` sent that no receipt was found for when it ended, such as one
+    /// that stayed pending past the receipt wait, until each is mined or reverts, and shows how each
+    /// came out on the ended job. Nothing is sent again.
+    fn follow(self: &Arc<Self>, id: u64, unsettled: Vec<B256>) {
+        let mut state = self.state();
+        if state.stopped {
+            return;
+        }
+        for tx in unsettled {
+            let funding = Arc::clone(self);
+            let task = tokio::spawn(async move {
+                let Ok(chain) = funding.lifecycle.chain() else { return };
+                if let Some(step) = chain.settle(tx, FOLLOW_FOR).await {
+                    funding.state().jobs.progress(id, step);
+                }
+            });
+            state.running.retain(|job| !job.is_finished());
+            state.running.push(task.abort_handle());
+        }
     }
 
     /// Ends job `id`, frees its account and drops what was read of it, which the job changed.

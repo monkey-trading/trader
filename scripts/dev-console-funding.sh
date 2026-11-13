@@ -62,12 +62,24 @@ nonce_of() { cast nonce --rpc-url "$dev_stack_rpc" "$1"; }
 same() { python3 -c 'import sys; from decimal import Decimal as D; sys.exit(0 if D(sys.argv[1]) == D(sys.argv[2]) else 1)' "$1" "$2"; }
 accounts() { "$trader" accounts --config "$work/bot.toml" "$@" 2>&1 | tee -a "$work/bot-accounts.log"; }
 # Starts the bot, logging to the named file, and waits for its console.
+# On a newly picked console port, so a start that loses it to another process is run again on a new one.
 start_bot() {
+  dev_stack_attempts start_bot_once "$1"
+}
+start_bot_once() {
+  console_port="$(dev_stack_free_port)"
+  console="https://127.0.0.1:$console_port"
+  write_bot_config
   "$trader" run --config "$work/bot.toml" > "$work/$1" 2>&1 &
   bot_pid=$!
   for _ in $(seq 1 200); do
     grep -q 'console listening' "$work/$1" && return 0
-    kill -0 "$bot_pid" 2>/dev/null || fail "the bot exited at startup"
+    if ! kill -0 "$bot_pid" 2>/dev/null; then
+      wait "$bot_pid" 2>/dev/null || true
+      bot_pid=""
+      if dev_stack_lost_port "$work/$1"; then dev_stack_port_lost=1; return 0; fi
+      fail "the bot exited at startup"
+    fi
     sleep 0.2
   done
   fail "the console never listened"
@@ -124,9 +136,20 @@ step "give each account 1,500 USDC and 1 ETH, and the funding key 1,000 USDC and
 for account in "${addresses[@]}"; do dev_stack_wallet "$account" 1500 1; done
 dev_stack_wallet "$funding" 1000 1
 
-step "write the bot's config: two accounts trading BTC-USD, the funding key, and a console"
-console_port="$(dev_stack_free_port)"
-console="https://127.0.0.1:$console_port"
+step "write the bot's config: two accounts trading BTC-USD and the funding key; its console's port is picked at each start"
+# Writes the bot's config: the base file and its console on `$console_port`.
+write_bot_config() {
+  {
+    cat "$work/bot-base.toml"
+    cat <<CONFIG
+
+[console]
+bind = "127.0.0.1:$console_port"
+data_dir = "console-data"
+refresh_interval = "2s"
+CONFIG
+  } > "$work/bot.toml"
+}
 {
   dev_stack_node_config
   echo
@@ -170,15 +193,10 @@ CONFIG
 [funding]
 key = { type = "hex_file", path = "funding.hex" }
 
-[console]
-bind = "127.0.0.1:$console_port"
-data_dir = "console-data"
-refresh_interval = "2s"
-
 [logging]
 level = "info"
 CONFIG
-} > "$work/bot.toml"
+} > "$work/bot-base.toml"
 chmod 600 "$work"/*.hex
 
 step "neither account has been credited by the node"

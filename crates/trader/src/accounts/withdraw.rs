@@ -15,11 +15,12 @@ use engine_core::command::WithdrawalRequest;
 use engine_core::eip712::withdrawal_hash;
 use engine_core::event::Event;
 use engine_core::types::AccountId;
-use tokio::time::{Instant, sleep};
+use tokio::time::Instant;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::accounts::{Lifecycle, REQUEST_EXPIRY_MS, retry_later, usdc_units};
 use crate::chain::contracts::{Vault, revert_reason};
+use crate::chain::idle;
 use crate::chain::{Call, TxError};
 use crate::keys::AccountKey;
 use crate::node::CallError;
@@ -123,7 +124,7 @@ impl Lifecycle {
                 (Some(wait), _) => {
                     info!(?wait, "the node asks to request later: {error}");
                     unsettled = Some(nonce);
-                    sleep(wait.min(deadline.saturating_duration_since(Instant::now()))).await;
+                    idle::wait(wait.min(deadline.saturating_duration_since(Instant::now()))).await;
                 }
                 (None, CallError::Refused { status: 409, .. }) if unsettled.is_some() => {
                     bail!(
@@ -192,7 +193,7 @@ impl Lifecycle {
                     if Instant::now() >= deadline {
                         return Err(self.overdue(&paid, position.filter(|_| requested_seq.is_some())));
                     }
-                    sleep(self.poll_interval).await;
+                    idle::wait(self.poll_interval).await;
                     continue;
                 }
             };
@@ -229,7 +230,7 @@ impl Lifecycle {
                 if Instant::now() >= deadline {
                     return Err(self.overdue(&paid, position.filter(|_| requested_seq.is_some())));
                 }
-                sleep(self.poll_interval).await;
+                idle::wait(self.poll_interval).await;
                 continue;
             }
             let now_s = answer.time_ms / 1000;
@@ -302,7 +303,7 @@ impl Lifecycle {
             if Instant::now() >= deadline {
                 return Err(self.overdue(&paid, position.filter(|_| requested_seq.is_some())));
             }
-            sleep(self.poll_interval).await;
+            idle::wait(self.poll_interval).await;
         }
     }
 

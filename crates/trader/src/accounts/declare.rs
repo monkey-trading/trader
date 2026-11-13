@@ -7,10 +7,11 @@ use engine_core::auth::RequestAuth;
 use engine_core::eip712::eligibility_hash;
 use engine_core::event::Event;
 use engine_core::types::AccountId;
-use tokio::time::{Instant, sleep};
+use tokio::time::Instant;
 use tracing::{Instrument, info, info_span, warn};
 
 use crate::accounts::{Lifecycle, REQUEST_EXPIRY_MS, retry_later};
+use crate::chain::idle;
 use crate::keys::AccountKey;
 use crate::node::CallError;
 
@@ -77,13 +78,13 @@ impl Lifecycle {
                 match (retry_later(&error), &error) {
                     (Some(wait), _) => {
                         info!(?wait, "the node asks to declare later: {error}");
-                        sleep(wait.min(deadline.saturating_duration_since(Instant::now()))).await;
+                        idle::wait(wait.min(deadline.saturating_duration_since(Instant::now()))).await;
                     }
                     (None, CallError::Refused { status: 409, .. }) => info!("the nonce moved on; signing again"),
                     (None, CallError::Refused { .. } | CallError::WrongSigner { .. }) => return Err(error.into()),
                     (None, _) => {
                         warn!("no answer to the declaration; reading the account again: {error}");
-                        sleep(self.poll_interval).await;
+                        idle::wait(self.poll_interval).await;
                     }
                 }
             }
