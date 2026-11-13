@@ -135,7 +135,9 @@ impl Lifecycle {
 
     /// Pays each of the account's unpaid payouts once its authorization is signed and usable,
     /// asking for a replacement of one that expired, until none is left unpaid and the queue holds
-    /// nothing more of request `requested_seq`, when there is one. A read that fails is read again
+    /// nothing more of request `requested_seq`, when there is one. A payout counts as paid only
+    /// while the vault still shows its nonce used, read again at each poll and before the end, so a
+    /// payment whose block is undone is paid again. A read that fails is read again
     /// at the next poll, and an authorization the vault refuses for now, out of the chain's time or
     /// of a signer epoch gone, is tried again on each poll until it is paid, expires or is replaced.
     /// Error cases:
@@ -163,10 +165,7 @@ impl Lifecycle {
             let read = async {
                 // The queue is read before the payouts, so a part it no longer holds is among them.
                 let queued = match requested_seq {
-                    Some(seq) => {
-                        let queue = self.node.withdrawal_queue(account).await?;
-                        Some(queue.into_iter().find(|queued| queued.requested_seq == seq))
-                    }
+                    Some(seq) => Some(self.node.queued_withdrawal(account, seq).await?),
                     None => None,
                 };
                 Ok::<_, CallError>((queued, self.node.payouts(account).await?))
@@ -198,6 +197,31 @@ impl Lifecycle {
                     position = Some(mine.position);
                 }
                 _ => {}
+            }
+            // A payment counts only while the vault still holds it: one whose block was undone is paid
+            // again, and none is reported paid on a read that cannot say.
+            let mut verified = true;
+            for nonce in done.iter().copied().collect::<Vec<_>>() {
+                match self.chain()?.view(self.vault, Vault::usedNoncesCall { account: wallet, nonce }).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        warn!(nonce, "the vault no longer holds the payment; paying the payout again");
+                        done.remove(&nonce);
+                        paid.retain(|paid| paid.nonce != nonce);
+                    }
+                    Err(e) => {
+                        not_read(&mut unread, &e);
+                        verified = false;
+                        break;
+                    }
+                }
+            }
+            if !verified {
+                if Instant::now() >= deadline {
+                    return Err(self.overdue(&paid, position.filter(|_| requested_seq.is_some())));
+                }
+                sleep(self.poll_interval).await;
+                continue;
             }
             let now_s = answer.time_ms / 1000;
             let unpaid: Vec<&Payout> = answer.payouts.iter().filter(|payout| !done.contains(&payout.nonce)).collect();
@@ -333,8 +357,11 @@ impl Lifecycle {
     }
 
     /// Asks the node to replace payout `nonce`'s authorization, which expired at `expires_at`.
+    /// A request the node did not answer, or whose answer does not verify, is left to be asked again
+    /// after `REISSUE_AGAIN_POLLS` polls, as a refusal a wait cures is.
     /// Error cases:
     /// - the node refuses it for a reason a wait does not cure, such as a signature it does not take
+    /// - an answer is signed by another key
     async fn reissue(&self, key: &AccountKey, nonce: u64, expires_at: u64) -> anyhow::Result<()> {
         let account = key.address();
         let hash = reissue_hash(&self.domain, account, nonce, expires_at);
@@ -342,9 +369,14 @@ impl Lifecycle {
         info!(nonce, expires_at, "the authorization expired unpaid; asking for another");
         match self.node.reissue(account, nonce, &request).await {
             Ok(_) => Ok(()),
-            // Already replaced, or not yet expired by the node's clock: the payouts show which, and the
-            // bot asks again later if they still show it expired.
-            Err(e @ (CallError::Refused { status: 400, .. } | CallError::RetryLater { .. })) => {
+            // Already replaced, not yet expired by the node's clock, or not answered: the payouts show
+            // which, and the bot asks again later if they still show it expired.
+            Err(
+                e @ (CallError::Refused { status: 400, .. }
+                | CallError::RetryLater { .. }
+                | CallError::Failed { .. }
+                | CallError::Unverified { .. }),
+            ) => {
                 warn!("the reissue was not taken: {e}");
                 Ok(())
             }

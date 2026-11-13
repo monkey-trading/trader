@@ -9,12 +9,13 @@ use std::time::Duration;
 use alloy_primitives::{B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use serde_json::{Value, json};
-use trader::accounts::claim::{Claimed, watch};
+use trader::accounts::claim::{Batching, Claimed, watch, watch_batched};
 use trader::chain::contracts::Vault;
 use trader::keys::AccountKey;
 
 use common::lifecycle::chain::VAULT;
 use common::lifecycle::{Setup, account, funding_wallet, until, wallet, within};
+use engine_core::types::AccountId;
 
 /// One MONKEY in base units.
 const MONKEY: u128 = 1_000_000_000_000_000_000;
@@ -202,6 +203,48 @@ async fn a_failing_claim_warns_once_and_resolves() {
     assert_eq!(text.matches("alert_resolved=\"monkey_claim_failed\"").count(), 1, "{text}");
 }
 
+/// A claims pass asks its accounts a batch at a time and holds a batch while one of its accounts
+/// waits for the vault to record a checkpoint, so the node's watch set of 128 accounts cannot
+/// push that account out before it is claimable; the next batch is asked once it is claimed.
+#[tokio::test]
+async fn a_batch_is_held_while_an_account_waits_for_its_checkpoint() {
+    let s = Setup::start(true).await;
+    let (first, second) = (emissions_path(), other_emissions_path());
+    s.answer(&first, 200, proof(MONKEY, MONKEY, false));
+    s.answer(&second, 200, other_proof(MONKEY, MONKEY, true));
+    let (lifecycle, keys) = two_keys(&s).await;
+    let batching = Batching { size: 1, poll: Duration::from_millis(10), bound: Duration::from_secs(30) };
+    let task = tokio::spawn(watch_batched(lifecycle, keys, U256::from(1), Duration::from_millis(20), batching));
+    until("five checks of the waiting account", || reads(&s, &first) >= 5).await;
+    assert_eq!(reads(&s, &second), 0, "the next batch waits for the first");
+    s.answer(&first, 200, proof(MONKEY, MONKEY, true));
+    until("both claimed", || s.chain.sent().len() >= 2).await;
+    task.abort();
+    assert!(reads(&s, &second) >= 1);
+}
+
+/// An account still waiting when its batch's bound passes is left for the next pass, which goes on
+/// to the next batch, and is warned of once; the warning clears when it is claimed.
+#[tokio::test]
+async fn an_account_that_keeps_waiting_is_warned_of_once_and_does_not_hold_the_pass() {
+    let s = Setup::start(true).await;
+    let (first, second) = (emissions_path(), other_emissions_path());
+    s.answer(&first, 200, proof(MONKEY, MONKEY, false));
+    s.answer(&second, 200, other_proof(MONKEY, MONKEY, true));
+    let lines = common::lifecycle::Lines::default();
+    let _logs = tracing::subscriber::set_default(lines.subscriber());
+    let (lifecycle, keys) = two_keys(&s).await;
+    let batching = Batching { size: 1, poll: Duration::from_millis(5), bound: Duration::from_millis(50) };
+    let task = tokio::spawn(watch_batched(lifecycle, keys, U256::from(1), Duration::from_millis(20), batching));
+    until("the second account's claim", || !s.chain.sent().is_empty()).await;
+    until("the first account asked in another pass", || reads(&s, &first) >= 30).await;
+    s.answer(&first, 200, proof(MONKEY, MONKEY, true));
+    until("the warning to clear", || lines.text().contains("alert_resolved=\"monkey_claim_waiting\"")).await;
+    task.abort();
+    let text = lines.text();
+    assert_eq!(text.matches("alert=\"monkey_claim_waiting\"").count(), 1, "{text}");
+}
+
 // ── Helpers ──
 
 fn emissions_path() -> String {
@@ -214,4 +257,36 @@ fn proof(entitled: u128, newest: u128, claimable: bool) -> Value {
     json!({ "seq": 40, "root": B256::repeat_byte(9), "account": account(), "entitled": entitled.to_string(),
         "siblings": [B256::repeat_byte(1), B256::repeat_byte(2)], "accepted_seq": 40, "newest_seq": 44,
         "newest_entitled": newest.to_string(), "claimable": claimable })
+}
+
+fn other() -> AccountId {
+    AccountId(funding_wallet().into_array())
+}
+
+fn other_emissions_path() -> String {
+    format!("/v1/accounts/{}/emissions", other())
+}
+
+/// The proof of the funding key's wallet as a second account, which a claim pays for from its own
+/// wallet.
+fn other_proof(entitled: u128, newest: u128, claimable: bool) -> Value {
+    let mut proof = proof(entitled, newest, claimable);
+    proof["account"] = json!(other());
+    proof
+}
+
+/// How many times the bot read `path`.
+fn reads(s: &Setup, path: &str) -> usize {
+    s.node.with(|i| i.lifecycle.reads.get(path).copied().unwrap_or_default())
+}
+
+/// A lifecycle and the keys of the test account and, as a second account, the funding key.
+async fn two_keys(s: &Setup) -> (Arc<trader::accounts::Lifecycle>, Vec<Arc<AccountKey>>) {
+    let lifecycle = Arc::new(trader::accounts::Lifecycle::connect(&s.cfg, |_| None).await.unwrap());
+    let funding = &s.cfg.funding.as_ref().unwrap().key;
+    let keys = vec![
+        Arc::new(AccountKey::load(&s.cfg.plans[0].key, |_| None).await.unwrap()),
+        Arc::new(AccountKey::load(funding, |_| None).await.unwrap()),
+    ];
+    (lifecycle, keys)
 }

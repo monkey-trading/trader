@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
+use alloy_eips::BlockNumberOrTag;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256};
 use alloy_provider::Provider;
@@ -74,11 +75,19 @@ pub enum Sent {
     Landed(B256),
 }
 
-/// A call's guard: given a block by which another transaction may have taken the nonce of the
+/// A block by which a nonce was seen spent: its number, and its hash, which names it on the chain
+/// that endpoint saw it on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spent {
+    pub number: u64,
+    pub hash: B256,
+}
+
+/// A call's guard: given the block by which another transaction may have taken the nonce of the
 /// call's last transaction, and the hashes of every transaction signed for the call, the one among
 /// them whose effect the chain holds at that block, or `None` when it holds none of theirs. A read
 /// it cannot make is an error, and the transaction is followed on.
-pub type Guard<'a> = dyn Fn(u64, Vec<B256>) -> BoxFuture<'a, anyhow::Result<Option<B256>>> + Sync + 'a;
+pub type Guard<'a> = dyn Fn(Spent, Vec<B256>) -> BoxFuture<'a, anyhow::Result<Option<B256>>> + Sync + 'a;
 
 impl Chain {
     /// Sends `call` from `payer`, which signs it and pays its gas, and waits for its receipt. Once
@@ -290,7 +299,7 @@ impl Chain {
                 (Some(block), Some(guard)) => match guard(block, hashes.clone()).await {
                     Ok(Some(hash)) => return Ok(Followed::Landed(hash)),
                     Ok(None) => return Ok(Followed::Replaced),
-                    Err(e) => debug!(block, "whether {} landed was not read: {e:#}", call.what),
+                    Err(e) => debug!(block = block.number, "whether {} landed was not read: {e:#}", call.what),
                 },
                 (Some(_), None) if matches!(lookup, Lookup::Absent) => {
                     absent += 1;
@@ -309,17 +318,22 @@ impl Chain {
         }
     }
 
-    /// The latest block on an endpoint where `from`'s nonce `nonce` is mined by that block, both read
-    /// from the one endpoint; `None` while it is not mined, or neither is read.
-    async fn spent_by(&self, from: Address, nonce: u64) -> Option<u64> {
+    /// The latest block on an endpoint where `from`'s nonce `nonce` is mined by that block, its hash
+    /// and the count read at that hash, all from the one endpoint; `None` while it is not mined, or
+    /// none is read.
+    async fn spent_by(&self, from: Address, nonce: u64) -> Option<Spent> {
         let read = self
             .read(|endpoint| async move {
-                let block = endpoint.get_block_number().await?;
-                let count = endpoint.get_transaction_count(from).block_id(BlockId::number(block)).await?;
-                Ok((block, count))
+                let number = endpoint.get_block_number().await?;
+                let block = endpoint.get_block_by_number(BlockNumberOrTag::Number(number)).await?;
+                let hash = block
+                    .map(|block| block.header.hash)
+                    .ok_or_else(|| RpcError::local_usage_str("the latest block is not held"))?;
+                let count = endpoint.get_transaction_count(from).block_id(BlockId::hash(hash)).await?;
+                Ok((Spent { number, hash }, count))
             })
             .await;
-        read.ok().and_then(|(block, count)| (count > nonce).then_some(block))
+        read.ok().and_then(|(spent, count)| (count > nonce).then_some(spent))
     }
 
     /// What the endpoints say of the receipts of `hashes`: the first an endpoint holds, or whether

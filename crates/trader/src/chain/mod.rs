@@ -12,7 +12,7 @@
 pub mod contracts;
 mod send;
 
-pub use send::{Guard, Sent};
+pub use send::{Guard, Sent, Spent};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -182,16 +182,17 @@ impl Chain {
         C::abi_decode_returns(&data).map_err(|e| ReadError::Undecodable(e.to_string()))
     }
 
-    /// `call`'s return from `to` at block `block`: from an endpoint that holds that block, so a read
-    /// at a block another read named sees what that one saw.
+    /// `call`'s return from `to` at the block whose hash is `block`: from an endpoint that holds that
+    /// block, so a read at a block another read named sees what that one saw, not another chain's
+    /// block of the same number.
     /// Error cases:
     /// - see `ReadError`; an endpoint without the block gives an error answer, and the next is asked
-    pub async fn view_at<C: SolCall>(&self, to: Address, call: C, block: u64) -> Result<C::Return, ReadError> {
+    pub async fn view_at<C: SolCall>(&self, to: Address, call: C, block: B256) -> Result<C::Return, ReadError> {
         let request = request(None, to, call.abi_encode().into());
         let data = self
             .read(|endpoint| {
                 let request = request.clone();
-                async move { endpoint.call(request).block(BlockId::number(block)).await }
+                async move { endpoint.call(request).block(BlockId::hash(block)).await }
             })
             .await?;
         C::abi_decode_returns(&data).map_err(|e| ReadError::Undecodable(e.to_string()))

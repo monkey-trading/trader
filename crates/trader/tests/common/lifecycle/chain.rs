@@ -44,6 +44,8 @@ pub struct Ledger {
     pub monkey: BTreeMap<Address, U256>,
     pub monkey_claimed: BTreeMap<Address, U256>,
     pub used_nonces: BTreeSet<(Address, u64)>,
+    /// What each payment the vault made to an account moved, by account and nonce.
+    paid: BTreeMap<(Address, u64), U256>,
     pub nonces: BTreeMap<Address, u64>,
     pub sent: Vec<Sent>,
     /// Receipts by transaction hash, and every log in them.
@@ -77,6 +79,15 @@ pub struct Ledger {
     pub lag: u64,
     /// How many requests of each method it answered.
     pub methods: BTreeMap<String, usize>,
+    /// How many payments are undone, as when their block is: each, just before the next read of its
+    /// nonce, leaves the nonce unused and the account's USDC as it was.
+    pub undo_payments: u32,
+    /// How many reads of a used nonce answer unused, as from an endpoint behind.
+    pub unused_reads: u32,
+    /// The block each read of a block other than the latest named, by method: a number, or a hash.
+    pub pinned: Vec<(String, Value)>,
+    /// The hashes of the blocks it gave.
+    pub served: Vec<B256>,
 }
 
 /// A running stand-in chain.
@@ -160,12 +171,20 @@ impl Ledger {
                 let address: Address = serde_json::from_value(params[0].clone()).unwrap();
                 Ok(json!(self.eth.get(&address).copied().unwrap_or_default()))
             }
+            "eth_getBlockByNumber" => {
+                let number = u64::from_str_radix(params[0].as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+                let hash = keccak256(number.to_be_bytes());
+                self.served.push(hash);
+                Ok(block(number, hash))
+            }
             "eth_getTransactionCount" => {
+                self.pin(method, &params[1]);
                 let address: Address = serde_json::from_value(params[0].clone()).unwrap();
                 let pending = if params[1] == "pending" { self.pending } else { 0 };
                 Ok(quantity((self.nonces.get(&address).copied().unwrap_or_default() + pending).into()))
             }
             "eth_estimateGas" | "eth_call" => {
+                self.pin(method, &params[1]);
                 let call = &params[0];
                 let to: Address = serde_json::from_value(call["to"].clone()).unwrap();
                 let from: Address = serde_json::from_value(call["from"].clone()).unwrap_or_default();
@@ -175,6 +194,18 @@ impl Ledger {
                 }
                 if method == "eth_estimateGas" {
                     return Ok(quantity(self.estimate.unwrap_or(100_000).into()));
+                }
+                if input.get(..4) == Some(&Vault::usedNoncesCall::SELECTOR[..]) && self.unused_reads > 0 {
+                    self.unused_reads -= 1;
+                    return Ok(json!(Bytes::from(false.abi_encode())));
+                }
+                if input.get(..4) == Some(&Vault::usedNoncesCall::SELECTOR[..]) && self.undo_payments > 0 {
+                    let read = Vault::usedNoncesCall::abi_decode(&input).unwrap();
+                    if let Some(amount) = self.paid.remove(&(read.account, read.nonce)) {
+                        self.undo_payments -= 1;
+                        self.used_nonces.remove(&(read.account, read.nonce));
+                        *self.usdc.entry(read.account).or_default() -= amount;
+                    }
                 }
                 self.view(to, from, &input).map(|data| json!(Bytes::from(data))).map_err(|data| revert_error(&data))
             }
@@ -222,6 +253,13 @@ impl Ledger {
                 Ok(json!(self.logs.iter().filter(matches).cloned().collect::<Vec<_>>()))
             }
             other => Err(json!({ "code": -32601, "message": format!("{other} is not served here") })),
+        }
+    }
+
+    /// Records that a read named a block, unless it is the latest or the pending one.
+    fn pin(&mut self, method: &str, block: &Value) {
+        if !matches!(block.as_str(), None | Some("latest" | "pending")) || block.is_object() {
+            self.pinned.push((method.to_owned(), block.clone()));
         }
     }
 
@@ -355,6 +393,7 @@ impl Ledger {
             (VAULT, Vault::withdrawCall::SELECTOR) => {
                 let w = Vault::withdrawCall::abi_decode(input).unwrap().withdrawal;
                 self.used_nonces.insert((w.account, w.nonce));
+                self.paid.insert((w.account, w.nonce), w.amount);
                 *self.usdc.entry(w.account).or_default() += w.amount;
                 let event = Vault::WithdrawalPaid {
                     account: w.account,
@@ -400,6 +439,16 @@ fn sender(raw: &[u8]) -> (Address, u64) {
     bytes[64] = 27 + u8::from(sig.v());
     let from = eip712::recover(&signed.tx().signature_hash(), &Signature::from(bytes)).expect("a valid signature");
     (Address::from(from.0), signed.tx().nonce)
+}
+
+/// A block of `number` and `hash`, as an endpoint answers for it.
+fn block(number: u64, hash: B256) -> Value {
+    let zero = B256::ZERO;
+    json!({ "hash": hash, "parentHash": zero, "sha3Uncles": zero, "miner": Address::ZERO, "stateRoot": zero,
+        "transactionsRoot": zero, "receiptsRoot": zero, "logsBloom": format!("0x{}", "00".repeat(256)),
+        "difficulty": "0x0", "number": format!("0x{number:x}"), "gasLimit": "0x1c9c380", "gasUsed": "0x0",
+        "timestamp": "0x1", "extraData": "0x", "mixHash": zero, "nonce": "0x0000000000000000",
+        "baseFeePerGas": "0x1", "size": "0x1", "uncles": [], "transactions": [] })
 }
 
 /// A JSON-RPC revert error carrying `data`.

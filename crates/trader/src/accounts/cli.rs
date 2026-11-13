@@ -187,7 +187,8 @@ pub async fn run(
 
 /// The confirmed declarations of `class` for `keys`' accounts that have not declared: those
 /// `confirm` names, and, in a `terminal`, those the user confirms when asked after reading the
-/// statement. An account whose declaration is not read is not asked.
+/// statement. An account whose declaration is not read is not asked, and is confirmed only when
+/// `confirm` names it.
 /// Error cases:
 /// - `confirm` names an account not among `keys`
 /// - the terminal cannot be read
@@ -207,8 +208,14 @@ async fn confirm_declarations(
         match lifecycle.declared(key.address()).await {
             Ok(None) => undeclared.push(key.address()),
             Ok(Some(_)) => {}
-            // Not asked: the account's own line reads it again, and reports it.
-            Err(e) => warn!(account = %key.address(), "its declaration was not read: {e:#}"),
+            // Not asked, unless `confirm` names it: the account's own line reads it again before it
+            // signs, and reports it.
+            Err(e) => {
+                warn!(account = %key.address(), "its declaration was not read: {e:#}");
+                if confirm.contains(&key.address()) {
+                    undeclared.push(key.address());
+                }
+            }
         }
     }
     if undeclared.is_empty() {

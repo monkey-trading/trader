@@ -150,7 +150,8 @@ max_fee_gwei = "1"
 # key = { type = "keystore", path = "keys/funding.json", password = { env = "TRADER_FUNDING_PASSWORD" } }
 
 # Claims each account's MONKEY while the bot runs, once its unclaimed amount reaches the threshold.
-# Needs [chain].
+# Needs [chain]. A pass checks 64 accounts at a time, holding a batch up to five minutes for accounts
+# waiting on the vault to record a checkpoint, and warns (alert `monkey_claim_waiting`) of one still waiting.
 # [claims]
 # threshold = "100"
 # interval = "10m"
