@@ -40,9 +40,7 @@ export function StrategyCard({ address, strategy }: { readonly address: string; 
         action={toggle}
         call={() => api.setStrategyRunning(address, strategy.id, !running)}
       />
-      {/* Keyed by the saved values, so a save (or a change from elsewhere) resets the drafts to them. */}
       <ParamsForm
-        key={strategy.params.map((param) => param.value).join("|")}
         address={address}
         strategyId={strategy.id}
         kind={strategy.kind}

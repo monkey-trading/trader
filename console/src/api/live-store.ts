@@ -216,7 +216,7 @@ export class LiveStore {
       // Fills that arrived whole are read: an earlier failed read of them no longer stands.
       this.failures.clearFills(key);
     }
-    this.book = withMessage(this.book, message);
+    this.book = withMessage(this.book, message, new Set([...this.tracked.keys()].map(keyOf)));
     const after = message.type === "account" ? message.account.figures?.timeMs : undefined;
     this.armSilence(epoch, before !== undefined && after !== undefined ? Math.max(0, after - before) : 0);
     if (message.type === "snapshot") {

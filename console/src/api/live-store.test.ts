@@ -156,12 +156,12 @@ describe("LiveStore", () => {
     expect(store.getSnapshot().accounts[0]?.state).toBe("halted");
   });
 
-  it("reads an account's whole curve when its page opens, then adds each feed point once", async () => {
+  it("holds no curve for an account no page shows, reads the whole curve when its page opens, then adds each feed point once", async () => {
     const { store, feeds, settle, open } = harness({
       account: () => Promise.resolve(ok<AccountView>(readAccount(viewBody({ curve: FULL_CURVE })))),
     });
     await open();
-    expect(store.getSnapshot().curves.get(ADDRESS)).toHaveLength(1);
+    expect(store.getSnapshot().curves.has(ADDRESS)).toBe(false);
 
     store.track(ADDRESS);
     await settle();

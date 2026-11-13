@@ -122,6 +122,25 @@ describe("account controls", () => {
     expect(api.flatten).toHaveBeenCalledOnce();
   });
 
+  it("keeps focus on the flatten's status line when the account reads flattening and then stopped", async () => {
+    const api = stubApi();
+    const held = deferred<Outcome<null>>();
+    api.flatten.mockReturnValue(held.promise);
+    const user = userEvent.setup();
+    const { feeds } = mount(api, PAGE);
+
+    await user.click(await screen.findByRole("button", { name: "Flatten account" }));
+    await user.click(await screen.findByRole("button", { name: "Confirm flatten" }));
+    await waitFor(() => { expect(document.activeElement).toHaveAttribute("aria-live", "polite"); });
+    const status = document.activeElement;
+    feeds[0]?.onMessage(JSON.stringify({ type: "account", account: viewBody({ state: "flattening" }) }));
+    expect(await screen.findByText("The account is closing its positions.")).toBeInTheDocument();
+    expect(status).toHaveFocus();
+    feeds[0]?.onMessage(JSON.stringify({ type: "account", account: viewBody({ state: "stopped" }) }));
+    await waitFor(() => { expect(screen.getByRole("button", { name: "Start account" })).toBeInTheDocument(); });
+    expect(status).toHaveFocus();
+  });
+
   it("does not stop and start again on a double-click", async () => {
     const api = stubApi();
     const user = userEvent.setup();

@@ -61,6 +61,22 @@ describe("parameter form", () => {
     expect(screen.getByText("Saved.")).toBeInTheDocument();
   });
 
+  it("keeps focus in the form when a save changes the saved values", async () => {
+    const api = stubApi();
+    const user = userEvent.setup();
+    const { feeds } = mount(api, PAGE);
+    const field = await screen.findByLabelText("fast");
+    await user.clear(field);
+    await user.type(field, "7");
+    api.setParams.mockResolvedValue({ status: "ok", value: null });
+    await user.keyboard("{Enter}");
+    feeds[0]?.onMessage(JSON.stringify({ type: "account", account: viewBody({ strategies: [{ ...strategyBody(), params: { fast: 7, slow: 20 } }] }) }));
+
+    await waitFor(() => { expect(screen.getByLabelText("fast")).toHaveValue("7"); });
+    expect(screen.getByLabelText("fast")).toBe(field);
+    expect(field).toHaveFocus();
+  });
+
   it("sends every parameter with the strategy's kind, the edited one changed", async () => {
     const api = stubApi();
     const user = userEvent.setup();

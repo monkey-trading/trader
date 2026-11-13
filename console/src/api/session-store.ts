@@ -72,8 +72,16 @@ export class SessionStore {
     return { status: "failed", message: outcome.message };
   }
 
-  /** Marks the session gone, after the bot answered 401. */
-  expire(): void {
+  /** How many times the session has changed hands; a request carries it to say which session it was made in. */
+  get generation(): number {
+    return this.transitions;
+  }
+
+  /** Marks the session gone, after the bot answered 401 to a request made in session `generation`, if it still is. */
+  expire(generation: number = this.transitions): void {
+    if (generation !== this.transitions) {
+      return;
+    }
     this.transitions += 1;
     this.set("anonymous");
   }

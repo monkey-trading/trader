@@ -70,15 +70,24 @@ export function App() {
   useEffect(() => {
     void session.check();
   }, [session]);
-  // An unreachable bot is asked again, so the page comes up on its own once it answers.
+  // An unreachable bot is asked again, and again while it stays so: the status does not change between tries.
   useEffect(() => {
     if (status !== "unreachable") {
       return undefined;
     }
-    const retry = setTimeout(() => {
-      void session.check();
-    }, SESSION_RETRY_MS);
+    let active = true;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const ask = () => {
+      if (!active) {
+        return;
+      }
+      retry = setTimeout(() => {
+        void session.check().then(ask);
+      }, SESSION_RETRY_MS);
+    };
+    ask();
     return () => {
+      active = false;
       clearTimeout(retry);
     };
   }, [session, status]);

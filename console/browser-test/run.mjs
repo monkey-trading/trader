@@ -167,13 +167,18 @@ try {
     }
   }
 
-  // Flatten asks twice, then the positions are gone in the page and in the API.
-  await page.goto(`${url}/accounts/${first.address}`);
-  await page.getByRole("heading", { level: 1, name: short(first.address) }).waitFor();
+  // Flatten asks twice, then the positions are gone in the page and in the API. An account that holds a position
+  // is chosen, so a flatten that does nothing cannot pass: without one the run says to trade longer.
+  const holder = (await api("/api/accounts")).accounts.find((a) => a.figures !== null && a.figures.positions.length > 0);
+  check(holder !== undefined, "no account holds a position to flatten: trade longer (TRADE_SECONDS)");
+  await page.goto(`${url}/accounts/${holder.address}`);
+  await page.getByRole("heading", { level: 1, name: short(holder.address) }).waitFor();
+  await page.getByRole("table", { name: "Open positions" }).waitFor();
   await page.getByRole("button", { name: "Flatten account" }).click();
   await page.getByRole("button", { name: "Confirm flatten" }).click();
   await page.getByText("No open positions.").waitFor();
-  await eventually("the API shows no positions", async () => (await api(`/api/accounts/${first.address}`)).figures.positions.length === 0);
+  await eventually("the API shows no positions", async () => (await api(`/api/accounts/${holder.address}`)).figures.positions.length === 0);
+  check((await api(`/api/accounts/${holder.address}`)).state === "stopped", "the flattened account is not stopped");
 
   check(foreign.length === 0, `requests left the console's origin: ${foreign.join(", ")}`);
   check(problems.length === 0, `page errors: ${problems.join("; ")}`);

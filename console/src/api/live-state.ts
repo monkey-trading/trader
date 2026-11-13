@@ -74,14 +74,18 @@ export function withCurve(book: Book, key: string, points: readonly CurvePoint[]
   return { ...book, curves: new Map(book.curves).set(key, mergeCurve(book.curves.get(key) ?? [], points)) };
 }
 
-/** Takes the feed's opening snapshot: the accounts and totals replace what was known, fills and curves of kept accounts stay. */
-export function withSnapshot(book: Book, overview: Overview): Book {
+/**
+ * Takes the feed's opening snapshot: the accounts and totals replace what was known, fills and curves of kept
+ * accounts stay; curves are held only for the accounts in `shown`, when given.
+ */
+export function withSnapshot(book: Book, overview: Overview, shown: ReadonlySet<string> | null = null): Book {
   const accounts = new Map(overview.accounts.map((account, index) => [identityOf(account, index), account]));
   const fills = new Map([...book.fills].filter(([key]) => accounts.has(key)));
-  const kept = new Map([...book.curves].filter(([key]) => accounts.has(key)));
+  const kept = new Map([...book.curves].filter(([key]) => accounts.has(key) && (shown?.has(key) ?? true)));
   let next: Book = { accounts, curves: kept, totals: overview.totals, fills };
   for (const [index, account] of overview.accounts.entries()) {
-    next = withCurve(next, identityOf(account, index), account.curve);
+    const key = identityOf(account, index);
+    next = shown?.has(key) ?? true ? withCurve(next, key, account.curve) : next;
   }
   return next;
 }
@@ -106,12 +110,13 @@ function keyHeld(book: Book, account: AccountView): string | null {
  * Takes one account's view, which replaces what the book held of it; an account that trades and the book never
  * listed is added last, and an entry that could not start is never added to what the snapshot listed.
  */
-export function withAccount(book: Book, account: AccountView): Book {
+export function withAccount(book: Book, account: AccountView, shown: ReadonlySet<string> | null = null): Book {
   const key = keyHeld(book, account);
   if (key === null) {
     return book;
   }
-  return withCurve({ ...book, accounts: new Map(book.accounts).set(key, account) }, key, account.curve);
+  const next = { ...book, accounts: new Map(book.accounts).set(key, account) };
+  return shown?.has(key) ?? true ? withCurve(next, key, account.curve) : next;
 }
 
 /** Takes an account's fills; fills of an account the book does not list are dropped. */
@@ -122,13 +127,16 @@ export function withFills(book: Book, address: string, fills: readonly Fill[]): 
     : book;
 }
 
-/** Applies one feed message. */
-export function withMessage(book: Book, message: LiveMessage): Book {
+/**
+ * Applies one feed message. Only the accounts in `shown`, those whose pages are open, have a curve held: the
+ * overview draws none, and a page reads the whole curve of its account when it opens. Without `shown`, all do.
+ */
+export function withMessage(book: Book, message: LiveMessage, shown: ReadonlySet<string> | null = null): Book {
   switch (message.type) {
     case "snapshot":
-      return withSnapshot(book, message.overview);
+      return withSnapshot(book, message.overview, shown);
     case "account":
-      return withAccount(book, message.account);
+      return withAccount(book, message.account, shown);
     case "fills":
       return withFills(book, message.address, message.fills);
     case "totals":

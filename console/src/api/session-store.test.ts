@@ -43,6 +43,18 @@ describe("SessionStore", () => {
     expect(store.getSnapshot()).toBe("unreachable");
   });
 
+  it("does not end a session on the 401 of a request made in an earlier one", async () => {
+    const store = storeWith({ login: () => Promise.resolve(ok), logout: () => Promise.resolve(ok) });
+    await store.login("a");
+    const earlier = store.generation;
+    await store.logout();
+    await store.login("a");
+    store.expire(earlier);
+    expect(store.getSnapshot()).toBe("authenticated");
+    store.expire(store.generation);
+    expect(store.getSnapshot()).toBe("anonymous");
+  });
+
   it("ignores a check that began before a login and ends after it", async () => {
     let answer: (outcome: typeof ok | { status: "unauthenticated"; code: null }) => void = () => undefined;
     const store = storeWith({

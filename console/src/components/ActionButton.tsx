@@ -12,6 +12,8 @@ interface ActionButtonProps {
   readonly action: Action;
   /** The call the button makes. */
   readonly call: () => Promise<Outcome<Warned | null>>;
+  /** Whether the button shows its own status line; a parent that keeps the line elsewhere says no. */
+  readonly showStatus?: boolean;
 }
 
 /** Shared look of every button. */
@@ -44,7 +46,7 @@ export function ActionError({
 }
 
 /** A button that runs `action`, cannot be pressed again while pending, and shows its failure in place. */
-export function ActionButton({ label, pendingLabel, action, call }: ActionButtonProps) {
+export function ActionButton({ label, pendingLabel, action, call, showStatus = true }: ActionButtonProps) {
   return (
     <div>
       <button
@@ -60,7 +62,7 @@ export function ActionButton({ label, pendingLabel, action, call }: ActionButton
       >
         {action.pending ? pendingLabel : label}
       </button>
-      <ActionError error={action.error} warning={action.warning} done={action.done} />
+      {showStatus ? <ActionError error={action.error} warning={action.warning} done={action.done} /> : null}
     </div>
   );
 }

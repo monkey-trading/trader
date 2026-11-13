@@ -1,5 +1,5 @@
 /** Start, stop and flatten for one account. Flatten asks for a second press. */
-import { useRef, useState } from "react";
+import { useRef, useState, type RefObject } from "react";
 
 import type { AccountView } from "@/api/types";
 
@@ -12,12 +12,20 @@ import { useAction, type Action } from "./use-action";
  * parent's, which outlives the control: the account reads `flattening` while the request is out, and the answer
  * must show where it was asked for, whatever the account's state became meanwhile.
  */
-function FlattenControl({ address, action }: { readonly address: string; readonly action: Action }) {
+function FlattenControl({
+  address,
+  action,
+  status,
+}: {
+  readonly address: string;
+  readonly action: Action;
+  /** The status line that stays on the page, which focus moves to once the confirm button has gone. */
+  readonly status: RefObject<HTMLParagraphElement | null>;
+}) {
   const { api } = useServices();
   const [confirming, setConfirming] = useState(false);
   const ask = useRef<HTMLButtonElement>(null);
   const confirm = useRef<HTMLButtonElement>(null);
-  const status = useRef<HTMLParagraphElement>(null);
 
   if (!confirming) {
     return (
@@ -39,7 +47,6 @@ function FlattenControl({ address, action }: { readonly address: string; readonl
         >
           {action.pending ? "Flattening…" : "Flatten account"}
         </button>
-        <ActionError error={action.error} warning={action.warning} done={action.done} statusRef={status} />
       </div>
     );
   }
@@ -79,29 +86,38 @@ function FlattenControl({ address, action }: { readonly address: string; readonl
   );
 }
 
-/** The controls of the account at `address`; an account that is starting, flattening or halted takes none. */
+/**
+ * The controls of the account at `address`; an account that is starting, flattening or halted takes none. The two
+ * status lines are the same elements in every state, so what a control says, and where focus rests, stay put when
+ * the account's state changes under it.
+ */
 export function AccountControls({ account, address }: { readonly account: AccountView; readonly address: string }) {
   const { api } = useServices();
   const running = account.state === "running";
   const toggle = useAction(address);
   const flatten = useAction(address);
-  if (account.state !== "running" && account.state !== "stopped") {
-    return (
-      <div>
-        <p className="text-sm text-muted">{WAITING[account.state]}</p>
-        <ActionError error={flatten.error} warning={flatten.warning} done={flatten.done} />
-      </div>
-    );
-  }
+  const flattenStatus = useRef<HTMLParagraphElement>(null);
+  const offered = account.state === "running" || account.state === "stopped";
   return (
-    <div className="flex flex-wrap items-start gap-4">
-      <ActionButton
-        label={running ? "Stop account" : "Start account"}
-        pendingLabel={running ? "Stopping…" : "Starting…"}
-        action={toggle}
-        call={() => api.setAccountRunning(address, !running)}
-      />
-      <FlattenControl address={address} action={flatten} />
+    <div>
+      <div className="flex flex-wrap items-start gap-4">
+        {offered ? (
+          <>
+            <ActionButton
+              label={running ? "Stop account" : "Start account"}
+              pendingLabel={running ? "Stopping…" : "Starting…"}
+              action={toggle}
+              call={() => api.setAccountRunning(address, !running)}
+              showStatus={false}
+            />
+            <FlattenControl address={address} action={flatten} status={flattenStatus} />
+          </>
+        ) : (
+          <p className="text-sm text-muted">{WAITING[account.state]}</p>
+        )}
+      </div>
+      <ActionError error={toggle.error} warning={toggle.warning} done={toggle.done} />
+      <ActionError error={flatten.error} warning={flatten.warning} done={flatten.done} statusRef={flattenStatus} />
     </div>
   );
 }

@@ -228,6 +228,18 @@ describe("App", () => {
     expect(screen.queryByText("No open positions.")).not.toBeInTheDocument();
   });
 
+  it("keeps asking while the bot stays unreachable, and shows the page once it answers", async () => {
+    const api = stubApi();
+    api.session
+      .mockResolvedValueOnce({ status: "unavailable", message: "down" })
+      .mockResolvedValueOnce({ status: "unavailable", message: "down" })
+      .mockResolvedValueOnce({ status: "unavailable", message: "down" });
+    mount(api);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Accounts" }, { timeout: 12_000 })).toBeInTheDocument();
+    expect(api.session.mock.calls.length).toBeGreaterThanOrEqual(4);
+  }, 20_000);
+
   it("says the bot is unreachable and asks again, instead of showing the login page", async () => {
     const api = stubApi();
     api.session.mockResolvedValueOnce({ status: "unavailable", message: "The bot did not answer." });

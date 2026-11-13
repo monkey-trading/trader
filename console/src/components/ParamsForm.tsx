@@ -18,13 +18,21 @@ interface ParamsFormProps {
   readonly action: Action;
 }
 
-/** Edits the periods. The parent keys this by the saved values, so a save resets the drafts. */
+/** Edits the parameters; the drafts start over when the saved values change. */
 export function ParamsForm({ address, strategyId, kind, params, action }: ParamsFormProps) {
   const { api } = useServices();
+  const [problems, setProblems] = useState<Readonly<Record<string, string>>>({});
+  const saved = params.map((param) => `${param.name}=${param.value}`).join("|");
   const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>(
     () => Object.fromEntries(params.map((param) => [param.name, param.value])),
   );
-  const [problems, setProblems] = useState<Readonly<Record<string, string>>>({});
+  // New saved values, from a save or from elsewhere, replace the drafts in place: the form, and the focus in it, stay.
+  const [shown, setShown] = useState(saved);
+  if (shown !== saved) {
+    setShown(saved);
+    setDrafts(Object.fromEntries(params.map((param) => [param.name, param.value])));
+    setProblems({});
+  }
   const prefix = useId();
 
   const editable = params.flatMap((param) => (param.bounds === null ? [] : [{ ...param, bounds: param.bounds }]));

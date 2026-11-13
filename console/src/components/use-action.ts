@@ -32,6 +32,7 @@ export function useAction(address: string): Action {
       return;
     }
     inFlight.current = true;
+    const generation = session.generation;
     setPending(true);
     setError(null);
     setWarning(null);
@@ -46,7 +47,8 @@ export function useAction(address: string): Action {
           void live.refresh(address);
           break;
         case "unauthenticated":
-          session.expire();
+          // A 401 to a request from an earlier session says nothing of this one.
+          session.expire(generation);
           break;
         case "refused":
         case "unavailable":
