@@ -40,7 +40,9 @@ function Row({ account, checked, onToggle }: {
         <span title={account.address}>{shortAddress(account.address)}</span>
         {account.busy ? <span className="ml-2 text-muted">working</span> : null}
       </th>
-      {account.error === null ? (
+      {account.reading ? (
+        <td colSpan={HEAD.length - 2} className="px-2 py-1 text-muted">Reading…</td>
+      ) : account.error === null ? (
         <>
           <td className={CELL}>{account.declared === null ? "Not declared" : account.declared.replace("_", " ")}</td>
           <td className={`${CELL} text-right`}>{formatTrimmed(account.walletEth, 6)}</td>

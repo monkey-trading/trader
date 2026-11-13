@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Dev scenario: two accounts declared, funded, claimed for and withdrawn from through the console, on the
 # chain dev stack (scripts/dev-stack.sh --chain):
-#   1. one account (the first) is declared and funded with `trader accounts`, so the bot can start; two
-#      more (the second and third) are unfunded, so they start as failures that trade nothing, and a
-#      funding key holds 1,000 USDC and gas;
+#   1. two accounts the node has never credited, and a funding key holding 1,000 USDC and gas: the bot
+#      starts with none trading, and serves them through its console;
 #   2. the operator records a MONKEY emission schedule, and the bot runs with its console;
 #   3. the browser test (console/browser-test/funding.mjs, phase prepare) opens the Funding page, selects
-#      the two unfunded accounts, declares both on one confirmation, and deposits 1,000 USDC into the
-#      second from its own wallet and into the third from the funding wallet; each wallet, the vault, the
+#      the two accounts, declares both on one confirmation, and deposits 1,000 USDC into the first from
+#      its own wallet and into the second from the funding wallet; each wallet, the vault, the
 #      funding key and each account's balance and declaration in the node move by exactly that, and the
 #      accounts sent only the transactions their own deposits need;
 #   4. the bot restarts, so the two trade, and trades until each has a MONKEY entitlement; the console
@@ -28,11 +27,10 @@ set -Eeuo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 source "$root/scripts/dev-stack.sh"
 : "${PLAYWRIGHT_DIR:?set PLAYWRIGHT_DIR to a directory with playwright installed}"
-# Anvil's published accounts 2, 3 and 4 are the accounts, and 5 the funding key.
+# Anvil's published accounts 2 and 3 are the accounts, and 5 the funding key.
 keys=(
   5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
   7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6
-  47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a
 )
 funding_key="8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
 period_ms=600000
@@ -120,14 +118,13 @@ work="$dev_stack_work"
 addresses=()
 for key in "${keys[@]}"; do addresses+=("$(cast wallet address --private-key "0x$key")"); done
 funding="$(cast wallet address --private-key "0x$funding_key")"
-anchor="${addresses[0]}"
-managed=("$(tr '[:upper:]' '[:lower:]' <<< "${addresses[1]}")" "$(tr '[:upper:]' '[:lower:]' <<< "${addresses[2]}")")
+managed=("$(tr '[:upper:]' '[:lower:]' <<< "${addresses[0]}")" "$(tr '[:upper:]' '[:lower:]' <<< "${addresses[1]}")")
 
 step "give each account 1,500 USDC and 1 ETH, and the funding key 1,000 USDC and 1 ETH"
 for account in "${addresses[@]}"; do dev_stack_wallet "$account" 1500 1; done
 dev_stack_wallet "$funding" 1000 1
 
-step "write the bot's config: three accounts trading BTC-USD, the funding key, and a console"
+step "write the bot's config: two accounts trading BTC-USD, the funding key, and a console"
 console_port="$(dev_stack_free_port)"
 console="https://127.0.0.1:$console_port"
 {
@@ -184,10 +181,7 @@ CONFIG
 } > "$work/bot.toml"
 chmod 600 "$work"/*.hex
 
-step "declare and fund the first account with the command line, so the bot can start"
-accounts declare --class professional --confirm "$anchor" < /dev/null
-accounts --account "$anchor" deposit --amount 1000 < /dev/null
-same "$(node_balance "$anchor")" 1000 || fail "the first account's balance is $(node_balance "$anchor")"
+step "neither account has been credited by the node"
 for account in "${managed[@]}"; do
   [[ "$(node_balance "$account")" == none ]] || fail "$account was credited before the console funded it"
 done
@@ -197,7 +191,7 @@ start_ms=$(( $(now_ms) / 1000 * 1000 + 10000 ))
 start_at="$(python3 -c 'import datetime, sys; print(datetime.datetime.fromtimestamp(int(sys.argv[1]) / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$start_ms")"
 dev_stack_admin init-emissions --start "$start_at" --period-budget "$dev_stack_period_budget"
 
-step "run the bot: the first account trades, the other two wait unfunded"
+step "run the bot: no account can trade yet, and the console serves both"
 start_bot bot.log
 password="$(sed -nE 's/^console password, shown once .*: ([a-z0-9]+)$/\1/p' "$work/bot.log")"
 [[ ${#password} == 26 ]] || fail "no password was printed"
@@ -219,8 +213,8 @@ done
 [[ "$(nonce_of "${managed[0]}")" == $(( nonce_before[0] + 2 )) ]] || fail "the first managed account sent other than an approval and a deposit"
 [[ "$(nonce_of "${managed[1]}")" == "${nonce_before[1]}" ]] || fail "the second managed account sent a transaction"
 
-step "restart the bot so all three trade, until the two have a MONKEY entitlement (at most three periods)"
-# The first run started without the two unfunded accounts, and exits 1 to say so.
+step "restart the bot so both trade, until the two have a MONKEY entitlement (at most three periods)"
+# The first run started without its accounts, and exits 1 to say so.
 stop_bot 1
 grep -q "2 accounts could not start" "$work/bot.log" || fail "the first run did not report the two accounts that could not start"
 restart_ms="$(now_ms)"

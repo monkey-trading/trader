@@ -10,13 +10,15 @@
 //! config, and no transport error is printed as it is.
 
 pub mod contracts;
+pub mod progress;
 mod rpc;
 mod send;
 
 pub use send::{Guard, Sent, Spent};
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
@@ -44,6 +46,9 @@ pub struct Chain {
     max_fee: u128,
     /// The highest block a transaction of the bot's landed in, which a read's endpoint must reach.
     floor: AtomicU64,
+    /// One turn per sender: a transaction is sent and followed to its receipt before the sender's next,
+    /// since nothing is sent beside one of the sender's that is pending.
+    senders: Mutex<BTreeMap<Address, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// One contract call the bot sends: the contract, the calldata, and what it does, for logs.
@@ -129,6 +134,7 @@ impl Chain {
             poll_interval: section.poll_interval,
             max_fee: section.max_fee_gwei.0,
             floor: AtomicU64::new(0),
+            senders: Mutex::default(),
         })
     }
 

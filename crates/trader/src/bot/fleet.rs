@@ -180,6 +180,8 @@ pub struct Assignment {
     /// An order the controls allowed, waiting for the runner to send it.
     pub pending: Option<Pending>,
     pub queued: bool,
+    /// The bar whose order the node refused for its nonce and was decided again: once per bar.
+    pub nonce_retried: Option<Millis>,
 }
 
 /// A strategy's target after the bar starting at `bar_start`, completed by the command at `ts`, which
@@ -390,6 +392,7 @@ impl Fleet {
                     wanted: None,
                     pending: None,
                     queued: false,
+                    nonce_retried: None,
                 });
             }
             fleet_accounts.push(Account {

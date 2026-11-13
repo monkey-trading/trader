@@ -71,7 +71,7 @@ struct Withdraw {
 /// Every account's funding and the jobs.
 async fn overview(State(server): State<Arc<Server>>) -> Response {
     match server.funding() {
-        Some(funding) => Json(funding.overview().await).into_response(),
+        Some(funding) => Json(funding.overview()).into_response(),
         None => Json(json!({ "enabled": false })).into_response(),
     }
 }

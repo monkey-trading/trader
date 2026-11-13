@@ -11,12 +11,14 @@ use common::{
 use serde_json::json;
 use tokio::sync::oneshot;
 
-/// A signed refusal of the order, such as a stale nonce, is logged, and the next bar orders again.
+/// An order the node refuses for its nonce never entered the log, as when another request of the
+/// account took the nonce: its target is decided again on the node's next nonce, once for its bar, and
+/// a second refusal leaves it to the next bar.
 #[tokio::test]
-async fn a_refused_order_is_retried_on_the_next_bar() {
+async fn an_order_refused_for_its_nonce_is_decided_again_once_per_bar() {
     let stand_in = StandIn::start().await;
     flat_account(&stand_in);
-    stand_in.with(|i| i.statuses.push_back(409));
+    stand_in.with(|i| i.statuses.extend([409, 409]));
     let dir = tempfile::tempdir().unwrap();
     let (stop, stopped) = oneshot::channel::<()>();
     let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
@@ -24,8 +26,10 @@ async fn a_refused_order_is_retried_on_the_next_bar() {
     }));
     rising(&stand_in, 11, &["100", "100", "101", "102"]);
     assert_eq!(order(&stand_in, 1).await["client_id"], T0 + MINUTE);
+    // No command comes between: the bar's order is sent again from the refusal alone.
+    assert_eq!(order(&stand_in, 2).await["client_id"], T0 + MINUTE, "decided again for its bar");
     stand_in.append((15, 0), command(15, T0 + 3 * MINUTE, prices(1, "103", T0 + 3 * MINUTE), json!([])));
-    assert_eq!(order(&stand_in, 2).await["client_id"], T0 + 2 * MINUTE);
+    assert_eq!(order(&stand_in, 3).await["client_id"], T0 + 2 * MINUTE, "the second refusal waits for the next bar");
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
 }

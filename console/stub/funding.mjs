@@ -11,7 +11,7 @@ const JOB_MS = Number(process.env.STUB_JOB_MS ?? 600);
 
 function account(address) {
   return {
-    address, error: null, declared: null, wallet_eth: "1", wallet_usdc: "1500", wallet_monkey: "0", balance: null,
+    address, error: null, reading: false, declared: null, wallet_eth: "1", wallet_usdc: "1500", wallet_monkey: "0", balance: null,
     unclaimed: "25", unclaimed_newest: "25", queued: [], unpaid: [], payouts_loaded: true, busy: false,
   };
 }
@@ -69,7 +69,8 @@ export function start(funding, action, body) {
 /** Does what the action does to the account, and ends its job. */
 function land(item, job, body) {
   job.state = "landed";
-  const tx = `0x${String(job.id).padStart(64, "0")}`;
+  const hash = `0x${String(job.id).padStart(64, "0")}`;
+  const tx = { hash, what: job.action, state: "mined" };
   switch (job.action) {
     case "declare":
       item.declared = body.class;

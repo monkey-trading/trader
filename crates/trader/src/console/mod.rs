@@ -99,7 +99,8 @@ impl Prepared {
 
 impl Console {
     /// Starts serving `accounts` on the prepared address, with figures `node` gives, read at most at
-    /// half `per_ip`, the node's limit on the bot, and the accounts' `funding` when there is any.
+    /// half `per_ip`, the node's limit on the bot, and the accounts' `funding` when there is any, its
+    /// figures read at most at a quarter.
     /// Error cases:
     /// - the prepared listener cannot be handed to the async runtime
     pub async fn start(
@@ -131,8 +132,14 @@ impl Console {
                 }
             })
             .collect();
+        let reads = funding.clone();
         let router = routes::router(Arc::new(Server::new(accounts, views, prepared.password_hash, funding)));
         let mut tasks = JoinSet::new();
+        // An answer another key signed, read by a funding read or action, ends this task, which stops
+        // the bot as one the runner reads does.
+        if let Some(funding) = reads {
+            tasks.spawn(funding.run_reads(per_ip));
+        }
         tasks.spawn(serve(listener, prepared.identity.config, router));
         tasks.spawn(refresher.run());
         Ok(Self { tasks })

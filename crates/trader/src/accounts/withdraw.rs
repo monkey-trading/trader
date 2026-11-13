@@ -50,6 +50,17 @@ pub struct Paid {
     pub tx: B256,
 }
 
+/// The context of an error that ends a withdrawal the node queued as this seq, which a withdrawal
+/// without an amount pays.
+#[derive(Debug)]
+pub struct StillQueued(pub u64);
+
+impl std::fmt::Display for StillQueued {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the withdrawal is queued as seq {}: `withdraw` without --amount pays it", self.0)
+    }
+}
+
 impl Lifecycle {
     /// Withdraws `amount` USDC from `key`'s account when given, then pays every unpaid payout of
     /// the account to the account, each sent by the funding key when there is one: it pays each part
@@ -73,9 +84,7 @@ impl Lifecycle {
             let Some(amount) = amount else { return self.pay(key, None, deadline).await };
             let requested_seq = self.request(key, amount, deadline).await?;
             // Asking again would withdraw twice: what is queued is paid by a withdrawal without an amount.
-            self.pay(key, Some(requested_seq), deadline).await.with_context(|| {
-                format!("the withdrawal is queued as seq {requested_seq}: `withdraw` without --amount pays it")
-            })
+            self.pay(key, Some(requested_seq), deadline).await.map_err(|e| e.context(StillQueued(requested_seq)))
         }
         .instrument(span)
         .await

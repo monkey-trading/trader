@@ -36,10 +36,23 @@ export interface FundingAccount {
   readonly payoutsLoaded: boolean;
   /** An action of the account's has not ended. */
   readonly busy: boolean;
+  /** The bot has not read the account yet: the figures are placeholders. */
+  readonly reading: boolean;
 }
 
 /** The states of a job. */
 export type JobState = "waiting" | "running" | "landed" | "failed";
+
+/** Where a transaction a job sent stands. */
+export type TxState = "sent" | "mined" | "reverted";
+
+/** A transaction a job sent. */
+export interface FundingTx {
+  readonly hash: string;
+  /** What it does. */
+  readonly what: string;
+  readonly state: TxState;
+}
 
 /** One action for one account. */
 export interface FundingJob {
@@ -49,8 +62,8 @@ export interface FundingJob {
   readonly state: JobState;
   /** What it came to, or why it failed. */
   readonly detail: string;
-  /** The hashes of its transactions. */
-  readonly txs: readonly string[];
+  /** The transactions it has sent so far, in order. */
+  readonly txs: readonly FundingTx[];
 }
 
 /** The funding page's whole answer. */

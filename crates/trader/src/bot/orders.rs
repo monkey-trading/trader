@@ -15,7 +15,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::bot::Halt;
-use crate::bot::fleet::{EXPIRES_IN_MS, Nonce, REPLAY_LAG_MS};
+use crate::bot::fleet::{EXPIRES_IN_MS, Fleet, Nonce, REPLAY_LAG_MS, Wanted};
 use crate::bot::run::{Done, Runner, signer_ok};
 use crate::node::api::{MarkBucket, NonceView};
 use crate::node::{CallError, Verified};
@@ -104,7 +104,7 @@ impl Runner {
         if account.state_dirty || account.state_saving || account.state_unsaved {
             return true;
         }
-        let intent = pending.intent;
+        let (intent, wanted) = (pending.intent, pending.wanted);
         let Some(quoted) = fleet.markets[asg.market_slot as usize].mark else {
             warn!(account = %account.address, market = asg.market, "no mark to quote the order at");
             fleet.drop_pending(a, false);
@@ -180,6 +180,7 @@ impl Runner {
                     assignment: a,
                     nonce,
                     expires_at,
+                    wanted: Some(wanted),
                     outcome: node.place_order(&request, admission).await,
                 }
             }
@@ -204,8 +205,9 @@ impl Runner {
         self.in_flight.push(async move { Done::Clock(node.nonce(address).await) }.boxed());
     }
 
-    /// Takes an order's answer: the account's nonce moves on when the engine used it, and an
-    /// account whose key the node refuses stops.
+    /// Takes an order's answer: the account's nonce moves on when the engine used it, an account
+    /// whose key the node refuses stops, and an order refused for a nonce another request of the
+    /// account took has its target decided again.
     /// Error cases:
     /// - an answer signed by another key than the signer
     pub(super) fn order_done(
@@ -214,6 +216,7 @@ impl Runner {
         assignment: u32,
         nonce: u64,
         expires_at: Millis,
+        wanted: Option<Wanted>,
         outcome: Result<Verified<Vec<Event>>, CallError>,
     ) -> Result<(), Halt> {
         signer_ok(&outcome)?;
@@ -241,18 +244,27 @@ impl Runner {
                 // A request the engine answered with a rejection and no fill is in the log and moved nothing:
                 // no fill is to come from it, for any market it named.
                 if rejected && !answer.body.iter().any(|event| matches!(event, Event::Fill { .. })) {
-                    let range = self.fleet.accounts[account as usize].assignments.clone();
-                    for b in range {
-                        let fence = &mut self.fleet.assignments[b as usize].expires_at;
-                        if *fence == Some(expires_at) {
-                            *fence = None;
-                        }
-                    }
+                    unfence(&mut self.fleet, account, expires_at);
                 }
                 if rejected { Nonce::Unknown } else { Nonce::Synced(nonce + 1) }
             }
             Err(e @ CallError::Refused { status: 401 | 403, .. }) => {
                 failure = Some(format!("the node refuses the account: {e}"));
+                Nonce::Unknown
+            }
+            // The node checks a request's nonce before the log, so this one never entered it: another
+            // request of the account, such as the console's withdrawal, took the nonce. The order's
+            // target waits to be decided again on the account as it now is, with the node's next nonce,
+            // once for its bar; a second refusal leaves it to the next bar.
+            Err(e @ CallError::Refused { status: 409, .. }) => {
+                unfence(&mut self.fleet, account, expires_at);
+                let asg = &mut self.fleet.assignments[assignment as usize];
+                let again = wanted.filter(|w| asg.wanted.is_none() && asg.nonce_retried != Some(w.bar_start));
+                if let Some(wanted) = again {
+                    (asg.wanted, asg.nonce_retried) = (Some(wanted), Some(wanted.bar_start));
+                }
+                warn!(account = %self.fleet.accounts[account as usize].address, again = again.is_some(),
+                    "order declined for its nonce, which another request of the account took: {e}");
                 Nonce::Unknown
             }
             Err(e @ CallError::Refused { .. }) => {
@@ -347,5 +359,16 @@ pub(super) fn log_order_events(account: AccountId, events: &[Event]) {
     }
     if events.is_empty() {
         info!(%account, "the request changed nothing");
+    }
+}
+
+/// Lifts the fence of every assignment of `account` that the request signed with `expires_at` set: the
+/// request moved nothing and no fill is to come from it.
+fn unfence(fleet: &mut Fleet, account: u32, expires_at: Millis) {
+    for b in fleet.accounts[account as usize].assignments.clone() {
+        let fence = &mut fleet.assignments[b as usize].expires_at;
+        if *fence == Some(expires_at) {
+            *fence = None;
+        }
     }
 }

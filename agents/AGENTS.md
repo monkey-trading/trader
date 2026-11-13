@@ -55,7 +55,7 @@ list.
   seconds of log after a market's index is exact each series warms up from the node's log-derived
   marks history (`warm.rs`); a fill from an order an account did not sign stops that account
   (`fills.rs`); `day.rs` keeps each account's day loss, its positions' opening times and a split's halt in a file under `[state] dir`, and the daily loss limit closes the account's positions; a split or a failed corporate action in a traded market halts the bot. The `Runner` (`run.rs`, `orders.rs`, `flatten.rs`, `reads.rs`) turns decisions into signed market orders, one
-  request out per account at a time, each account on its own nonce read again after a refusal, none
+  request out per account at a time, each account on its own nonce read again after a refusal (an order refused for its nonce decided again once for its bar), none
   for a bar behind the node's time or before the log has passed every order of that account and
   market that could still enter it; on SIGINT or SIGTERM, once the log has passed those orders, it
   cancels resting orders and optionally closes positions account by account, exiting non-zero when
@@ -70,7 +70,8 @@ list.
   `Vault.withdraw`; every payout goes to the account's own address, and the funding key only pays
   gas and funds `depositFor`. `chain/` reads the chain over one or more JSON-RPC endpoints (after a
   transaction lands, only from one that has reached its block) and sends each transaction to all of
-  them, estimated first, followed to its receipt, signed again only once another transaction has
+  them, estimated first, one per key at a time, its steps reported to a job that shows them
+  (`progress.rs`), followed to its receipt, signed again only once another transaction has
   spent its nonce (a deposit only once the vault holds none of its transactions at a block by which
   the nonce was taken), a revert reported with its reason; `logging.rs` replaces every endpoint's
   URL and key in each log line, output and error; its bindings come from `abi/`, the entries of the pinned engine's vault and
@@ -96,8 +97,8 @@ list.
   curves (`board.rs`) the refresher reads from the node through the bot's paced pool
   (`refresh.rs`); and the embedded app (`assets.rs`), which `build.rs` lists from `console/dist`.
   `files.rs` writes files only the bot's user can read. The funding routes (`console/funding/`,
-  with `[chain]`) declare, deposit, claim and withdraw for the accounts named, as jobs; no request
-  names a destination. No route moves funds away from an account's own key or returns a key. Its `README.md` lists every file.
+  with `[chain]`) declare, deposit, claim and withdraw for the accounts named, as jobs, and read
+  their figures in the background while the console watches; no request names a destination. No route moves funds away from an account's own key or returns a key. Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, with a `[console]` section and a
   strategy's `bounds`, which the config tests load.
 - **console/** — the Vite, React and TypeScript app. `src/main.tsx` mounts `App.tsx` (the page frame,
@@ -112,7 +113,8 @@ list.
   account pages; `src/components/` the shared components and the app context; `src/test-harness.tsx`
   mounts the app over stand-in calls for the component tests (`App.test.tsx`, `controls.test.tsx`,
   `funding.test.tsx`); the funding page (`pages/FundingPage.tsx`, `components/Funding*.tsx`) reads
-  `/api/funding` on a timer (`use-funding.ts`), its answers parsed in `api/funding-parsers.ts`.
+  `/api/funding` on a timer (`use-funding.ts`), its answers parsed in `api/funding-parsers.ts` (types in `funding-types.ts`, fixtures in `funding-fixtures.ts`), each
+  action's state in `use-funding-action.ts`.
   `stub/` is a stand-in console API with three accounts and their funding (`npm run stub`), and
   `browser-test/run.mjs` and `funding.mjs` the Playwright tests run against it or a bot's console from
   outside the repository. Config:

@@ -23,6 +23,7 @@ export function fundingAccountBody(address = ADDRESS, overrides: Record<string, 
     unpaid: [],
     payouts_loaded: true,
     busy: false,
+    reading: false,
     ...overrides,
   };
 }

@@ -70,7 +70,8 @@ pub fn router(server: Arc<Server>) -> Router {
         .merge(api)
         .method_not_allowed_fallback(not_allowed)
         .fallback(assets::serve)
-        .layer(DefaultBodyLimit::max(MAX_BODY))
+        // `read_body` enforces each route's own limit before an extractor sees the body.
+        .layer(DefaultBodyLimit::max(MAX_BODY.max(funding::MAX_BODY)))
         .layer(from_fn(guard::read_body))
         .layer(from_fn(guard::check_origin))
         .layer(from_fn(guard::headers))

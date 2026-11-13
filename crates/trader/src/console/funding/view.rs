@@ -20,6 +20,7 @@ pub fn status(status: &AccountStatus) -> Value {
     json!({
         "address": status.account.to_string(),
         "error": null,
+        "reading": false,
         "declared": status.declared,
         "wallet_eth": units(status.wallet_eth, ETH_DECIMALS),
         "wallet_usdc": units(status.wallet_usdc, USDC_DECIMALS),
@@ -35,5 +36,10 @@ pub fn status(status: &AccountStatus) -> Value {
 
 /// An account whose status could not be read, and why.
 pub fn unread(account: AccountId, reason: &str) -> Value {
-    json!({ "address": account.to_string(), "error": reason })
+    json!({ "address": account.to_string(), "error": reason, "reading": false })
+}
+
+/// An account whose status has not been read yet.
+pub fn reading(account: AccountId) -> Value {
+    json!({ "address": account.to_string(), "error": null, "reading": true })
 }

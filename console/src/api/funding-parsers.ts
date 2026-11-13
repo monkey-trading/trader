@@ -1,11 +1,12 @@
 /** Parsers for the bot's funding answers. */
 import {
-  choice, count, decimal, flag, items, list, note, nullableDecimal, nullableNote, object, ShapeError, text, type Fields,
+  choice, count, decimal, flag, items, note, nullableDecimal, nullableNote, object, text, type Fields,
 } from "@/lib/shape";
 
 import { CLASSES, type EligibilityClass, type Funding, type FundingAccount, type FundingJob } from "./funding-types";
 
 const JOB_STATES = ["waiting", "running", "landed", "failed"] as const;
+const TX_STATES = ["sent", "mined", "reverted"] as const;
 const ACTIONS = ["declare", "deposit", "claim", "withdraw"] as const;
 
 function classOf(fields: Fields, key: string): EligibilityClass {
@@ -16,10 +17,11 @@ function accountOf(fields: Fields): FundingAccount {
   const address = text(fields, "address");
   const error = nullableNote(fields, "error");
   const busy = fields["busy"] === undefined ? false : flag(fields, "busy");
-  if (error !== null) {
+  const reading = flag(fields, "reading");
+  if (error !== null || reading) {
     return {
       address, error, declared: null, walletEth: "0", walletUsdc: "0", walletMonkey: "0", balance: null,
-      unclaimed: "0", unclaimedNewest: "0", queued: [], unpaid: [], payoutsLoaded: false, busy,
+      unclaimed: "0", unclaimedNewest: "0", queued: [], unpaid: [], payoutsLoaded: false, busy, reading,
     };
   }
   return {
@@ -38,6 +40,7 @@ function accountOf(fields: Fields): FundingAccount {
     })),
     payoutsLoaded: flag(fields, "payouts_loaded"),
     busy,
+    reading,
   };
 }
 
@@ -48,12 +51,11 @@ function jobOf(fields: Fields): FundingJob {
     account: text(fields, "account"),
     state: choice(fields, "state", JOB_STATES),
     detail: note(fields, "detail"),
-    txs: list(fields["txs"], "txs").map((tx) => {
-      if (typeof tx !== "string" || tx.length > 100) {
-        throw new ShapeError("a transaction is not a hash");
-      }
-      return tx;
-    }),
+    txs: items(fields, "txs", (tx) => ({
+      hash: text(tx, "hash"),
+      what: text(tx, "what"),
+      state: choice(tx, "state", TX_STATES),
+    })),
   };
 }
 

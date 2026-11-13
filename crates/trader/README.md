@@ -44,7 +44,9 @@ MONKEY, and withdraws, every payout going to the account's own address.
   a read is sent again after it, an order is not
 - Each account tracks its own nonce, moved on after an order the engine used, and read again from
   `/v1/accounts/{address}/nonce` after any refusal, rejection or unanswered order. One request is out
-  per account at a time, so nonces reach the node in order
+  per account at a time, so nonces reach the node in order. An order the node refuses for its nonce
+  never entered the log, as when a withdrawal of the account took the nonce, so its target is decided
+  again on the next nonce, once for its bar
 - The node's time for an order is counted on from a verified answer to a request sent after the
   bar completed, on the monotonic clock, not read again for every order
 - Five seconds of log after the index the bot derives is exact, a warm-up from the node's
@@ -175,8 +177,14 @@ MONKEY, and withdraws, every payout going to the account's own address.
   ends once its transactions land: a declaration is refused unless it carries the class's statement,
   an account with a job that has not ended is refused another, and a request names no destination,
   so every payout goes to the account's own address. The accounts are every one whose key unlocked,
-  those that could not start for want of a credit included. No route moves funds away from an
-  account's own key or returns a key
+  those that could not start for want of a credit included, and a bot none of whose accounts started
+  still serves them. A job shows each transaction it sent and where it stands; the jobs live in
+  memory, so a restart ends them, logging each that had not ended, and the figures show what landed.
+  The figures are read in the background while the console is watching, at most a quarter of
+  `per_ip`, accounts never read or changed by a job first, and answered from the last reads. A key
+  sends one transaction at a time, and one deposit from the funding key at a time sets and spends its
+  allowance. A request may name 500 accounts (32 KiB). No route moves funds away from an account's own
+  key or returns a key
 - The console app's build, `console/dist`, embedded at compile time and served at `/`, with any
   page path routed to its `index.html`; a binary built without it serves a page saying so
 
@@ -247,8 +255,9 @@ MONKEY, and withdraws, every payout going to the account's own address.
   size, and the `Origin` and session checks
 - `src/console/routes.rs`: the API's routes
 - `src/console/funding/`: the funding of the accounts, their status reads and the jobs that declare,
-  deposit, claim and withdraw for them (`mod.rs`), the jobs' states (`jobs.rs`), the figures as the
-  console reads them (`view.rs`) and the routes (`routes.rs`)
+  deposit, claim and withdraw for them (`mod.rs`), the jobs' states and transactions (`jobs.rs`), the
+  figures as the console reads them (`view.rs`) and the routes (`routes.rs`)
+- `src/chain/progress.rs`: where a task's transactions report their steps while a call is running
 - `src/console/server.rs`: the state the routes share
 - `src/console/live.rs`: the live WebSocket feed
 - `src/console/board.rs`: the figures, account views, totals and equity curves the API serves;

@@ -50,6 +50,9 @@ pub struct Lifecycle {
     chain_id: u64,
     vault: Address,
     funding: Option<AccountKey>,
+    /// One deposit at a time pays from the funding key from its allowance check to its deposit's
+    /// sending: they share one allowance, which each sets for itself.
+    funding_deposit: tokio::sync::Mutex<()>,
     settle_timeout: Duration,
     poll_interval: Duration,
 }
@@ -128,6 +131,7 @@ impl Lifecycle {
             chain_id: node_cfg.chain_id,
             vault: Address::from(node_cfg.vault.0),
             funding,
+            funding_deposit: tokio::sync::Mutex::new(()),
             settle_timeout,
             poll_interval,
         })

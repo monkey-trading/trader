@@ -102,7 +102,8 @@ pub async fn run_with_console(
 ) -> anyhow::Result<()> {
     let console = console.zip(cfg.console.as_ref());
     let data_dir = console.as_ref().map(|(_, section)| section.data_dir.as_path());
-    let started = match startup::start(&cfg, &env, data_dir).await {
+    let fundable = console.is_some() && cfg.chain.is_some();
+    let started = match startup::start(&cfg, &env, data_dir, fundable).await {
         Ok(started) => started,
         Err(e) => {
             if let Some(CallError::WrongSigner { .. }) = e.downcast_ref::<CallError>() {
@@ -135,13 +136,14 @@ pub async fn run_with_console(
     // The console's tasks live in this watcher, which ends them when the bot is done with them.
     let mut watcher = None;
     if let Some((prepared, section)) = console {
+        let orders: Vec<usize> = kept.iter().map(|k| k.order).collect();
         let (end, mut links) = ConsoleEnd::new(&runner.fleet, kept);
         runner.console = Some(end);
         links.extend(ConsoleEnd::halted(&failed));
         // With `[chain]`, the console funds every account whose key unlocked, trading or not.
         let funding = lifecycle.map(|lifecycle| {
-            let keys = runner.fleet.accounts.iter().map(|a| a.key.clone()).chain(idle).collect();
-            Funding::new(lifecycle, keys)
+            let trading = orders.iter().copied().zip(runner.fleet.accounts.iter().map(|a| a.key.clone()));
+            Funding::new(lifecycle, trading.chain(idle).collect())
         });
         let mut console = Console::start(section, prepared, node, cfg.node.limits.per_ip, links, funding).await?;
         watcher = Some(tokio::spawn(async move {

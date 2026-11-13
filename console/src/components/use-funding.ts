@@ -1,4 +1,8 @@
-/** The funding read, kept current by itself: quickly while a job has not ended, slowly otherwise. */
+/**
+ * The funding read, kept current by itself: quickly while a job has not ended or an account is still
+ * being read, slowly otherwise, and not at all while the page is hidden, so the bot stops reading the
+ * accounts for it.
+ */
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { Funding } from "@/api/funding-types";
@@ -19,7 +23,7 @@ export interface FundingRead {
   readonly reload: () => void;
 }
 
-/** Reads the funding on mount and then on a timer, until the page goes. A 401 ends the session. */
+/** Reads the funding on mount and then on a timer while the page is shown, until it goes. A 401 ends the session. */
 export function useFunding(): FundingRead {
   const { api, session } = useServices();
   const [funding, setFunding] = useState<Funding | null>(null);
@@ -30,6 +34,21 @@ export function useFunding(): FundingRead {
     // A call, since a flag read twice either side of an await would be narrowed to its first value.
     const live = () => life.active;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let unlisten = () => {};
+    /** Resolves once the page is shown, or the effect is cleaned up. */
+    const shown = () =>
+      new Promise<void>((resolve) => {
+        const check = () => {
+          if (!document.hidden) {
+            resolve();
+          }
+        };
+        document.addEventListener("visibilitychange", check);
+        unlisten = () => {
+          document.removeEventListener("visibilitychange", check);
+        };
+        wake.current = resolve;
+      });
     const loop = async () => {
       while (live()) {
         const generation = session.generation;
@@ -37,14 +56,15 @@ export function useFunding(): FundingRead {
         if (!live()) {
           return;
         }
-        let wait = IDLE_MS;
+        let fast = false;
         switch (outcome.status) {
           case "ok":
             setFunding(outcome.value);
             setError(null);
-            if (outcome.value.enabled && outcome.value.jobs.some((job) => !ended(job))) {
-              wait = BUSY_MS;
-            }
+            // A job has not ended, or the bot is still reading the accounts: ask again soon, to show them as they come.
+            fast =
+              outcome.value.enabled &&
+              (outcome.value.jobs.some((job) => !ended(job)) || outcome.value.accounts.some((account) => account.reading));
             break;
           case "unauthenticated":
             session.expire(generation);
@@ -56,8 +76,12 @@ export function useFunding(): FundingRead {
         }
         await new Promise<void>((resolve) => {
           wake.current = resolve;
-          timer = setTimeout(resolve, wait);
+          timer = setTimeout(resolve, fast ? BUSY_MS : IDLE_MS);
         });
+        while (live() && document.hidden) {
+          await shown();
+          unlisten();
+        }
         wake.current = null;
       }
     };
@@ -65,6 +89,7 @@ export function useFunding(): FundingRead {
     return () => {
       life.active = false;
       clearTimeout(timer);
+      unlisten();
       wake.current?.();
     };
   }, [api, session]);

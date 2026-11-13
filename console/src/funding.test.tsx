@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { ADDRESS } from "@/api/fixtures";
 import { ELIGIBLE, fundingBody, jobBody, OTHER, PROFESSIONAL } from "@/api/funding-fixtures";
 import { readFunding, readJobs } from "@/api/funding-parsers";
+import { BUSY_MS } from "@/components/use-funding";
 import { mount, stubApi } from "@/test-harness";
 
 function funded(overrides: Record<string, unknown> = {}) {
@@ -47,7 +48,7 @@ describe("the funding page", () => {
   });
 
   it("shows an account that could not be read with its reason", async () => {
-    const api = funded({ accounts: [{ address: ADDRESS, error: "the chain did not answer", busy: false }] });
+    const api = funded({ accounts: [{ address: ADDRESS, error: "the chain did not answer", reading: false, busy: false }] });
     mount(api, "/funding");
     expect(await screen.findByText("Not read: the chain did not answer")).toBeInTheDocument();
   });
@@ -134,7 +135,9 @@ describe("the funding page", () => {
     mount(api, "/funding");
     await select(user, ADDRESS);
     await user.click(screen.getByRole("button", { name: "Claim" }));
-    expect(await screen.findByText("Failed: 0x1111 has an action that has not ended")).toBeInTheDocument();
+    const claim = screen.getByRole("group", { name: "Claim MONKEY" });
+    expect(await within(claim).findByText("Failed: 0x1111 has an action that has not ended")).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "Withdraw" })).queryByText(/Failed/)).not.toBeInTheDocument();
   });
 
   it("reads again by itself until every job has ended, and shows each job's state and transactions", async () => {
@@ -143,7 +146,7 @@ describe("the funding page", () => {
       .mockResolvedValueOnce({ status: "ok", value: readFunding(fundingBody({ jobs: [jobBody(1, { action: "deposit", state: "running" })] })) })
       .mockResolvedValue({
         status: "ok",
-        value: readFunding(fundingBody({ jobs: [jobBody(1, { action: "deposit", state: "landed", detail: "100 USDC credited", txs: ["0xfeed"] })] })),
+        value: readFunding(fundingBody({ jobs: [jobBody(1, { action: "deposit", state: "landed", detail: "100 USDC credited", txs: [{ hash: "0xfeed", what: "depositing 100 USDC", state: "mined" }] })] })),
       });
     mount(api, "/funding");
 
@@ -152,6 +155,7 @@ describe("the funding page", () => {
     await waitFor(() => { expect(within(jobs).getByText("Landed")).toBeInTheDocument(); }, { timeout: 5000 });
     expect(within(jobs).getByText("100 USDC credited")).toBeInTheDocument();
     expect(within(jobs).getByText("0xfeed")).toBeInTheDocument();
+    expect(within(jobs).getByText(/depositing 100 USDC: mined/)).toBeInTheDocument();
   });
 
   it("ends the session when the bot answers 401", async () => {
@@ -159,6 +163,72 @@ describe("the funding page", () => {
     api.funding.mockResolvedValue({ status: "unauthenticated" });
     mount(api, "/funding");
     expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("asks for the confirmation again when the selection changes, and after a request", async () => {
+    const api = funded();
+    api.declare.mockResolvedValue({ status: "ok", value: [] });
+    const user = userEvent.setup();
+    mount(api, "/funding");
+    await select(user, ADDRESS);
+    await user.click(await screen.findByRole("radio", { name: new RegExp(PROFESSIONAL) }));
+    const confirm = () => screen.getByRole("checkbox", { name: /I have read the statement/ });
+    await user.click(confirm());
+    expect(screen.getByRole("button", { name: "Declare" })).toBeEnabled();
+
+    await select(user, OTHER);
+    expect(confirm()).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Declare" })).toBeDisabled();
+
+    await user.click(confirm());
+    await user.click(screen.getByRole("button", { name: "Declare" }));
+    expect(api.declare).toHaveBeenCalledExactlyOnceWith([ADDRESS, OTHER], "professional", PROFESSIONAL);
+    await waitFor(() => { expect(confirm()).not.toBeChecked(); });
+    expect(screen.getByRole("button", { name: "Declare" })).toBeDisabled();
+  });
+
+  it("shows an account the bot has not read yet as being read", async () => {
+    const api = funded({ accounts: [{ address: ADDRESS, error: null, reading: true, busy: false }] });
+    mount(api, "/funding");
+    expect(await screen.findByText("Reading…")).toBeInTheDocument();
+  });
+
+  it("announces a job's end once it ends", async () => {
+    const api = stubApi();
+    api.funding
+      .mockResolvedValueOnce({ status: "ok", value: readFunding(fundingBody({ jobs: [jobBody(1, { action: "claim", state: "running" })] })) })
+      .mockResolvedValue({
+        status: "ok",
+        value: readFunding(fundingBody({ jobs: [jobBody(1, { action: "claim", state: "failed", detail: "the chain did not answer" })] })),
+      });
+    mount(api, "/funding");
+    await screen.findByRole("region", { name: "Funding actions" });
+    const said = await screen.findByText(/claim for 0x1111…1111 failed: the chain did not answer/, {}, { timeout: 5000 });
+    expect(said).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("reads nothing while the page is hidden, and reads again once it is shown", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let hidden = true;
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+    try {
+      // A job that has not ended would have the page read every BUSY_MS while shown.
+      const api = funded({ jobs: [jobBody(1, { state: "running" })] });
+      mount(api, "/funding");
+      await vi.advanceTimersByTimeAsync(0);
+      const first = api.funding.mock.calls.length;
+      expect(first).toBeGreaterThan(0);
+      await vi.advanceTimersByTimeAsync(20 * BUSY_MS);
+      expect(api.funding).toHaveBeenCalledTimes(first);
+
+      hidden = false;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.funding).toHaveBeenCalledTimes(first + 1);
+    } finally {
+      Reflect.deleteProperty(document, "hidden");
+      vi.useRealTimers();
+    }
   });
 
   it("links to the funding page from the overview", async () => {

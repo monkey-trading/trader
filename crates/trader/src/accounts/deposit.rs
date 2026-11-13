@@ -61,6 +61,11 @@ impl Lifecycle {
                 Source::Funding => self.funding.as_ref().context("the config has no [funding] key")?,
             };
             let from = Address::from(payer.address().0);
+            // The funding key's deposits share one allowance, so each sets and spends it alone.
+            let funding_turn = match source {
+                Source::Funding => Some(self.funding_deposit.lock().await),
+                Source::Account => None,
+            };
             let held = self.chain()?.view(usdc, ERC20::balanceOfCall { account: from }).await?;
             ensure!(held >= units, "{from} holds {held} USDC base units, less than the {units} to deposit");
             let allowance = self.chain()?.view(usdc, ERC20::allowanceCall { owner: from, spender: self.vault }).await?;
@@ -89,6 +94,7 @@ impl Lifecycle {
                 }
                 Sent::Landed(tx) => tx,
             };
+            drop(funding_turn);
             self.credit(account, tx).await
         }
         .instrument(span)

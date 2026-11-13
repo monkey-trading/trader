@@ -53,7 +53,15 @@ page.on("console", (message) => {
   }
 });
 const funding = async () => (await context.request.get(`${url}/api/funding`)).json();
-const figures = async (address) => (await funding()).accounts.find((a) => a.address === address);
+/** `address`'s figures, once the bot has read them. */
+async function figures(address) {
+  let account;
+  await eventually(`${address}'s figures are read`, async () => {
+    account = (await funding()).accounts.find((a) => a.address === address);
+    return (account !== undefined && !account.reading && account.error === null) || account;
+  });
+  return account;
+}
 
 /** Selects exactly `wanted` in the table. */
 async function choose(wanted) {

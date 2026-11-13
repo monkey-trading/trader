@@ -4,7 +4,7 @@ import { useId, useState } from "react";
 import type { Api } from "@/api/client";
 import { CLASSES, type DepositFrom, type EligibilityClass, type Funding } from "@/api/funding-types";
 
-import { BUTTON_CLASS, ActionError } from "./ActionButton";
+import { BUTTON_CLASS } from "./ActionButton";
 import { useServices } from "./app-context";
 import { useFundingAction, type FundingAction } from "./use-funding-action";
 
@@ -18,14 +18,19 @@ interface Props {
   readonly reload: () => void;
 }
 
-/** What a request came to: why it was refused, or how many jobs it started. */
+/** What a request came to: why it was refused, or how many jobs it started, in one live region that stays mounted. */
 function Result({ action }: { readonly action: FundingAction }) {
-  if (action.error !== null) {
-    return <ActionError error={action.error} />;
-  }
   const text =
-    action.started === null ? "" : `Started ${String(action.started)} ${action.started === 1 ? "job" : "jobs"}; their states are listed below.`;
-  return <p aria-live="polite" className="min-h-5 text-sm text-muted">{text}</p>;
+    action.error !== null
+      ? `Failed: ${action.error}`
+      : action.started === null
+        ? ""
+        : `Started ${String(action.started)} ${action.started === 1 ? "job" : "jobs"}; their states are listed below.`;
+  return (
+    <p aria-live="polite" className={`min-h-5 text-sm ${action.error === null ? "text-muted" : "text-loss"}`}>
+      {text}
+    </p>
+  );
 }
 
 function Submit({ label, pendingLabel, action, disabled, call }: {
@@ -60,7 +65,10 @@ function plural(count: number): string {
 function DeclareForm({ funding, accounts, reload }: Props) {
   const action = useFundingAction(reload);
   const [cls, setCls] = useState<EligibilityClass | null>(null);
-  const [confirmed, setConfirmed] = useState(false);
+  // What the user confirmed: the class and the accounts it was confirmed for, so a change of either asks again.
+  const [confirmedFor, setConfirmedFor] = useState<string | null>(null);
+  const covers = `${cls ?? ""}|${accounts.join(",")}`;
+  const confirmed = cls !== null && confirmedFor === covers;
   const group = useId();
   return (
     <fieldset className="flex flex-col gap-2 rounded border border-line p-3">
@@ -71,7 +79,7 @@ function DeclareForm({ funding, accounts, reload }: Props) {
             type="radio"
             name={group}
             checked={cls === option}
-            onChange={() => { setCls(option); setConfirmed(false); }}
+            onChange={() => { setCls(option); }}
             className="mt-1 size-5"
           />
           <span className="font-medium">{CLASS_NAMES[option]}</span>
@@ -83,7 +91,7 @@ function DeclareForm({ funding, accounts, reload }: Props) {
           type="checkbox"
           checked={confirmed}
           disabled={cls === null}
-          onChange={(event) => { setConfirmed(event.target.checked); }}
+          onChange={(event) => { setConfirmedFor(event.target.checked ? covers : null); }}
           className="size-5"
         />
         {`I have read the statement and confirm it for ${plural(accounts.length)}`}
@@ -94,7 +102,14 @@ function DeclareForm({ funding, accounts, reload }: Props) {
           pendingLabel="Declaring…"
           action={action}
           disabled={cls === null || !confirmed || accounts.length === 0}
-          call={(api) => api.declare(accounts, cls ?? "professional", funding.statements[cls ?? "professional"])}
+          call={(api) => {
+            if (cls === null) {
+              throw new Error("declare was pressed with no class chosen");
+            }
+            // One confirmation covers one request.
+            setConfirmedFor(null);
+            return api.declare(accounts, cls, funding.statements[cls]);
+          }}
         />
         <Result action={action} />
       </div>

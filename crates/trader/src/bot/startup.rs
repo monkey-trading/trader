@@ -61,17 +61,18 @@ pub(super) struct Started {
     pub kept: Vec<Kept>,
     /// The keys of the accounts that did not start but unlocked, which the console's funding acts
     /// for: an account the node has not credited yet starts only once it is funded and declared.
-    pub idle: Vec<Arc<AccountKey>>,
+    pub idle: Vec<(usize, Arc<AccountKey>)>,
 }
 
 /// The fleet for `cfg`'s accounts, and the log from the seq after the head before the reads.
 /// Error cases:
 /// - the node cannot be reached, or an answer does not verify
-/// - no account can start
+/// - no account can start, and none is left for the console to fund (`fundable`)
 pub(super) async fn start(
     cfg: &Config,
     env: &(dyn Fn(&str) -> Option<String> + Sync),
     data_dir: Option<&Path>,
+    fundable: bool,
 ) -> anyhow::Result<Started> {
     let node_cfg = &cfg.node;
     let tls = Tls::new(node_cfg.url.clone(), node_cfg.tls_key_sha256)?;
@@ -119,13 +120,13 @@ pub(super) async fn start(
     }
 
     let mut candidates = Vec::new();
-    let mut idle: Vec<Arc<AccountKey>> = Vec::new();
+    let mut idle: Vec<(usize, Arc<AccountKey>)> = Vec::new();
     for (order, plan, key) in unlocked {
         let key = Arc::new(key);
         match plan.strategies.iter().find_map(|s| usable[&s.market].as_ref().err()) {
             Some(reason) => {
                 failed.push(failure(order, plan, Some(key.address()), "market_unsupported", reason.clone()));
-                idle.push(key);
+                idle.push((order, key));
             }
             None => candidates.push((order, plan, key)),
         }
@@ -160,12 +161,12 @@ pub(super) async fn start(
             Err(CallError::Refused { status: 404, .. }) => {
                 let reason = format!("the node has never credited {address}: fund and declare it first");
                 failed.push(failure(order, plan, Some(address), "no_balance", reason));
-                idle.push(key);
+                idle.push((order, key));
                 continue;
             }
             Err(e) => {
                 failed.push(failure(order, plan, Some(address), "account_unread", e.to_string()));
-                idle.push(key);
+                idle.push((order, key));
                 continue;
             }
         };
@@ -175,7 +176,7 @@ pub(super) async fn start(
                 Ok(saved) => saved,
                 Err(e) => {
                     failed.push(failure(order, plan, Some(address), "controls_unreadable", format!("{e:#}")));
-                    idle.push(key);
+                    idle.push((order, key));
                     continue;
                 }
             },
@@ -191,14 +192,16 @@ pub(super) async fn start(
             }
             Err(e) => {
                 failed.push(failure(order, plan, Some(address), e.code, format!("{:#}", e.error)));
-                idle.push(key);
+                idle.push((order, key));
             }
         }
     }
     for StartFailure { label, reason, .. } in &failed {
         error!(alert = "account_failed", account = label, "{reason}; it does not trade");
     }
-    if accounts.is_empty() {
+    // With the console's funding, accounts that could not start for want of a credit are funded
+    // there, so a bot with none trading still serves them.
+    if accounts.is_empty() && !(fundable && !idle.is_empty()) {
         bail!("no account can start: {}", describe(&failed));
     }
     let used: BTreeSet<MarketId> = accounts.iter().flat_map(|a| a.strategies.iter().map(|s| s.market)).collect();
