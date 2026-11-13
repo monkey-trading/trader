@@ -101,15 +101,39 @@ fn bar_lengths_a_session_can_hold() {
     assert!(!bar_can_trade(&schedule, 0, MONDAY));
 }
 
-/// A closure in the week searched does not decide it: an hour-long bar is held by a market whose only
-/// session in that week is closed by a dated closure, as it is held the week after.
+/// The answer does not depend on the week it is asked in. A market whose only session of one week is
+/// closed by a dated closure holds an hour-long bar in every week; five-hour bars on the exchange's
+/// session line up with it only on epoch days that are a multiple of five, which some weeks lack.
 #[test]
-fn a_dated_closure_does_not_decide_it() {
+fn the_answer_is_the_same_in_every_week_it_is_asked_in() {
     let windows = serde_json::json!([{ "open": "Mon 09:00", "close": "Mon 17:00" }]);
     let closures = serde_json::json!([{ "from": "2026-11-02T09:00:00", "to": "2026-11-02T17:00:00" }]);
     let schedule = serde_json::json!({ "kind": "weekly", "tz": "UTC", "windows": windows, "closures": closures });
     let schedule: Schedule = serde_json::from_value(schedule).unwrap();
-    // A week from MONDAY has no open hour, the next has; the searched weeks are MONDAY's and half a year on.
-    assert!(!bar_can_trade(&schedule, HOUR, MONDAY));
-    assert!(bar_can_trade(&schedule, HOUR, MONDAY + 7 * DAY));
+    let exchange = exchange();
+    for week in 0..10 {
+        let from = MONDAY + week * 7 * DAY;
+        assert!(bar_can_trade(&schedule, HOUR, from), "an hour, week {week}");
+        assert!(bar_can_trade(&exchange, 5 * HOUR, from), "five hours, week {week}");
+    }
+}
+
+/// 09:30 to 16:00 in New York with 288-minute bars: the bars start at 00:00, 04:48, 09:36, 14:24 and 19:12
+/// UTC, and one holds the session only while the clocks are on daylight saving time (13:30 to 20:00 UTC).
+/// Daylight saving time lasts longer than 26 weeks, so a search from its first weeks reaches the winter
+/// only in its last span; one from the winter reaches the summer in its first.
+#[test]
+fn a_length_that_fits_one_clock_regime_is_refused_wherever_the_search_starts() {
+    let windows: Vec<_> = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+        .iter()
+        .map(|day| serde_json::json!({ "open": format!("{day} 09:30"), "close": format!("{day} 16:00") }))
+        .collect();
+    let schedule = serde_json::json!({ "kind": "weekly", "tz": "America/New_York", "windows": windows });
+    let schedule: Schedule = serde_json::from_value(schedule).unwrap();
+    let minutes = |n: Millis| n * 60_000;
+    // 2026-03-09 is the Monday after the clocks went forward; 2026-11-02 the Monday after they went back.
+    for from in [1_773_014_400_000, 1_785_000_000_000, 1_793_577_600_000, 1_800_000_000_000] {
+        assert!(!bar_can_trade(&schedule, minutes(288), from), "from {from}");
+        assert!(bar_can_trade(&schedule, minutes(60), from), "an hour, from {from}");
+    }
 }

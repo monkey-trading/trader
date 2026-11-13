@@ -395,3 +395,102 @@ fn a_bar_at_its_target_drops_the_order_queued_for_an_older_one() {
     apply(&mut fleet, seq, T0 + 3 * MINUTE, &prices(seq, T0 + 3 * MINUTE, 1, "103"));
     assert!(fleet.assignments[0].pending.is_none());
 }
+
+/// One account trading market 1 on one-minute bars and market 2 on two-minute bars, prices rising: by
+/// minute 4 the first has an order queued and the second, whose first target comes then, waits behind it.
+/// Returns the fleet and the next seq.
+fn one_queued_one_waiting() -> (Fleet, u64) {
+    let two = vec![strategy(1, MINUTE), strategy(2, 2 * MINUTE)];
+    let mut fleet = Fleet::new(&markets(2), vec![account(0, two)], T0).unwrap();
+    let mut seq = warm(&mut fleet, &[1, 2], "100");
+    for minute in 1..=4 {
+        for market in [1, 2] {
+            let ts = T0 + minute * MINUTE;
+            apply(&mut fleet, seq, ts, &prices(seq, ts, market, &(100 + minute).to_string()));
+            seq += 1;
+        }
+    }
+    settle(&mut fleet);
+    assert!(fleet.assignments[0].pending.is_some() && fleet.assignments[1].wanted.is_some());
+    assert!(fleet.reads.is_empty());
+    (fleet, seq)
+}
+
+/// A bar at its target clears the order queued for an older bar, and the account is read so the target of
+/// its other market, which waited for that order, is decided and not left to age out.
+#[test]
+fn a_bar_at_its_target_reads_the_account_whose_other_market_waits() {
+    let (mut fleet, seq) = one_queued_one_waiting();
+    fleet.assignments[0].position = "1".parse().unwrap();
+    // The periodic read is not due, and the other market completes no bar: only the cleared order can ask.
+    fleet.accounts[0].read_after = i64::MAX;
+    apply(&mut fleet, seq, T0 + 5 * MINUTE, &prices(seq, T0 + 5 * MINUTE, 1, "105"));
+    assert!(fleet.assignments[0].pending.is_none());
+    assert_eq!(fleet.reads.iter().copied().collect::<Vec<_>>(), [0], "the account is read");
+}
+
+/// A newer bar's target replaces the order queued for an older one even when it cannot be decided yet,
+/// so the older order is not sent in its place.
+#[test]
+fn a_newer_bar_whose_target_waits_drops_the_older_order() {
+    let (mut fleet, seq) = warmed(1);
+    let seq = go_long(&mut fleet, seq);
+    assert!(fleet.assignments[0].pending.is_some());
+    // The price falls inside minute 2, and minute 3 completes a bar at 50: the target is short, and waits
+    // for the read the account is behind on.
+    fleet.accounts[0].behind = true;
+    apply(&mut fleet, seq, T0 + 2 * MINUTE + 10_000, &prices(seq, T0 + 2 * MINUTE + 10_000, 1, "50"));
+    apply(&mut fleet, seq + 1, T0 + 3 * MINUTE, &tick(seq + 1, T0 + 3 * MINUTE));
+    assert!(fleet.assignments[0].pending.is_none(), "the older bar's order is not left to be sent");
+    assert_eq!(fleet.assignments[0].wanted.map(|w| w.bar_start), Some(T0 + 2 * MINUTE));
+}
+
+/// A target decided from a read that lands after UTC midnight is not charged to the day before: the
+/// equity is observed at the log's time first, which opens the new day, and the older bar's reading
+/// changes nothing.
+#[test]
+fn a_target_that_waits_across_midnight_cannot_trip_the_day_before() {
+    const MIDNIGHT: i64 = T0 + 16 * 60 * MINUTE;
+    let mut fleet = Fleet::new(&markets(1), vec![account(0, vec![strategy(1, MINUTE)])], T0).unwrap();
+    fleet.accounts[0].controls = controls_losing_at("50");
+    let seq = warm(&mut fleet, &[1], "100");
+    // A first read opens the day at 1,000.
+    fleet.want_read(0);
+    settle(&mut fleet);
+    fleet.observe_account(0, fleet.log_ts);
+    // Two bars close just before midnight and give a long target, which waits: its read does not land.
+    for (i, ts) in [MIDNIGHT - 2 * MINUTE, MIDNIGHT - MINUTE].into_iter().enumerate() {
+        let seq = seq + i as u64;
+        apply(&mut fleet, seq, ts, &prices(seq, ts, 1, "101"));
+    }
+    let wanted = fleet.assignments[0].wanted.expect("a target waits");
+    assert!(wanted.ts < MIDNIGHT);
+    fleet.reads.clear();
+    fleet.accounts[0].read_wanted = false;
+    // The read lands after midnight, on an account that has lost 100 since.
+    fleet.log_ts = MIDNIGHT + MINUTE;
+    let view = trader::node::api::AccountView {
+        balance: "900".parse().unwrap(),
+        positions: Default::default(),
+        orders: Default::default(),
+    };
+    assert!(fleet.apply_view(0, &view));
+    fleet.decide_account(0);
+    assert!(fleet.flattens.is_empty() && !fleet.accounts[0].controls.is_stopped(), "no stop");
+    assert!(fleet.assignments[0].pending.is_some(), "the target is decided on the new day");
+}
+
+/// Controls with the usual sizing and a daily loss limit of `usd` dollars.
+fn controls_losing_at(usd: &str) -> trader_core::controls::Controls {
+    let sizing = serde_json::json!({ "by": "fixed_notional", "notional": "100", "max_leverage": "50" });
+    let risk = serde_json::json!({
+        "max_open_positions": 16, "max_total_notional": "1000000", "daily_loss": { "usd": usd },
+        "margin_buffer_bps": 0, "min_hold": "0s"
+    });
+    trader_core::controls::Controls::new(
+        serde_json::from_value(risk).unwrap(),
+        serde_json::from_value(sizing).unwrap(),
+        None,
+    )
+    .unwrap()
+}

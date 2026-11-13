@@ -142,7 +142,6 @@ impl Runner {
                 info!(account = %entry.address, balance = %entry.balance, head_seq = answer.head_seq, at_log, "account read");
                 if at_log {
                     self.fleet.decide_account(account);
-                    self.fleet.observe_account(account, self.fleet.log_ts);
                 }
             }
             Err(e) => {
