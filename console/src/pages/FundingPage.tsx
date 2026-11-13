@@ -30,7 +30,7 @@ export function FundingPage() {
         <div className="flex flex-col gap-6">
           <p className="text-muted">
             An account the node had not credited, or that had not declared, when the bot started trades once the bot is
-            restarted.
+            restarted. Stopping the bot ends the actions that have not ended; what they already sent may still land.
           </p>
           <FundingTable
             accounts={funding.accounts}

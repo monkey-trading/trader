@@ -45,9 +45,9 @@ pub(super) enum Done {
         nonce: u64,
         /// The expiry the request was signed with: until the log passes it, it may still enter the log.
         expires_at: engine_core::types::Millis,
-        /// The target an order was decided from, decided again if the node refuses its nonce; none
-        /// for a flatten's close.
-        wanted: Option<crate::bot::fleet::Wanted>,
+        /// The target an order was decided from, decided again if the node refuses its nonce while its
+        /// series is still on the warm-up `generation` it was decided in; none for a flatten's close.
+        wanted: Option<(crate::bot::fleet::Wanted, u32)>,
         outcome: Result<Verified<Vec<engine_core::event::Event>>, CallError>,
     },
     Nonce {

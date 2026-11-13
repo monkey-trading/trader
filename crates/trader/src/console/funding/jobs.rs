@@ -47,6 +47,8 @@ enum TxState {
     Sent,
     Mined,
     Reverted,
+    /// Another transaction took its nonce, so it never lands.
+    Replaced,
 }
 
 /// A transaction a job sent.
@@ -128,6 +130,7 @@ impl Jobs {
             Progress::Sent { tx, what } => job.txs.push(Tx { hash: tx.to_string(), what, state: TxState::Sent }),
             Progress::Mined { tx } => set(tx, TxState::Mined),
             Progress::Reverted { tx } => set(tx, TxState::Reverted),
+            Progress::Replaced { tx } => set(tx, TxState::Replaced),
         }
     }
 
@@ -164,8 +167,8 @@ pub async fn act(lifecycle: &Lifecycle, key: &AccountKey, action: Action) -> Out
             signed_elsewhere: is_wrong_signer(&e),
             reason: match e.downcast_ref::<StillQueued>() {
                 Some(StillQueued(seq)) => format!(
-                    "the withdrawal is queued as seq {seq} but was not paid in time: a withdrawal with the amount \
-                     empty pays what is queued, and asking again queues another ({e:#})"
+                    "the withdrawal is queued as seq {seq} but was not paid in time: once the queue approves it, a \
+                     withdrawal with no amount pays it, and asking again with an amount queues another ({e:#})"
                 ),
                 None => format!("{e:#}"),
             },

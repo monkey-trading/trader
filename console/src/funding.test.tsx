@@ -1,11 +1,11 @@
 /** Tests of the funding page: what it shows, and what each action sends for the accounts selected. */
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { ADDRESS } from "@/api/fixtures";
 import { ELIGIBLE, fundingBody, jobBody, OTHER, PROFESSIONAL } from "@/api/funding-fixtures";
 import { readFunding, readJobs } from "@/api/funding-parsers";
-import { BUSY_MS } from "@/components/use-funding";
+import { BUSY_MS, IDLE_MS } from "@/components/use-funding";
 import { mount, stubApi } from "@/test-harness";
 
 function funded(overrides: Record<string, unknown> = {}) {
@@ -193,18 +193,27 @@ describe("the funding page", () => {
     expect(await screen.findByText("Reading…")).toBeInTheDocument();
   });
 
-  it("announces a job's end once it ends", async () => {
-    const api = stubApi();
-    api.funding
-      .mockResolvedValueOnce({ status: "ok", value: readFunding(fundingBody({ jobs: [jobBody(1, { action: "claim", state: "running" })] })) })
-      .mockResolvedValue({
-        status: "ok",
-        value: readFunding(fundingBody({ jobs: [jobBody(1, { action: "claim", state: "failed", detail: "the chain did not answer" })] })),
-      });
-    mount(api, "/funding");
-    await screen.findByRole("region", { name: "Funding actions" });
-    const said = await screen.findByText(/claim for 0x1111…1111 failed: the chain did not answer/, {}, { timeout: 5000 });
-    expect(said).toHaveAttribute("aria-live", "polite");
+  it.each([
+    ["a job read while it ran", [jobBody(1, { action: "claim", state: "running" })]],
+    ["a job first read once it had ended", []],
+  ])("announces the end of %s", async (_name, first) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const failed = jobBody(1, { action: "claim", state: "failed", detail: "the chain did not answer" });
+      const api = stubApi();
+      api.funding
+        .mockResolvedValueOnce({ status: "ok", value: readFunding(fundingBody({ jobs: first })) })
+        .mockResolvedValue({ status: "ok", value: readFunding(fundingBody({ jobs: [failed] })) });
+      mount(api, "/funding");
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      expect(screen.getByRole("region", { name: "Funding of each account" })).toBeInTheDocument();
+      expect(screen.queryByText(/claim for 0x1111…1111 failed/)).not.toBeInTheDocument();
+      await act(() => vi.advanceTimersByTimeAsync(IDLE_MS));
+      const said = screen.getByText("claim for 0x1111…1111 failed: the chain did not answer");
+      expect(said).toHaveAttribute("aria-live", "polite");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reads nothing while the page is hidden, and reads again once it is shown", async () => {

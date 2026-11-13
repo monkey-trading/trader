@@ -2,6 +2,7 @@
 //! answers the tests script.
 
 pub mod chain;
+pub mod funding;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;

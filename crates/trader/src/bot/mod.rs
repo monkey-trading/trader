@@ -135,6 +135,7 @@ pub async fn run_with_console(
     let (console_failed, mut failed_console) = oneshot::channel::<anyhow::Error>();
     // The console's tasks live in this watcher, which ends them when the bot is done with them.
     let mut watcher = None;
+    let mut funding_jobs = None;
     if let Some((prepared, section)) = console {
         let orders: Vec<usize> = kept.iter().map(|k| k.order).collect();
         let (end, mut links) = ConsoleEnd::new(&runner.fleet, kept);
@@ -145,6 +146,7 @@ pub async fn run_with_console(
             let trading = orders.iter().copied().zip(runner.fleet.accounts.iter().map(|a| a.key.clone()));
             Funding::new(lifecycle, trading.chain(idle).collect())
         });
+        funding_jobs.clone_from(&funding);
         let mut console = Console::start(section, prepared, node, cfg.node.limits.per_ip, links, funding).await?;
         watcher = Some(tokio::spawn(async move {
             let _ = console_failed.send(console.failed().await);
@@ -171,6 +173,10 @@ pub async fn run_with_console(
         }
     };
     let followed = runner.follow(&mut stream, stop).await;
+    // Stopping or halting, the bot sends nothing more for a funding job.
+    if let Some(funding) = &funding_jobs {
+        funding.stop_jobs();
+    }
     // The claims end before the stop acts, and an end they came to first is not lost.
     if let Some(task) = claims.take()
         && claims_ended.is_none()

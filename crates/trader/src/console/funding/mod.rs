@@ -24,8 +24,9 @@ use futures_util::StreamExt;
 use futures_util::stream;
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, watch};
+use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
-use tracing::{Instrument, info, info_span, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::accounts::Lifecycle;
 use crate::accounts::claim::is_wrong_signer;
@@ -82,6 +83,8 @@ pub enum Refused {
     Busy(AccountId),
     /// The action needs a funding key the config does not name.
     NoFundingKey,
+    /// The bot is stopping or halting, so no job starts.
+    Stopping,
 }
 
 /// The funding of the bot's accounts.
@@ -106,6 +109,9 @@ struct State {
     watched: Option<Instant>,
     /// How many jobs of each account have ended: a read made across one is not kept.
     epochs: BTreeMap<AccountId, u64>,
+    /// The jobs' tasks that may not have ended, and whether the bot is stopping, which ends them.
+    running: Vec<AbortHandle>,
+    stopped: bool,
 }
 
 impl Funding {
@@ -147,6 +153,9 @@ impl Funding {
         }
         let accounts: Vec<AccountId> = accounts.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
         let mut state = self.state();
+        if state.stopped {
+            return Err(Refused::Stopping);
+        }
         for account in &accounts {
             if !self.by_address.contains_key(account) {
                 return Err(Refused::Unknown(*account));
@@ -162,9 +171,25 @@ impl Funding {
             started.push(state.jobs.view(id));
             let funding = Arc::clone(self);
             let span = info_span!("funding_job", id, action = action_name(action), %account);
-            tokio::spawn(async move { funding.run_job(id, action, account).await }.instrument(span));
+            let job = tokio::spawn(async move { funding.run_job(id, action, account).await }.instrument(span));
+            state.running.retain(|job| !job.is_finished());
+            state.running.push(job.abort_handle());
         }
         Ok(started)
+    }
+
+    /// Ends every job that has not ended, at once, and starts no more: the bot is stopping or halting,
+    /// so nothing more is sent for a job. What a job already sent may still land.
+    pub fn stop_jobs(&self) {
+        // Taken out first: an ended job's guard takes the state as it goes.
+        let running = {
+            let mut state = self.state();
+            state.stopped = true;
+            std::mem::take(&mut state.running)
+        };
+        for job in running {
+            job.abort();
+        }
     }
 
     /// Runs one job: waits for a place, acts, and records how it ended. A job that stops before it
@@ -298,9 +323,13 @@ impl Funding {
                 if is_wrong_signer(&e) {
                     self.flag_signer(account);
                 }
+                debug!(%account, "the account's funding was not read: {e:#}");
                 view::unread(account, &format!("{e:#}"))
             }
-            Err(_) => view::unread(account, "the read took too long"),
+            Err(_) => {
+                debug!(%account, "the account's funding was not read within {READ_TIMEOUT:?}");
+                view::unread(account, "the read took too long")
+            }
         };
         let mut state = self.state();
         if state.epochs.get(&account).copied() == epoch {

@@ -4,6 +4,8 @@
 //! transactions signed for it, at a block by which another transaction took the last one's nonce:
 //! it never goes in twice, whatever the endpoints' receipts say.
 
+use std::sync::Arc;
+
 use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_eth::{Filter, TransactionReceipt};
 use alloy_sol_types::{SolCall, SolEvent};
@@ -61,11 +63,12 @@ impl Lifecycle {
                 Source::Funding => self.funding.as_ref().context("the config has no [funding] key")?,
             };
             let from = Address::from(payer.address().0);
-            // The funding key's deposits share one allowance, so each sets and spends it alone.
-            let funding_turn = match source {
-                Source::Funding => Some(self.funding_deposit.lock().await),
-                Source::Account => None,
+            // A payer's deposits share one allowance, so each sets and spends it alone.
+            let turn = {
+                let mut turns = self.deposit_turns.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                Arc::clone(turns.entry(from).or_default())
             };
+            let payer_turn = turn.lock().await;
             let held = self.chain()?.view(usdc, ERC20::balanceOfCall { account: from }).await?;
             ensure!(held >= units, "{from} holds {held} USDC base units, less than the {units} to deposit");
             let allowance = self.chain()?.view(usdc, ERC20::allowanceCall { owner: from, spender: self.vault }).await?;
@@ -94,7 +97,7 @@ impl Lifecycle {
                 }
                 Sent::Landed(tx) => tx,
             };
-            drop(funding_turn);
+            drop(payer_turn);
             self.credit(account, tx).await
         }
         .instrument(span)

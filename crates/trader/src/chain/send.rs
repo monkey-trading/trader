@@ -209,7 +209,7 @@ impl Chain {
                     progress::report(Progress::Mined { tx: hash });
                     return Ok(Sent::Landed(hash));
                 }
-                Followed::Replaced => {}
+                Followed::Replaced => progress::report(Progress::Replaced { tx: hash }),
             }
             if attempt == NONCE_ATTEMPTS {
                 return Err(not_sent(format!("another transaction from {from} took each nonce it was signed on")));

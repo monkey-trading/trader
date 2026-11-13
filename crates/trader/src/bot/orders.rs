@@ -15,7 +15,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::bot::Halt;
-use crate::bot::fleet::{EXPIRES_IN_MS, Fleet, Nonce, REPLAY_LAG_MS, Wanted};
+use crate::bot::fleet::{EXPIRES_IN_MS, Fleet, Nonce, REPLAY_LAG_MS, Wanted, Warm};
 use crate::bot::run::{Done, Runner, signer_ok};
 use crate::node::api::{MarkBucket, NonceView};
 use crate::node::{CallError, Verified};
@@ -104,7 +104,7 @@ impl Runner {
         if account.state_dirty || account.state_saving || account.state_unsaved {
             return true;
         }
-        let (intent, wanted) = (pending.intent, pending.wanted);
+        let (intent, wanted) = (pending.intent, (pending.wanted, fleet.series[asg.series as usize].generation));
         let Some(quoted) = fleet.markets[asg.market_slot as usize].mark else {
             warn!(account = %account.address, market = asg.market, "no mark to quote the order at");
             fleet.drop_pending(a, false);
@@ -216,7 +216,7 @@ impl Runner {
         assignment: u32,
         nonce: u64,
         expires_at: Millis,
-        wanted: Option<Wanted>,
+        wanted: Option<(Wanted, u32)>,
         outcome: Result<Verified<Vec<Event>>, CallError>,
     ) -> Result<(), Halt> {
         signer_ok(&outcome)?;
@@ -255,11 +255,18 @@ impl Runner {
             // The node checks a request's nonce before the log, so this one never entered it: another
             // request of the account, such as the console's withdrawal, took the nonce. The order's
             // target waits to be decided again on the account as it now is, with the node's next nonce,
-            // once for its bar; a second refusal leaves it to the next bar.
+            // once for its bar; a second refusal leaves it to the next bar. A target from before the
+            // series warmed up again, as after a change of parameters, is not decided again.
             Err(e @ CallError::Refused { status: 409, .. }) => {
                 unfence(&mut self.fleet, account, expires_at);
                 let asg = &mut self.fleet.assignments[assignment as usize];
-                let again = wanted.filter(|w| asg.wanted.is_none() && asg.nonce_retried != Some(w.bar_start));
+                let series = &self.fleet.series[asg.series as usize];
+                let current = |generation| series.warm == Warm::Done && series.generation == generation;
+                let again = wanted
+                    .filter(|(w, generation)| {
+                        current(*generation) && asg.wanted.is_none() && asg.nonce_retried != Some(w.bar_start)
+                    })
+                    .map(|(w, _)| w);
                 if let Some(wanted) = again {
                     (asg.wanted, asg.nonce_retried) = (Some(wanted), Some(wanted.bar_start));
                 }

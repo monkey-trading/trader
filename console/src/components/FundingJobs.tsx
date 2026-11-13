@@ -16,13 +16,14 @@ function announcement(job: FundingJob): string {
   return `${job.action} for ${shortAddress(job.account)} ${job.state === "landed" ? "landed" : "failed"}: ${job.detail}`;
 }
 
-/** The jobs, newest first, and a live region that says each one's end once. */
+/** The jobs, newest first, and a live region that says each one's end once, a job first read already ended included. */
 export function FundingJobs({ jobs }: { readonly jobs: readonly FundingJob[] }) {
   const before = useRef<ReadonlyMap<number, boolean> | null>(null);
   const [said, setSaid] = useState("");
   useEffect(() => {
     const seen = before.current;
-    const justEnded = seen === null ? [] : jobs.filter((job) => ended(job) && seen.get(job.id) === false);
+    // The first read only sets what was seen; after it, a job that has ended and was not seen ended is new news.
+    const justEnded = seen === null ? [] : jobs.filter((job) => ended(job) && seen.get(job.id) !== true);
     before.current = new Map(jobs.map((job) => [job.id, ended(job)]));
     if (justEnded.length > 0) {
       setSaid(justEnded.map(announcement).join(". "));

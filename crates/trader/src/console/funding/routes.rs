@@ -125,5 +125,6 @@ fn submit(server: &Server, action: Action, accounts: &[AccountId]) -> Response {
         Err(Refused::NoFundingKey) => {
             refusal(StatusCode::UNPROCESSABLE_ENTITY, "no_funding_key", "the config names no [funding] key")
         }
+        Err(Refused::Stopping) => refusal(StatusCode::SERVICE_UNAVAILABLE, "stopping", "the bot is stopping"),
     }
 }

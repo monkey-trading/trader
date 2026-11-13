@@ -1,6 +1,6 @@
 //! What a transaction has come to while a call that sends it is still running, for a caller that
 //! shows it: the task running the call names a sink, and `send` reports to it as each transaction is
-//! signed and sent, and as it is mined or reverts. A call with no sink reports nowhere.
+//! signed and sent, and as it is mined, reverts or is replaced. A call with no sink reports nowhere.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -16,6 +16,8 @@ pub enum Progress {
     Mined { tx: B256 },
     /// Mined and reverted.
     Reverted { tx: B256 },
+    /// Never to be mined: another transaction took its nonce, and the call is signed again or fails.
+    Replaced { tx: B256 },
 }
 
 /// Where a task's transactions report.

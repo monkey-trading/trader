@@ -6,7 +6,7 @@ import {
 import { CLASSES, type EligibilityClass, type Funding, type FundingAccount, type FundingJob } from "./funding-types";
 
 const JOB_STATES = ["waiting", "running", "landed", "failed"] as const;
-const TX_STATES = ["sent", "mined", "reverted"] as const;
+const TX_STATES = ["sent", "mined", "reverted", "replaced"] as const;
 const ACTIONS = ["declare", "deposit", "claim", "withdraw"] as const;
 
 function classOf(fields: Fields, key: string): EligibilityClass {

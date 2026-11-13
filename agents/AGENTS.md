@@ -59,7 +59,7 @@ list.
   for a bar behind the node's time or before the log has passed every order of that account and
   market that could still enter it; on SIGINT or SIGTERM, once the log has passed those orders, it
   cancels resting orders and optionally closes positions account by account, exiting non-zero when
-  it leaves either behind or cannot confirm it did not (`stop.rs`). A halt (an answer or frame signed
+  it leaves either behind or cannot confirm it did not (`stop/`). A halt (an answer or frame signed
   by another key, a log it cannot follow) stops the bot and leaves the accounts as they are; an
   account that cannot start or that fails stops alone.
   `trader accounts --config` takes each account from an empty wallet to trading and back: `accounts/`
@@ -87,7 +87,7 @@ list.
   new strategy and warms its series up again from the marks history (`bot/params.rs`); and the
   controls those requests set, saved per account under the console's data directory
   (`link/saved.rs`), so a restart keeps a stop. A flatten runs the account's stop with its positions
-  closed (`stop.rs`). `console/` is the console server (with a `[console]` section): HTTPS on `bind`
+  closed (`stop/`). `console/` is the console server (with a `[console]` section): HTTPS on `bind`
   (every interface, port 8443, by default) with a configured certificate or one generated into
   `data_dir` on first run, whose SHA-256 fingerprint every start prints (`tls.rs`); one generated
   password, printed once and kept as an Argon2id hash, with a per-client rate limit (`login.rs`);

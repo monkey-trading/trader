@@ -43,8 +43,8 @@ export interface FundingAccount {
 /** The states of a job. */
 export type JobState = "waiting" | "running" | "landed" | "failed";
 
-/** Where a transaction a job sent stands. */
-export type TxState = "sent" | "mined" | "reverted";
+/** Where a transaction a job sent stands: replaced when another transaction took its nonce, so it never lands. */
+export type TxState = "sent" | "mined" | "reverted" | "replaced";
 
 /** A transaction a job sent. */
 export interface FundingTx {
