@@ -1,19 +1,24 @@
 //! The `trader` binary: its command line, and the bot it runs.
 
+pub mod accounts;
 pub mod bot;
+pub mod chain;
 pub mod config;
 pub mod keys;
+pub mod logging;
 pub mod node;
 pub mod stream;
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
+use engine_core::types::AccountId;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::Config;
+use crate::logging::{Redacting, Secrets};
 
 /// The monkeytrading bot.
 #[derive(Debug, Parser)]
@@ -38,23 +43,35 @@ pub enum Command {
         #[arg(short, long, env = "CONFIG_PATH")]
         config: PathBuf,
     },
+    /// Declares, funds, claims MONKEY for, and withdraws from the configured accounts.
+    Accounts {
+        /// The config file.
+        #[arg(short, long, env = "CONFIG_PATH")]
+        config: PathBuf,
+        /// Acts for this account only; repeat for several. Without it, for every account.
+        #[arg(long = "account", value_name = "ADDRESS", global = true)]
+        accounts: Vec<AccountId>,
+        #[command(subcommand)]
+        action: accounts::cli::Action,
+    },
 }
 
 /// Parses the process's arguments and runs the command; `--version` and `--help` print and exit.
 /// Error cases:
 /// - the config does not load (see `Config::load`)
 /// - the bot fails to start, or halts (see `bot::run`)
+/// - an account action fails (see `accounts::cli::run`)
 pub fn run() -> anyhow::Result<()> {
+    let env = |name: &str| std::env::var(name).ok();
     match Cli::parse().command {
         Command::Run { config } => {
-            let cfg = Config::load(&config)?;
-            let filter = EnvFilter::try_new(&cfg.logging.level).context("logging.level")?;
-            tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stdout().is_terminal()).init();
+            let (cfg, secrets) = start(&config)?;
             let runtime = tokio::runtime::Runtime::new().context("the async runtime")?;
-            runtime.block_on(async {
+            let result = runtime.block_on(async {
                 let stop = bot::stop_signal()?;
-                bot::run(cfg, |name| std::env::var(name).ok(), stop).await
-            })
+                bot::run(cfg, env, stop).await
+            });
+            redacted(result, &secrets)
         }
         Command::Addresses { config } => {
             let cfg = Config::load(&config)?;
@@ -66,7 +83,31 @@ pub fn run() -> anyhow::Result<()> {
                 Ok(())
             })
         }
+        Command::Accounts { config, accounts, action } => {
+            let (cfg, secrets) = start(&config)?;
+            let runtime = tokio::runtime::Runtime::new().context("the async runtime")?;
+            let terminal = std::io::stdin().is_terminal();
+            let mut out = Redacting::new(std::io::stdout(), secrets.clone());
+            let result = runtime.block_on(accounts::cli::run(cfg, accounts, action, env, terminal, &mut out));
+            redacted(result, &secrets)
+        }
     }
+}
+
+/// Loads the config at `path` and starts logging at its level, with no secret of the config in any
+/// line (see `logging`); the config, and its secrets.
+/// Error cases:
+/// - the config does not load (see `Config::load`), or its level is not a filter
+fn start(path: &Path) -> anyhow::Result<(Config, Secrets)> {
+    let cfg = Config::load(path)?;
+    let secrets = Secrets::of(&cfg);
+    logging::subscriber(&cfg.logging.level, std::io::stdout().is_terminal(), std::io::stdout, secrets.clone())?.init();
+    Ok((cfg, secrets))
+}
+
+/// `result`, its error printed as it is but for `secrets`.
+fn redacted(result: anyhow::Result<()>, secrets: &Secrets) -> anyhow::Result<()> {
+    result.map_err(|e| anyhow!(secrets.redact(&format!("{e:#}"))))
 }
 
 #[cfg(test)]
@@ -103,6 +144,16 @@ mod tests {
     fn unknown_argument_is_refused() {
         let err = Cli::try_parse_from(["trader", "--bogus"]).expect_err("an unknown flag is refused");
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    /// A command's error is printed with no secret of the config in it, its causes included.
+    #[test]
+    fn errors_are_printed_without_secrets() {
+        let key = "k3y0f32charactersfromaprovider00";
+        let secrets = crate::logging::Secrets::of_urls([format!("https://rpc.example/v2/{key}").as_str()]);
+        let error = anyhow::anyhow!("no answer from https://rpc.example/v2/{key}").context("reading the vault");
+        let printed = format!("{:#}", crate::redacted(Err(error), &secrets).unwrap_err());
+        assert_eq!(printed, "reading the vault: no answer from [redacted]");
     }
 
     /// `run` takes its config file by `-c` or `--config`.

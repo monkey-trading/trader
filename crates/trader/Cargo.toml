@@ -7,6 +7,13 @@ repository.workspace = true
 description = "The monkeytrading bot: runs strategies against the engine's node and serves its console"
 
 [dependencies]
+alloy-consensus = { workspace = true }
+alloy-eips = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-provider = { workspace = true }
+alloy-rpc-client = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+alloy-sol-types = { workspace = true }
 anyhow = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
@@ -21,6 +28,7 @@ hyper = { workspace = true }
 hyper-util = { workspace = true }
 k256 = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true }
 rustls = { workspace = true }
 rustls-webpki = { workspace = true }
 serde = { workspace = true }

@@ -9,12 +9,12 @@ mod messages;
 pub use bot::*;
 pub use controls::*;
 pub use messages::*;
+pub mod lifecycle;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
@@ -131,9 +131,9 @@ pub struct Inner {
     /// Whether a cancel-all clears the account's resting orders and a close-all its positions in
     /// the markets it names, as the engine's do when they succeed.
     pub settle: bool,
-    /// The most units of a position one close-all takes, as the pinned engine's `Fixed::MAX_INPUT`;
-    /// the rest stays open.
+    /// The most units of a position one close-all takes (the engine's `Fixed::MAX_INPUT`); the rest stays open.
     pub close_cap: Option<engine_core::Fixed>,
+    pub lifecycle: lifecycle::Canned,
 }
 
 /// A running stand-in.
@@ -174,7 +174,7 @@ impl StandIn {
             addr,
             pin,
         });
-        let router = Router::new()
+        let router = lifecycle::routes()
             .route("/v1/markets", get(markets))
             .route("/v1/markets/{id}/marks", get(marks))
             .route("/v1/accounts/{address}", get(account_view_route))

@@ -13,7 +13,13 @@ yanked = "warn"
 unmaintained = "none"
 # Every entry needs a reason, a removal condition, and an `expires YYYY-MM-DD` on its own line, so
 # an ignore can't quietly become permanent.
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0387: crypto-bigint 0.5.5 has secret-dependent branches in some operations. It
+    # comes in through elliptic-curve 0.13 and k256 0.13 under alloy, and its fix is in 0.7.x, which
+    # that line cannot take. Remove when alloy moves to a RustCrypto release on crypto-bigint 0.7.6 or later.
+    # expires 2026-12-12
+    "RUSTSEC-2026-0387",
+]
 
 [licenses]
 # SPDX expressions allowed workspace-wide. Add entries with a comment saying which crate needs it,

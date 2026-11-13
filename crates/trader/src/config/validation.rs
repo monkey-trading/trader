@@ -31,6 +31,7 @@ impl Config {
     /// - a strategy that `validate_strategies` refuses
     /// - a limit of zero, or connections outside 1 to `MAX_CONNECTIONS`
     /// - a log level that is not a tracing filter directive, or a zero timeout
+    /// - a chain section that fails its checks (see `validate_chain`)
     pub(super) fn validate(&self, dev_build: bool) -> anyhow::Result<()> {
         ensure!(!self.account.is_empty() || !self.account_dir.is_empty(), "no [[account]] or [[account_dir]]");
         check_limits(&self.sizing, &self.risk)?;
@@ -49,6 +50,8 @@ impl Config {
         for (name, rate) in [("per_ip", limits.per_ip), ("per_account", limits.per_account)] {
             ensure!(rate.per_second > 0 && rate.burst > 0, "node.limits.{name}: per_second and burst above zero");
         }
+        let fresh = limits.fresh_accounts;
+        ensure!(fresh.per_minute > 0 && fresh.burst > 0, "node.limits.fresh_accounts: per_minute and burst above zero");
         ensure!(
             (1..=MAX_CONNECTIONS).contains(&limits.connections),
             "node.limits.connections: from 1 to {MAX_CONNECTIONS}"
@@ -56,7 +59,7 @@ impl Config {
         EnvFilter::try_new(&self.logging.level).map_err(|e| anyhow!("logging.level: {e}"))?;
         ensure!(!self.node.request_timeout.is_zero(), "node.request_timeout: above zero");
         ensure!(!self.node.stream_timeout.is_zero(), "node.stream_timeout: above zero");
-        Ok(())
+        self.validate_chain(dev_build)
     }
 }
 

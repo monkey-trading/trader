@@ -17,13 +17,18 @@ mod reads;
 mod run;
 mod startup;
 pub use startup::stop_signal;
+pub(crate) use startup::{UNLOCKS_AT_ONCE, label};
 mod stop;
 mod warm;
 
+use std::sync::Arc;
+
+use anyhow::bail;
 use engine_core::market::{MarketSpec, QuoteCurrency};
 use engine_core::types::{AccountId, Millis};
-use tracing::{error, info};
+use tracing::{Instrument, Span, error, info};
 
+use crate::accounts::{Lifecycle, claim};
 use crate::config::Config;
 use crate::keys::AccountKey;
 use crate::node::CallError;
@@ -68,6 +73,7 @@ pub async fn addresses(cfg: &Config, env: impl Fn(&str) -> Option<String>) -> an
 /// - no key or startup read works (see `startup::start`)
 /// - the bot halts (see `Halt`)
 /// - an account could not start, stopped trading, or was not left as the stop sets out
+/// - the claims cannot be set up (see `Lifecycle::with_node`), or the claims task ends
 pub async fn run(
     cfg: Config,
     env: impl Fn(&str) -> Option<String> + Sync,
@@ -83,10 +89,50 @@ pub async fn run(
         }
     };
     let startup::Started { fleet, node, mut stream, domain, failed } = started;
+    // With `[claims]`, a task claims every account's MONKEY alongside the trading: should it end, the
+    // bot stops as on a stop signal and fails, or, when the node answered it with another key's
+    // signature, halts.
+    let mut claims = match &cfg.claims {
+        Some(claims) => {
+            let lifecycle = Arc::new(Lifecycle::with_node(&cfg, node.clone(), &env).await?);
+            let keys = fleet.accounts.iter().map(|account| account.key.clone()).collect();
+            let watch = claim::watch(lifecycle, keys, claims.threshold.0, claims.interval);
+            Some(tokio::spawn(watch.instrument(Span::current())))
+        }
+        None => None,
+    };
+    let mut claims_ended = None;
+    let stop = async {
+        match claims.as_mut() {
+            Some(task) => tokio::select! {
+                () = stop => {}
+                ended = task => claims_ended = Some(ended),
+            },
+            None => stop.await,
+        }
+    };
     let cap = cfg.node.limits.connections;
     let mut runner = Runner::new(fleet, node, domain, cap);
-    let result = match runner.follow(&mut stream, stop).await {
-        Ok(()) => runner.stop(&mut stream).await,
+    let followed = runner.follow(&mut stream, stop).await;
+    // The claims end before the stop acts, and an end they came to first is not lost.
+    if let Some(task) = claims.take()
+        && claims_ended.is_none()
+    {
+        task.abort();
+        match task.await {
+            Err(e) if e.is_cancelled() => {}
+            ended => claims_ended = Some(ended),
+        }
+    }
+    let claims_halted = matches!(&claims_ended, Some(Ok(e)) if claim::is_wrong_signer(e));
+    let result = match followed {
+        Ok(()) if claims_halted => Err(Halt::WrongSigner),
+        Ok(()) => {
+            if let Some(ended) = &claims_ended {
+                error!(alert = "bot_halted", "the MONKEY claims task ended: {ended:?}; stopping");
+            }
+            runner.stop(&mut stream).await
+        }
         // What the bot saw is not what it trades on: it changes nothing, and leaves the accounts to
         // their owners.
         Err(Halt::WrongSigner) => Err(Halt::WrongSigner),
@@ -102,6 +148,9 @@ pub async fn run(
     let (requests, retry_later) = runner.node.counts();
     info!(requests, retry_later, "requests to the node");
     result?;
+    if let Some(ended) = claims_ended {
+        bail!("the MONKEY claims task ended: {ended:?}");
+    }
     let stopped = runner.fleet.accounts.iter().filter(|a| a.failed.is_some()).count();
     anyhow::ensure!(
         failed.is_empty() && stopped == 0,

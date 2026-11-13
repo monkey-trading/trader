@@ -2,12 +2,14 @@
 //! it does not know, so a typo fails the load instead of leaving a default in place. Relative paths
 //! in it are read from the config file's directory.
 
+mod chain;
+pub use chain::*;
 mod validation;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use engine_core::types::AccountId;
 use serde::Deserialize;
 use trader_core::risk::RiskParams;
@@ -37,6 +39,13 @@ pub struct Config {
     /// Directories of keystores, one account per keystore.
     #[serde(default)]
     pub account_dir: Vec<AccountDirSection>,
+    /// The custody chain, for deposits, MONKEY claims and withdrawals.
+    #[serde(default)]
+    pub chain: Option<ChainSection>,
+    #[serde(default)]
+    pub funding: Option<FundingSection>,
+    #[serde(default)]
+    pub claims: Option<ClaimsSection>,
     #[serde(default)]
     pub logging: LoggingSection,
     /// Every account the config names, directories expanded; filled by `load`.
@@ -78,8 +87,18 @@ pub struct RateSection {
     pub burst: u32,
 }
 
+/// A token bucket counted by the minute, as the node's `[api.fresh_accounts]` sets it: `burst`
+/// requests at once, refilled at `per_minute`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MinuteRateSection {
+    pub per_minute: u32,
+    pub burst: u32,
+}
+
 /// The node's limits on this bot, which the bot paces its requests under. Set them to the node's
-/// `api.per_ip` and `api.per_account`; the defaults are the engine's development config.
+/// `api.per_ip`, `api.per_account` and `api.fresh_accounts.per_client`; the defaults are the
+/// engine's development config.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsSection {
@@ -89,6 +108,10 @@ pub struct LimitsSection {
     /// Orders and cancels count against their account's bucket.
     #[serde(default = "default_per_account")]
     pub per_account: RateSection,
+    /// Declarations count against this bucket as well: the node's budget for one client's setup
+    /// requests, which holds every declaration it takes from the bot's address.
+    #[serde(default = "default_fresh_accounts")]
+    pub fresh_accounts: MinuteRateSection,
     /// The most HTTP connections open at once, the stream's not counted. The node caps connections
     /// per address (`api.max_connections_per_ip`), the stream's included.
     #[serde(default = "default_connections")]
@@ -98,7 +121,12 @@ pub struct LimitsSection {
 impl Default for LimitsSection {
     /// The engine's development limits.
     fn default() -> Self {
-        Self { per_ip: default_per_ip(), per_account: default_per_account(), connections: default_connections() }
+        Self {
+            per_ip: default_per_ip(),
+            per_account: default_per_account(),
+            fresh_accounts: default_fresh_accounts(),
+            connections: default_connections(),
+        }
     }
 }
 
@@ -239,7 +267,7 @@ impl Config {
     /// - a value fails its check (see `validate`)
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let mut cfg = parse(&text).with_context(|| format!("parsing {}", path.display()))?;
         cfg.validate(cfg!(debug_assertions)).with_context(|| format!("checking {}", path.display()))?;
         cfg.resolve_paths(path.parent().unwrap_or(Path::new(".")));
         cfg.plans = cfg.expand().with_context(|| format!("reading the accounts of {}", path.display()))?;
@@ -261,8 +289,9 @@ impl Config {
                 resolve(file);
             }
         };
-        for account in &mut self.account {
-            match &mut account.key {
+        let funding = self.funding.as_mut().map(|funding| &mut funding.key);
+        for key in self.account.iter_mut().map(|account| &mut account.key).chain(funding) {
+            match key {
                 KeySource::Keystore { path, password } => {
                     resolve(path);
                     resolve_password(password);
@@ -327,9 +356,25 @@ fn default_per_account() -> RateSection {
     RateSection { per_second: 10, burst: 20 }
 }
 
+/// The engine's development `api.fresh_accounts.per_client`, for serde.
+fn default_fresh_accounts() -> MinuteRateSection {
+    MinuteRateSection { per_minute: 600, burst: 20 }
+}
+
 /// Four connections, for serde.
 fn default_connections() -> usize {
     4
+}
+
+/// The config in `text`. A parse error names its line and what is wrong there, but never quotes
+/// the text, which may hold an RPC endpoint's credential.
+/// Error cases:
+/// - `text` is not valid TOML of the config's shape, with no unknown key
+fn parse(text: &str) -> anyhow::Result<Config> {
+    toml::from_str(text).map_err(|e| {
+        let line = e.span().map_or(0, |span| text[..span.start.min(text.len())].matches('\n').count() + 1);
+        anyhow!("line {line}: {}", e.message())
+    })
 }
 
 /// `DEFAULT_REQUEST_TIMEOUT`, for serde.

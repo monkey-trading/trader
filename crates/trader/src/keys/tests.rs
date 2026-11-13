@@ -125,9 +125,10 @@ fn environment_passwords_are_verbatim() {
 /// one; any other key is taken in both.
 #[test]
 fn published_keys_are_dev_only() {
-    let mut secrets: Vec<[u8; 32]> = [0x11, 0x51, 0x52, 0x42].map(|byte| [byte; 32]).into();
+    let mut secrets: Vec<[u8; 32]> = [0x11, 0x21, 0x51, 0x52, 0x42].map(|byte| [byte; 32]).into();
     for hex in [
         "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+        "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
         "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
         "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6",
         "47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a",

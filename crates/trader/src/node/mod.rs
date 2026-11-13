@@ -3,6 +3,7 @@
 //! answer that does not verify is an error, never data. Calls share a small pool of connections and
 //! are paced under the node's limits (`pace`).
 
+pub mod accounts;
 pub mod api;
 mod pace;
 mod pool;
@@ -146,6 +147,13 @@ impl Node {
     /// can lead the node's own.
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Waits for a declaration's turn under the node's fresh-account budget for this client.
+    pub async fn setup_turn(&self) {
+        while let Err(wait) = self.pacer.try_reserve_setup(Instant::now()) {
+            sleep(wait).await;
+        }
     }
 
     /// How many requests were sent, and how many of them the node asked the bot to retry later.
