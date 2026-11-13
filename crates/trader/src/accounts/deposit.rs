@@ -96,10 +96,10 @@ impl Lifecycle {
     }
 
     /// Which of the transactions `signed` landed the deposit `deposit` names (account, payer and
-    /// amount), by the vault's state at the block `spent`, read by its hash: among the deposits from the vault's deposit count
-    /// and block `since`, one from the payer of the amount whose event names the account and one of
-    /// those transactions. `None` when the vault holds none from the payer of the amount, or each
-    /// it holds is another's by its event.
+    /// amount), by the vault's state at the block `spent`, read by its hash: among the deposits from
+    /// the vault's deposit count and block `since`, one from the payer of the amount whose event names
+    /// the account and one of those transactions. `None` when the vault holds none from the payer of
+    /// the amount, or each it holds is another's by its event.
     /// Error cases:
     /// - a read fails, or a deposit that may be one of them has no event to say whose it is
     async fn landed_deposit(
