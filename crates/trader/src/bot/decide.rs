@@ -112,11 +112,17 @@ impl Fleet {
             asg.pending = None;
             return;
         }
-        // A newer bar's target replaces an order queued for an older one, whether it asks for a move or not.
-        if at_target {
-            asg.pending = None;
+        // A newer bar's target replaces an order queued for an older one, whether it asks for a move, can be
+        // decided yet, or not: the older order is not sent in its place.
+        let replaced = asg.pending.take().is_some();
+        if self.accounts[account as usize].failed.is_some() {
+            return;
         }
-        if self.accounts[account as usize].failed.is_some() || at_target {
+        if at_target {
+            // A target of the account's other markets that waited for that order is decided on a read.
+            if replaced {
+                self.read_if_waiting(account);
+            }
             return;
         }
         asg.wanted = Some(wanted);

@@ -395,3 +395,52 @@ fn a_bar_at_its_target_drops_the_order_queued_for_an_older_one() {
     apply(&mut fleet, seq, T0 + 3 * MINUTE, &prices(seq, T0 + 3 * MINUTE, 1, "103"));
     assert!(fleet.assignments[0].pending.is_none());
 }
+
+/// One account trading market 1 on one-minute bars and market 2 on two-minute bars, prices rising: by
+/// minute 4 the first has an order queued and the second, whose first target comes then, waits behind it.
+/// Returns the fleet and the next seq.
+fn one_queued_one_waiting() -> (Fleet, u64) {
+    let two = vec![strategy(1, MINUTE), strategy(2, 2 * MINUTE)];
+    let mut fleet = Fleet::new(&markets(2), vec![account(0, two)], T0).unwrap();
+    let mut seq = warm(&mut fleet, &[1, 2], "100");
+    for minute in 1..=4 {
+        for market in [1, 2] {
+            let ts = T0 + minute * MINUTE;
+            apply(&mut fleet, seq, ts, &prices(seq, ts, market, &(100 + minute).to_string()));
+            seq += 1;
+        }
+    }
+    settle(&mut fleet);
+    assert!(fleet.assignments[0].pending.is_some() && fleet.assignments[1].wanted.is_some());
+    assert!(fleet.reads.is_empty());
+    (fleet, seq)
+}
+
+/// A bar at its target clears the order queued for an older bar, and the account is read so the target of
+/// its other market, which waited for that order, is decided and not left to age out.
+#[test]
+fn a_bar_at_its_target_reads_the_account_whose_other_market_waits() {
+    let (mut fleet, seq) = one_queued_one_waiting();
+    fleet.assignments[0].position = "1".parse().unwrap();
+    // The periodic read is not due, and the other market completes no bar: only the cleared order can ask.
+    fleet.accounts[0].read_after = i64::MAX;
+    apply(&mut fleet, seq, T0 + 5 * MINUTE, &prices(seq, T0 + 5 * MINUTE, 1, "105"));
+    assert!(fleet.assignments[0].pending.is_none());
+    assert_eq!(fleet.reads.iter().copied().collect::<Vec<_>>(), [0], "the account is read");
+}
+
+/// A newer bar's target replaces the order queued for an older one even when it cannot be decided yet,
+/// so the older order is not sent in its place.
+#[test]
+fn a_newer_bar_whose_target_waits_drops_the_older_order() {
+    let (mut fleet, seq) = warmed(1);
+    let seq = go_long(&mut fleet, seq);
+    assert!(fleet.assignments[0].pending.is_some());
+    // The price falls inside minute 2, and minute 3 completes a bar at 50: the target is short, and waits
+    // for the read the account is behind on.
+    fleet.accounts[0].behind = true;
+    apply(&mut fleet, seq, T0 + 2 * MINUTE + 10_000, &prices(seq, T0 + 2 * MINUTE + 10_000, 1, "50"));
+    apply(&mut fleet, seq + 1, T0 + 3 * MINUTE, &tick(seq + 1, T0 + 3 * MINUTE));
+    assert!(fleet.assignments[0].pending.is_none(), "the older bar's order is not left to be sent");
+    assert_eq!(fleet.assignments[0].wanted.map(|w| w.bar_start), Some(T0 + 2 * MINUTE));
+}
