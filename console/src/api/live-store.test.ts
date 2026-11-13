@@ -107,7 +107,7 @@ describe("LiveStore", () => {
     expect(store.getSnapshot()).toMatchObject({ connection: "stopped", loaded: false, accounts: [], totals: null });
   });
 
-  it("reads a tracked account's fills, and again after a new snapshot", async () => {
+  it("reads a tracked account's fills once the snapshot lists it, and again after a new snapshot", async () => {
     const reads: string[] = [];
     const { store, feeds, settle } = harness({
       fills: (address) => {
@@ -120,6 +120,8 @@ describe("LiveStore", () => {
     store.track(ADDRESS);
     feeds[0]?.handlers.onMessage(snapshot());
     await settle();
+    expect(reads).toEqual([ADDRESS]);
+    feeds[0]?.handlers.onMessage(snapshot());
     await settle();
 
     expect(reads).toEqual([ADDRESS, ADDRESS]);

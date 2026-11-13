@@ -38,6 +38,7 @@ function Pages() {
 function SignedIn() {
   const { live, session } = useServices();
   const [failure, setFailure] = useState<string | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
   useEffect(() => live.start(), [live]);
   return (
     <>
@@ -47,16 +48,19 @@ function SignedIn() {
           <button
             type="button"
             className={BUTTON_CLASS}
+            disabled={signingOut}
             onClick={() => {
               setFailure(null);
+              setSigningOut(true);
               void session.logout().then((result) => {
+                setSigningOut(false);
                 if (result.status === "failed") {
                   setFailure(result.message);
                 }
               });
             }}
           >
-            Sign out
+            {signingOut ? "Signing out…" : "Sign out"}
           </button>
           <ActionError error={failure === null ? null : `The bot did not end the session. ${failure}`} />
         </div>

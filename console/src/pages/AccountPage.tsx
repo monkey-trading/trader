@@ -109,7 +109,12 @@ export function AccountPage({ address }: { readonly address: string }) {
           </Section>
           <Section id="fills" title="Fills">
             {failure === undefined ? null : <p className="mb-2 text-loss">{`Fills could not be read: ${failure}`}</p>}
-            {fills.has(key) ? <FillsTable fills={accountFills} /> : failure === undefined ? <Unread /> : null}
+            {/* Until the bot has read the account it answers its fills as none: that is not shown as empty. */}
+            {account.figures !== null && fills.has(key) ? (
+              <FillsTable fills={accountFills} />
+            ) : account.figures === null || failure === undefined ? (
+              <Unread />
+            ) : null}
           </Section>
         </div>
       )}

@@ -219,12 +219,29 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
   });
 
+  it("sends one sign out however often the button is pressed, and shows it pending at the button", async () => {
+    const api = stubApi();
+    let answer: (outcome: { status: "ok"; value: null }) => void = () => undefined;
+    api.logout.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    const user = userEvent.setup();
+    mount(api);
+
+    await user.click(await screen.findByRole("button", { name: "Sign out" }));
+    const pending = await screen.findByRole("button", { name: "Signing out…" });
+    await user.click(pending);
+    expect(pending).toBeDisabled();
+    expect(api.logout).toHaveBeenCalledTimes(1);
+
+    answer({ status: "ok", value: null });
+    expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
+  });
+
   it("says the bot has not read an account yet, instead of showing empty positions and orders", async () => {
     const api = stubApi();
     api.account.mockResolvedValue({ status: "ok", value: readAccount(viewBody({ figures: null })) });
     mount(api, `/accounts/${ADDRESS}`);
 
-    expect(await screen.findAllByText("Waiting for the bot to read this account.")).toHaveLength(2);
+    expect(await screen.findAllByText("Waiting for the bot to read this account.")).toHaveLength(3);
     expect(screen.queryByText("No open positions.")).not.toBeInTheDocument();
   });
 

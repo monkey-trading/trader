@@ -93,4 +93,37 @@ describe("SessionStore", () => {
       expect(heard).toBe(1);
     }
   });
+
+  it("sends one sign out while one is pending, and ignores the second press", async () => {
+    let calls = 0;
+    let answer: (outcome: Outcome<null>) => void = () => undefined;
+    const store = storeWith({
+      login: () => Promise.resolve(ok),
+      logout: () => { calls += 1; return new Promise((resolve) => { answer = resolve; }); },
+    });
+    await store.login("a");
+    const first = store.logout();
+    expect(await store.logout()).toEqual({ status: "ignored" });
+    answer(ok);
+
+    expect(await first).toEqual({ status: "signed-out" });
+    expect(calls).toBe(1);
+  });
+
+  it("does not end a session on the answer to a sign out asked in an earlier one", async () => {
+    let answer: (outcome: Outcome<null>) => void = () => undefined;
+    const store = storeWith({
+      login: () => Promise.resolve(ok),
+      logout: () => new Promise((resolve) => { answer = resolve; }),
+    });
+    await store.login("a");
+    const late = store.logout();
+    // The session ends some other way, and the user signs in again before the answer comes.
+    store.expire();
+    await store.login("a");
+    answer({ status: "unauthenticated", code: null });
+
+    expect(await late).toEqual({ status: "ignored" });
+    expect(store.getSnapshot()).toBe("authenticated");
+  });
 });
