@@ -222,7 +222,9 @@ impl Fleet {
             // The close of a stopped account is a close-all request, also signed here.
             Ok(Command::AccessCloseAll { request, .. }) => {
                 request.account == entry.address
-                    && request.auth.is_some_and(|auth| entry.signed.contains(&auth.signature))
+                    && request.auth.is_some_and(|auth| {
+                        entry.signed.contains(&auth.signature) || entry.closes.iter().any(|(s, _)| *s == auth.signature)
+                    })
             }
             _ => false,
         }

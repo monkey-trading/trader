@@ -329,8 +329,13 @@ async fn an_authorization_the_vault_refuses_waits_for_its_replacement() {
         s.chain.sent_count(1).await;
         wait_reads(&s, &payouts_path(), 3).await;
         assert_eq!(s.chain.sent().len(), 1, "the refused authorization is not sent again");
-        s.chain.with(|l| l.reverts.clear());
+        // The replacement is served, and read by two polls, before the refusal is lifted: the polls follow
+        // one another, so none still holds the refused authorization, which a poll that read it before the
+        // swap would send once the chain stopped refusing it.
+        let reads = s.node.with(|i| i.lifecycle.reads.get(&payouts_path()).copied().unwrap_or_default());
         s.answer(&payouts_path(), 200, payouts(vec![payout(5, "50", Some(NOW_S + 90_000))]));
+        wait_reads(&s, &payouts_path(), reads + 2).await;
+        s.chain.with(|l| l.reverts.clear());
     };
     let (paid, ()) = tokio::join!(within(s.lifecycle.withdraw(&s.key, None)), replace);
     assert_eq!(paid.unwrap().len(), 1);

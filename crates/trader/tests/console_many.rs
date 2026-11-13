@@ -7,6 +7,7 @@ use common::console::{Running, figures_view, seed, until_account, within};
 use common::{MINUTE, StandIn, T0, address, command, config_many, posted, prices, warm};
 use hyper::Method;
 use serde_json::json;
+use trader::config::Config;
 
 /// The console section of these tests' configs: a free loopback port, data beside the config.
 const CONSOLE: &str = "\n[console]\nbind = \"127.0.0.1:0\"\ndata_dir = \"data\"\nrefresh_interval = \"1s\"\n";
@@ -157,4 +158,60 @@ async fn a_waiting_flatten_is_refused_when_the_account_halts() {
     let posts: Vec<_> = stand_in.with(|i| i.posts.iter().map(|(path, _)| path.clone()).collect());
     assert!(posts.is_empty(), "nothing was signed: {posts:?}");
     running.stop_after(&stand_in).await.ok();
+}
+
+/// Two accounts read one series. Changing one's parameters builds its strategy afresh and warms the
+/// series up again, so neither account decides until it has, but only the one asked keeps new
+/// parameters.
+#[tokio::test]
+async fn a_parameter_change_warms_up_the_series_both_accounts_share() {
+    let stand_in = StandIn::start().await;
+    seed(&stand_in);
+    let (first, second) = (address(0).to_string(), address(1).to_string());
+    stand_in.with(|i| {
+        i.accounts.insert(second.clone(), figures_view("1000", "1000", "0", json!({})));
+    });
+    let dir = tempfile::tempdir().unwrap();
+    config_many(&stand_in, dir.path(), "1m", &[0, 1], CONSOLE);
+    let path = dir.path().join("bot.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        text.replace("max_slippage_bps = 25\n", "max_slippage_bps = 25\nbounds = { fast = [1, 5], slow = [2, 50] }\n"),
+    )
+    .unwrap();
+    let running = Running::start(Config::load(&path).unwrap()).await;
+    let cookie = running.session().await;
+    until_account(&running, &cookie, &first, |view| view["state"] == "running").await;
+    within(warm(&stand_in)).await;
+    until_account(&running, &cookie, &first, |view| view["strategies"][0]["warmed_up"] == true).await;
+    until_account(&running, &cookie, &second, |view| view["strategies"][0]["warmed_up"] == true).await;
+
+    let body = json!({ "kind": "sma_crossover", "fast": 2, "slow": 3 });
+    let set = running
+        .call(
+            Method::PUT,
+            &format!("/api/accounts/{first}/strategies/0/params"),
+            common::console::SAME,
+            Some(&cookie),
+            Some(body.clone()),
+        )
+        .await;
+    assert_eq!(set.status, 204, "{set:?}");
+    let asked = running.get(&format!("/api/accounts/{first}"), &cookie).await.body;
+    let other = running.get(&format!("/api/accounts/{second}"), &cookie).await.body;
+    assert_eq!(asked["strategies"][0]["params"], body);
+    assert_eq!(other["strategies"][0]["params"], json!({ "kind": "sma_crossover", "fast": 1, "slow": 2 }));
+    for view in [&asked, &other] {
+        assert_eq!(view["strategies"][0]["warmed_up"], false, "{view}");
+    }
+    // Once the history is read again, both decide again, each on its own parameters.
+    let ts = T0 + MINUTE;
+    stand_in.append((14, 0), command(14, ts, prices(1, "101", ts), json!([])));
+    stand_in.append((15, 0), command(15, ts + 6_000, json!({ "type": "tick" }), json!([])));
+    stand_in.applied((15, 0)).await;
+    for a in [&first, &second] {
+        until_account(&running, &cookie, a, |view| view["strategies"][0]["warmed_up"] == true).await;
+    }
+    running.stop_after(&stand_in).await.unwrap();
 }
