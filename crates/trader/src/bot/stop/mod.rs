@@ -28,6 +28,7 @@ use crate::bot::orders::log_order_events;
 use crate::bot::run::Runner;
 use crate::bot::stop::quotes::Quotes;
 use crate::keys::AccountKey;
+use crate::metrics::OrderSeries;
 use crate::node::{Admission, CallError, Node};
 use crate::stream::message::{CommandMessage, Head};
 use crate::stream::{Stream, StreamError};
@@ -61,6 +62,8 @@ pub(super) struct Stop {
     close_on_stop: bool,
     /// Each market the account trades, the position the log last gave, and the market's slippage bound.
     markets: Vec<(MarketId, Fixed, i64)>,
+    /// The account's order metrics: every close counts as placed in each market it names.
+    series: OrderSeries,
     quotes: Arc<Quotes>,
     /// Where the closes are reported before they go, with the account's slot, when the stop runs
     /// beside the log's reading: their fills are then the account's own.
@@ -133,6 +136,7 @@ impl Runner {
                     key: Arc::clone(&account.key),
                     close_on_stop: account.close_on_stop,
                     markets,
+                    series: self.fleet.order_series(account.assignments.clone()),
                     quotes: Arc::clone(&quotes),
                     report: None,
                     halt: None,
@@ -189,14 +193,15 @@ impl Runner {
                 }
                 Ok(Ok(frame)) => frame,
             };
-            let ts = serde_json::from_str::<Head<'_>>(&frame.msg)
+            let message = serde_json::from_str::<Head<'_>>(&frame.msg)
                 .ok()
                 .filter(|head| head.kind == "command")
-                .and_then(|_| serde_json::from_str::<CommandMessage<'_>>(&frame.msg).ok())
-                .map(|message| message.ts);
-            if let Some(ts) = ts {
-                self.fleet.log_ts = ts;
-                if ts > barrier {
+                .and_then(|_| serde_json::from_str::<CommandMessage<'_>>(&frame.msg).ok());
+            if let Some(message) = message {
+                // The answer to an order out at the stop left its rejection to the log.
+                self.fleet.count_rejections(&message);
+                self.fleet.log_ts = message.ts;
+                if message.ts > barrier {
                     return Ok(true);
                 }
             }
@@ -223,6 +228,7 @@ impl Runner {
             key: Arc::clone(&account.key),
             close_on_stop: true,
             markets,
+            series: self.fleet.order_series(account.assignments.clone()),
             quotes: Arc::new(Quotes { last, read: Mutex::new(None) }),
             report: report.map(|report| (a, report)),
             halt: Some(Arc::clone(&account.halt)),
@@ -416,14 +422,28 @@ impl Stop {
             // the close makes is known for the account's own. A runner that ended has no use for it.
             let _ = report.send((*slot, signature, expires_at)).await;
         }
+        let named: Vec<MarketId> = request.closes.iter().map(|close| close.market).collect();
+        self.series.placed(&named);
         match self.node.close_all(&request, admission).await {
-            Ok(answer) => log_order_events(account, &answer.body),
+            Ok(answer) => {
+                log_order_events(account, &answer.body);
+                // Beside the log, its rejections count as the log gives them; after it, as the answer does.
+                if self.report.is_none() {
+                    self.series.rejected(&named, &answer.body);
+                }
+            }
             Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
             Err(e @ CallError::Refused { status: 409, .. }) if !last => {
+                self.series.declined(&named);
                 info!(%account, "the close's nonce was taken by another request of the account; signing again: {e}");
                 return Ok(true);
             }
-            Err(e) => warn!(%account, "the close failed: {e}"),
+            Err(e) => {
+                if let CallError::Refused { .. } = e {
+                    self.series.declined(&named);
+                }
+                warn!(%account, "the close failed: {e}");
+            }
         }
         Ok(false)
     }

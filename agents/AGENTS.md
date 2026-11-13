@@ -8,7 +8,7 @@ own account, and serves a web console on the host's address. The layout is a Car
 workspace with `trader-core` (indicators, strategies, sizing and risk limits, with no IO) and
 `trader` (the binary: the node's API and stream, signing, keys, chain calls, and the console
 server), and `console/`, a Vite, React and TypeScript app built to static files that the binary
-will embed. The engine's own crates (`engine-core`, `engine-wire`, and later `engine-verify`) are
+will embed. The engine's own crates (`engine-core`, `engine-wire`, and `engine-verify`) are
 Cargo git dependencies pinned by one `rev`. This file is an index: load only the rule whose
 hint matches the current action. Links in this file are relative to `agents/`; commands run from
 the repository root.
@@ -40,8 +40,11 @@ list.
   one or many accounts, each with its own markets and strategies, in one process; `trader addresses`
   prints their addresses. `config/` loads and checks the TOML config (`[[account]]`, `[[account_dir]]`,
   `[node.limits]`); `keys.rs` unlocks the account keys (a Web3 Secret Storage keystore, or a hex file
-  in a dev build) into signing keys that zero on drop, and refuses outside a dev build the keys the
-  repository publishes; `node/` makes REST calls over TLS pinned to the node's key hash (or publicly
+  in a dev build) into signing keys that zero on drop, and refuses in a production build the keys the
+  repository publishes; `node/` verifies the node's attestation before any other call
+  (`attestation.rs`: an SEV-SNP quote with `engine-verify` against the release manifests the config
+  names, or a dev build's mock), whose enclave address is the signer and whose TLS key every later
+  connection must present, and makes REST calls over TLS pinned to the node's key hash (or publicly
   rooted) on a small pool of kept-open connections (`pool.rs`), paced under the node's limits with a
   retry-later hold, and tracks the node's time from its verified answers (`pace.rs`), each call under
   a fresh challenge and verified with `engine_wire::verify_received`; `stream/` reads the public log
@@ -61,7 +64,12 @@ list.
   cancels resting orders and optionally closes positions account by account, exiting non-zero when
   it leaves either behind or cannot confirm it did not (`stop/`). A halt (an answer or frame signed
   by another key, a log it cannot follow) stops the bot and leaves the accounts as they are; an
-  account that cannot start or that fails stops alone.
+  account that cannot start or that fails stops alone. `metrics.rs` holds the Prometheus registry the
+  process owns, served on a loopback listener; the fleet records each account's orders, fills, equity
+  and margin level in it, and the stream's lag. The bot verifies the node's attestation at startup
+  (`node/attestation.rs`) and checks every answer against the enclave address it names; the
+  `production` feature refuses at config load what only a dev build takes (a mock attestation, an
+  extra root, a pinned TLS key, a hex key, a plain-HTTP chain endpoint).
   `trader accounts --config` takes each account from an empty wallet to trading and back: `accounts/`
   records a declaration only for an account the user confirms, deposits USDC (`Vault.deposit` from
   the account's wallet, or `depositFor` from the optional funding key's) and waits for the credit,
@@ -77,7 +85,7 @@ list.
   URL and key in each log line, output and error; its bindings come from `abi/`, the entries of the pinned engine's vault and
   `ERC20` ABIs the bot uses. `tests/` runs it against a local stand-in node
   (`tests/common/`) that signs its answers and frames, enforces a per-address limit and injects
-  faults, and a stand-in chain (`tests/common/chain.rs`) that applies the bot's transactions,
+  faults, serves a mock or a test-signed attestation, and a stand-in chain (`tests/common/chain.rs`) that applies the bot's transactions,
   drives the fleet directly (`tests/fleet.rs`), holds the hot path to two allocations a message
   (`tests/alloc.rs`), and holds an hour of a synthetic log through 1,000 accounts to time and memory
   budgets (`tests/hot_path.rs`). The accounts' side of the console is `bot/link.rs`: each account's
@@ -100,7 +108,8 @@ list.
   with `[chain]`) declare, deposit, claim and withdraw for the accounts named, as jobs, and read
   their figures in the background while the console watches; no request names a destination. No route moves funds away from an account's own key or returns a key. Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, with a `[console]` section and a
-  strategy's `bounds`, which the config tests load.
+  strategy's `bounds`, which the config tests load, and `README.md`, the config reference, which
+  documents every key.
 - **console/** — the Vite, React and TypeScript app. `src/main.tsx` mounts `App.tsx` (the page frame,
   login or the signed-in pages) over the stores it creates; `src/api/` holds the client with every
   route (`client.ts`), the parsers that check each body and feed message (`parsers.ts`,
@@ -127,6 +136,11 @@ list.
 - **rustfmt.toml** — `max_width = 120` and `use_small_heuristics = "Max"`.
 - **deny.toml** — `cargo-deny` policy: advisories, allowed licenses, bans, and sources, with the
   engine repository as the one allowed git source.
+- **Dockerfile**, **.dockerignore**, **docker/** — the image: a static `trader` with the console
+  embedded on an empty base, built natively for linux/amd64 and linux/arm64 with every input pinned
+  (base images by digest, the musl standard library by SHA-256, `musl-tools` from a Debian
+  snapshot through `docker/apt.conf`, downloads under `docker/retry`); `VARIANT=production` (the
+  default) or `dev`, and a `binary` target for the binary alone.
 - **README.md**, **SECURITY.md**, **LICENSE** — the public introduction, the security policy (the
   private reporting address, response times, disclosure, safe harbour, scope), and Apache License
   2.0.
@@ -136,9 +150,13 @@ list.
   building the console app to embed it; and `dev-lifecycle`, which installs Foundry and caches them
   with the commit's contracts), the
   console's audit, lint, type check, tests and build, the agent docs' links, the review-delta
-  helper's test, the merge approval gate's test, and the CI scripts' test, on every push to `main`, every PR, and every
+  helper's test, the merge approval gate's test, the CI scripts' test, the production build's
+  refusals (in `test`), and the image (`image`: the Dockerfile's lint, the production image for
+  linux/amd64 with its binary checked static and `dev-attestation.sh` run with it as the bot;
+  `image-dev`: the dev image running `dev-trade-many.sh`; `image-arm64`: the production image built
+  on an arm64 runner), on every push to `main`, every PR, and every
   merge group of the merge queue. On a PR, the first job, `changes`, sorts the changed files into
-  the Rust, console, agent-docs, agent-script, merge-approval and CI-script areas with
+  the Rust, console, image, agent-docs, agent-script, merge-approval and CI-script areas with
   `scripts/ci-areas.sh` (an explicit path list), and each job runs only when its area changed; a push to `main`, a merge group, a manual run, a
   workflow change, a failed diff, or any path the list does not name runs every job. A push to
   `main` whose commit passed a merge group runs no area, only compiling in the jobs that save a
@@ -155,6 +173,10 @@ list.
   which follows the queue's entries from the group's head down to `main` and passes only if the
   latest `merge-approved` status on the head of every PR in the group is `success` from the owner's
   account. It never runs on a pull request, where the owner's commit status is the check.
+  `release.yaml` runs on a `v*` tag only when the owner's account pushed it on a commit of `main`:
+  it builds the production binary and image on an amd64 and an arm64 runner, pushes the image to
+  the GitHub Container Registry under the tag, and attaches the binaries and `SHA256SUMS` to the
+  tag's GitHub release.
 - **scripts/** — `dev-stack.sh`, a dev node for the bot: it reads the engine commit from
   `Cargo.lock`, fetches it into a cache outside the repository (`TRADER_ENGINE_CACHE`, by default
   under `~/.cache/monkeytrading-trader/engine/`), builds the node and its scenario tools once per
@@ -172,6 +194,9 @@ list.
   a tiny daily loss limit for fifteen minutes, checked against their limits and history;
   `dev-trade-many.sh`: twenty accounts in one process across BTC-USD and ETH-USD, checked for one
   stream connection, no request refused for rate, and each account's fills against its history;
+  `dev-attestation.sh`, the production build refusing the dev stack's config and the `attestation`
+  tests; `docker-trader.sh`, which runs the image as `TRADER_BIN` for a scenario;
+  `check-image-binary.sh`, which checks an image's binary is static for its platform and runs;
   `dev-lifecycle.sh`, the account lifecycle on the chain stack: three accounts declared, funded from
   their wallets, trading until each has a MONKEY entitlement, claiming it through a funding key, and
   one withdrawing to its own wallet, every balance checked on chain and in the node;
@@ -219,7 +244,15 @@ Run from the repo root:
   requirements as `dev-trade-one.sh`, and `lsof`); `trader addresses --config <file>` prints the
   accounts' addresses; the hot-path benchmark: `cargo test -p trader --test hot_path -- --nocapture`
 - Test one crate: `cargo test -p trader-core` or `cargo test -p trader`; the workspace:
-  `cargo test --workspace --locked`
+  `cargo test --workspace --locked`; the production build's refusals:
+  `cargo test -p trader --locked --features production --lib production_build`
+- Attestation dev scenario: `./scripts/dev-attestation.sh` (what `dev-stack.sh` needs; about two
+  minutes; `TRADER_BIN` uses a built production bot)
+- Image: `docker buildx build --platform linux/amd64 --build-arg VARIANT=production -t trader .`
+  (`VARIANT=dev` for the dev scenarios, `--target binary --output type=local,dest=<dir>` for the
+  binary alone); its check: `./scripts/check-image-binary.sh <image> <x86-64|aarch64>`; a scenario
+  with the image as the bot: `TRADER_BIN=$PWD/scripts/docker-trader.sh TRADER_IMAGE=<image>
+  ./scripts/dev-trade-one.sh`; lint: `hadolint Dockerfile`
 - Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - Format check: `cargo fmt --all -- --check`
 - File line cap: `./scripts/check-file-loc.sh`; its test: `./scripts/check-file-loc-test.sh`
@@ -261,16 +294,16 @@ Run from the repo root:
   [git-workflow](rules/git-workflow.md#local-checks-before-push) come first.
 - **No git submodules, ever.** Code from another repository comes through Cargo, npm, or a
   script-managed gitignored cache, never a submodule.
-- **The engine is pinned once.** `engine-core` and `engine-wire` (and `engine-verify`, once the
-  production build uses it) are Cargo git dependencies on `https://github.com/monkey-trading/engine`
-  with one shared `rev`; `Cargo.lock` records the commit, so the bot signs exactly what the node
+- **The engine is pinned once.** `engine-core`, `engine-wire` and `engine-verify` are Cargo git
+  dependencies on `https://github.com/monkey-trading/engine` with one shared `rev`; `Cargo.lock` records the commit, so the bot signs exactly what the node
   checks. That `rev` is the only pin of the engine, `scripts/dev-stack.sh` builds its node from the
   same commit, and the README names the node it supports
   ([rust-implementation](skills/rust-implementation/SKILL.md#the-engine-crates)).
 - **`trader-core` does no IO.** No clocks, randomness, files, environment, or network: time and
   prices arrive as arguments, so strategies are tested and benchmarked without a network.
-- **The node's answers are verified.** Every signed answer and stream frame is checked against the
-  node's signer before the bot acts on it; one that fails the check is no data.
+- **The node's answers are verified.** The signer is the enclave address the node's verified
+  attestation names, never a config value. Every signed answer and stream frame is checked against
+  it before the bot acts on it; one that fails the check is no data.
 - **Keys stay with the bot.** No route of the console returns a key, and nothing the console can do
   moves funds away from an account's own key: the funding routes act for the accounts they name and
   take no destination.

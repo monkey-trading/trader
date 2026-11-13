@@ -6,7 +6,7 @@ The monkeytrading bot's binary. `trader run --config <file>` trades one or many 
 own funded key with its own markets and a strategy in each, against a monkeytrading node, in one
 process over one stream connection, and serves its console on the host's address. `trader
 addresses --config <file>` prints the accounts' addresses, for funding and declaring them. Every answer the node signs and every frame of its
-public log stream is checked against the configured enclave signer before the bot acts on it; an
+public log stream is checked against the enclave signer the node's attestation names, never a config value, before the bot acts on it; an
 answer that fails the check is an error, never data, and one signed by another key stops the bot.
 `trader accounts <action> --config <file>` takes each configured account from an empty wallet to
 trading and back: it records the account's declaration, deposits USDC into the vault, claims its
@@ -14,8 +14,15 @@ MONKEY, and withdraws, every payout going to the account's own address.
 
 ## Features
 
-- Signed REST calls to the node over TLS 1.3, pinned to the node's TLS key hash or checked against
-  the public roots, each under a fresh challenge and verified with `engine-wire`
+- The node's attestation, checked before any other call: an SEV-SNP quote verified with
+  `engine-verify` at the pinned engine commit, its chain ending at a vendor root and its launch
+  matching one of the release manifests the config names, with the chain the node relays; or, in
+  a dev build, a dev node's mock. The enclave address it names is the signer, and every connection
+  from then on must present the TLS key it names. One that does not verify stops the bot before
+  it reads anything else, with a Critical alert
+- Signed REST calls to the node over TLS 1.3, pinned to the node's TLS key hash in a dev build or
+  checked against the public roots, and holding the attested key, each under a fresh challenge and
+  verified with `engine-wire`
 - One signed stream connection that reads the public log, verifies each frame with
   `FrameVerifier`, refuses gaps, and resumes after the last message it read when a connection
   fails or falls silent; a frame or message it cannot read stops the bot
@@ -125,8 +132,14 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - A command fails when any account's action did, a refused declaration included; the funding key
   is unlocked only for the actions it pays for
 - The account keys from an encrypted Web3 Secret Storage keystore, or, in a dev build, a hex file;
-  held only as a signing key that zeroes its secret on drop, and never printed. A release build
+  held only as a signing key that zeroes its secret on drop, and never printed. A production build
   refuses the keys whose private halves this repository publishes
+- A `production` cargo feature, which release binaries and images build with, that refuses at
+  config load a mock attestation, an extra attestation root, a pinned TLS key, a hex key, and a
+  plain-HTTP chain endpoint
+- Prometheus metrics on a loopback listener: orders placed and declined and fills per account and
+  market, each account's equity and margin level, and the stream's lag; the listener failing stops
+  the bot as a signal does
 
 - The console, with a `[console]` section: HTTPS on `bind` (every interface, port 8443, by
   default) with the certificate and key the config names, or a self-signed pair generated on first
@@ -193,12 +206,15 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `build.rs`: embeds the console app's build, `console/dist`, when there is one
 - `src/files.rs`: files only the bot's user can read, written whole
 - `src/main.rs`: the entry point
-- `src/lib.rs`: the command line and the runtime
+- `src/lib.rs`: the command line, the runtime, and the metrics listener's supervision
 - `src/logging.rs`: the log, with every RPC endpoint's URL and key replaced in each line written,
   and the command line's output and errors likewise
 - `src/config/mod.rs`: the config file's sections and loading
-- `src/config/validation.rs`: parsing of the node URL and TLS key hash, and the config's checks
+- `src/config/validation.rs`: parsing of the node URL and TLS key hash, and the config's checks,
+  with what only a dev build takes
 - `src/config/tests.rs`: the config tests, against `config/example.toml`
+- `src/config/tests/production.rs`: what a production build refuses at load, the metrics address,
+  and the release manifests
 - `src/config/chain.rs`: the `[chain]`, `[funding]` and `[claims]` sections and their checks
 - `src/keys.rs`: `AccountKey`: unlocking a keystore or a dev hex file, and signing
 - `src/keys/tests.rs`: the key tests
@@ -208,7 +224,11 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `src/node/api.rs`: the routes the bot uses and their answers
 - `src/node/accounts.rs`: the account lifecycle's routes: the declaration, deposits' custody
   records, the MONKEY entitlement, withdrawals, payouts and their reissue
-- `src/node/tls.rs`: the pinned or publicly rooted TLS connections
+- `src/node/tls.rs`: the pinned or publicly rooted TLS connections, and the attested key they
+  require
+- `src/node/attestation.rs`: the node's attestation, verified or read as a dev node's mock
+- `src/metrics.rs`: the metrics registry, each account's series, and the listener
+- `src/metrics/tests.rs`: the metrics tests
 - `src/chain/mod.rs`: `Chain`, its endpoints and reads
 - `src/chain/rpc.rs`: the JSON-RPC calls the bot makes of an endpoint
 - `src/chain/send.rs`: the transactions the bot sends, one per key at a time, followed to their receipts
@@ -292,6 +312,13 @@ MONKEY, and withdraws, every payout going to the account's own address.
   account that halts while it runs, and a stop that comes while it reports its closes
 - `tests/console_many.rs`: the console over several accounts, one stopped while the other trades,
   and accounts that could not start
+- `tests/common/log.rs`: the stand-in's log over signed stream connections, with injected faults
+- `tests/common/keys.rs`: the stand-in's TLS keys: the attested one, and another it presents once
+  a test asks
+- `tests/common/attestation.rs`: the stand-in's attestations: a mock, and a quote the engine's
+  stand-in vendor chain signs, with its release manifest and root
+- `tests/attestation.rs`: the bot against an attested stand-in, and the attestations that stop it
+- `tests/metrics.rs`: the bot's orders, fills, equity and lag in its metrics, and the run serving them
 - `tests/node_answers.rs`, `tests/stream.rs`, `tests/bot.rs`: the binary against the stand-in
 - `tests/node_pacing.rs`: the pacer under the node's limit, retry-later answers, and the node's time
 - `tests/many_accounts.rs`: several accounts against the stand-in: one stream connection, each
@@ -337,7 +364,9 @@ cargo run -p trader -- accounts --config config/example.toml --account 0x… wit
 
 `scripts/dev-stack.sh` runs a local node and prints its `[node]` section; `scripts/dev-trade-one.sh`
 runs the bot against it end to end, `scripts/dev-strategies.sh` runs each strategy on its own account,
-`scripts/dev-trade-many.sh` runs twenty accounts in one process, and `scripts/dev-console-api.sh` runs
+`scripts/dev-trade-many.sh` runs twenty accounts in one process, `scripts/dev-attestation.sh` checks that a
+production build refuses its config and that a test-signed attestation names the signer the bot trades
+against, and `scripts/dev-console-api.sh` runs
 two accounts with the console. `scripts/dev-stack.sh --chain` adds a local chain with the vault and
 prints the `[chain]` section too; `scripts/dev-lifecycle.sh` runs the account lifecycle on it.
 
@@ -348,13 +377,15 @@ restart for a new password.
 
 ## Configuration
 
-One TOML file, `config/example.toml` documents every key; each section refuses keys it does not
-know, and relative paths are read from the file's directory:
+One TOML file; `config/README.md` documents every key and `config/example.toml` is a complete
+example. Each section refuses keys it does not know, and relative paths are read from the file's
+directory:
 
 - `[node]`: `url` (`https://host:port`), `chain_id` and `vault` (the custody deployment every
-  signature names), `signer` (the enclave address that signs answers), `tls_key_sha256` (the
-  node's TLS key hash to pin; without it the certificate must chain to a public root),
-  `request_timeout` and `stream_timeout`
+  signature names), `tls_key_sha256` (in a dev build, the node's TLS key hash to pin; without it
+  the certificate must chain to a public root), `request_timeout` and `stream_timeout`
+- `[node.attestation]`: `type = "sev_snp"` with `releases` (release manifest files) and, in a dev
+  build, `root` (an extra PEM root); or, in a dev build, `type = "mock"`
 - `[node.limits]`: `per_ip` and `per_account` (`per_second` and `burst`, as the node's `[api]` sets
   them), `fresh_accounts` (`per_minute` and `burst`, as its `api.fresh_accounts.per_client`, at
   most 12 a minute with a burst of 6 on a production node), all defaulting to the engine's
@@ -383,6 +414,7 @@ know, and relative paths are read from the file's directory:
   minute for the last 24 hours, in memory, served whole only in the account's own read), and
   `tls = { cert, key }`, PEM files to serve instead of the generated certificate
 - `[logging]`: `level`, a tracing filter directive
+- `[metrics]`: `listen`, a loopback address for the Prometheus listener
 
 `CONFIG_PATH`: the config file, when `--config` is not given. The keystore password variable is the
 one the config names, and so is the funding key's.
@@ -392,11 +424,13 @@ one the config names, and so is the funding key's.
 ```bash
 cargo test -p trader
 cargo test -p trader --test hot_path -- --nocapture   # the benchmark's measurements
+cargo test -p trader --features production --lib production_build   # the production build's refusals
 ./scripts/dev-trade-one.sh    # a dev scenario, about seventeen minutes
 ./scripts/dev-trade-many.sh   # twenty accounts, about seventeen minutes
 ./scripts/dev-strategies.sh   # another, about twenty minutes
 ./scripts/dev-lifecycle.sh    # the account lifecycle on a local chain, about fifteen minutes, up to forty
 ./scripts/dev-console-api.sh  # two accounts with the console, about ten minutes
+./scripts/dev-attestation.sh  # the production build and the attestation, about two minutes
 ```
 
 ## Authors

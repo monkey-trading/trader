@@ -1,0 +1,11 @@
+# The image build reads only the manifests, the toolchain file, the crates, the console's sources,
+# and docker/.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates
+!console
+!docker
+console/node_modules
+console/dist

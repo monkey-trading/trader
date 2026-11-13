@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, ensure};
 use engine_core::Fixed;
@@ -16,7 +16,6 @@ use engine_core::eip712::Signature;
 use engine_core::market::MarketSpec;
 use engine_core::types::{AccountId, MarketId, Millis};
 use tokio::time::Instant;
-use tracing::error;
 use trader_core::controls::Controls;
 use trader_core::hours::GapTracker;
 use trader_core::marks::IndexMarks;
@@ -27,6 +26,7 @@ use crate::bot::day::{Saved, StateFile};
 use crate::bot::warm::WarmRequest;
 use crate::config::ParamBounds;
 use crate::keys::AccountKey;
+use crate::metrics::FleetMetrics;
 
 /// How far behind the node's time a bar may close and still be acted on; one further behind is
 /// history the stream is replaying, quoted at marks long gone.
@@ -300,6 +300,8 @@ pub struct Fleet {
     /// failure, a day's stop, or a control. Each is listed once, so it never outgrows the capacity
     /// it starts with.
     pub changed: Vec<u32>,
+    /// The series the fleet records, once `register_metrics` gives them.
+    pub metrics: FleetMetrics,
 }
 
 impl Fleet {
@@ -453,6 +455,7 @@ impl Fleet {
             decisions: 0,
             failed: 0,
             changed: Vec::with_capacity(accounts_len),
+            metrics: FleetMetrics::default(),
         })
     }
 
@@ -478,21 +481,5 @@ impl Fleet {
     /// The assignment of account `account` in `market`.
     pub fn assignment_of(&self, account: u32, market: MarketId) -> Option<u32> {
         self.accounts[account as usize].assignments.clone().find(|&a| self.assignments[a as usize].market == market)
-    }
-
-    /// Stops `account` from trading, leaving it as it is, and says why.
-    pub fn fail(&mut self, account: u32, reason: String) {
-        let entry = &mut self.accounts[account as usize];
-        if entry.failed.is_none() {
-            error!(alert = "account_failed", account = %entry.address, "{reason}; the account is left as it is");
-            entry.failed = Some(reason);
-            entry.halt.store(true, Ordering::Relaxed);
-            self.failed += 1;
-        }
-        for a in entry.assignments.clone() {
-            let asg = &mut self.assignments[a as usize];
-            (asg.wanted, asg.pending) = (None, None);
-        }
-        self.mark_changed(account);
     }
 }

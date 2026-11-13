@@ -1,5 +1,5 @@
 //! The public log over one signed stream connection (`/v1/stream?signed=1`). Each frame is checked
-//! with `engine_wire::FrameVerifier` against the configured signer before its message is read, and
+//! with `engine_wire::FrameVerifier` against the attested signer before its message is read, and
 //! the messages must follow each other with no gap. A connection that fails a check, falls silent
 //! for longer than the stream timeout, or drops is closed, and a new one resumes right after the
 //! last message returned, so the caller sees every message once, in order.
@@ -19,9 +19,9 @@ use tokio_rustls::client::TlsStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{WebSocketStream, client_async};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
-use crate::node::Tls;
+use crate::node::{Tls, is_mismatch};
 use crate::stream::message::{Head, Offset};
 
 /// The first wait before reconnecting.
@@ -42,9 +42,9 @@ pub struct Frame {
 /// Why the stream cannot go on.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
-    /// A frame's signature is not the configured signer's over it: another key signed it, or it is
-    /// not the frame that was signed.
-    #[error("a stream frame is not signed by the configured signer")]
+    /// A frame's signature is not the attested signer's over it: another key signed it, or it is
+    /// not the frame that was signed; or the node presented another TLS key than the attested one.
+    #[error("a stream frame is not signed by the attested signer")]
     WrongSigner,
     /// A frame of a version or shape this crate cannot read, or a verified message the bot cannot
     /// place in the log: no type, or no offset it can read. The node would send it again on every
@@ -108,7 +108,7 @@ impl Stream {
     /// The next message after the last one returned, verified and in order, connecting and
     /// reconnecting as needed. Cancel-safe: a frame counts as returned only once this returns it.
     /// Error cases:
-    /// - a frame's signature is not the configured signer's over it
+    /// - a frame's signature is not the attested signer's over it
     /// - a frame of another version or shape, or a verified message with no type or readable offset
     pub async fn next(&mut self) -> Result<Frame, StreamError> {
         loop {
@@ -128,6 +128,12 @@ impl Stream {
                     Ok(open) => {
                         self.open = Some(open);
                         self.silent_until = Instant::now() + self.idle;
+                    }
+                    // A node that completes a handshake with another TLS key than the attested one is
+                    // not the attested enclave: as a frame another key signed, no reconnection cures it.
+                    Err(e) if is_mismatch(&e) => {
+                        error!("the node completed a TLS handshake with another key than the attested one");
+                        return Err(StreamError::WrongSigner);
                     }
                     Err(e) => self.drop_connection(&format!("connecting: {e:#}")),
                 }

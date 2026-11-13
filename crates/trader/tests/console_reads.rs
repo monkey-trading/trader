@@ -126,7 +126,7 @@ async fn a_failed_read_keeps_the_last_figures_and_another_signer_stops_the_bot()
     stand_in.with(|i| i.other_signer_path = Some(format!("/v1/accounts/{a}/emissions")));
     let ended = tokio::time::timeout(Duration::from_secs(30), running.task).await.expect("the bot stops");
     let error = ended.unwrap().expect_err("the bot halts");
-    assert_eq!(error.to_string(), "the node's answers are not signed by the configured signer");
+    assert_eq!(error.to_string(), "the node's answers are not signed by the attested signer");
     let posts: Vec<_> = stand_in.with(|i| i.posts.iter().map(|(path, _)| path.clone()).collect());
     assert!(posts.is_empty(), "the account is left as it is: {posts:?}");
 }
@@ -150,7 +150,7 @@ async fn another_signer_ends_a_stop_under_way() {
     stand_in.with(|i| i.other_signer_path = Some(format!("/v1/accounts/{a}/emissions")));
     let ended = tokio::time::timeout(Duration::from_secs(20), running.task).await.expect("the stop ends early");
     let error = ended.unwrap().expect_err("the bot halts");
-    assert_eq!(error.to_string(), "the node's answers are not signed by the configured signer");
+    assert_eq!(error.to_string(), "the node's answers are not signed by the attested signer");
     let posts: Vec<_> = stand_in.with(|i| i.posts.iter().map(|(path, _)| path.clone()).collect());
     assert!(posts.is_empty(), "nothing was sent: {posts:?}");
 }

@@ -101,6 +101,15 @@ pub fn printed_password(printed: &str) -> String {
 impl Running {
     /// Prepares the console for `cfg` and runs the bot with it until `stop`.
     pub async fn start(cfg: Config) -> Self {
+        Self::start_with(cfg, None).await
+    }
+
+    /// Starts it as `start` does, recording into `metrics`, with no metrics listener.
+    pub async fn start_recording(cfg: Config, metrics: std::sync::Arc<trader::metrics::Metrics>) -> Self {
+        Self::start_with(cfg, Some(metrics)).await
+    }
+
+    async fn start_with(cfg: Config, metrics: Option<std::sync::Arc<trader::metrics::Metrics>>) -> Self {
         let section = cfg.console.as_ref().unwrap();
         let data_dir: PathBuf = section.data_dir.clone();
         let mut out = Vec::new();
@@ -111,14 +120,15 @@ impl Running {
         let pin = TlsPin(Sha256::digest(&spki).into());
         let tls = Tls::new(NodeUrl { host: "127.0.0.1".into(), port: addr.port() }, Some(pin)).unwrap();
         let (stop, stopped) = oneshot::channel::<()>();
-        let task = tokio::spawn(trader::serve(
-            cfg,
-            |_| None,
-            async {
-                _ = stopped.await;
-            },
-            Some(prepared),
-        ));
+        let stopped = async {
+            _ = stopped.await;
+        };
+        let task = match metrics {
+            None => tokio::spawn(trader::serve(cfg, |_| None, stopped, Some(prepared))),
+            Some(metrics) => tokio::spawn(async move {
+                trader::bot::run_with_console(cfg, |_| None, stopped, Some(prepared), &metrics).await
+            }),
+        };
         Self { addr, printed: String::from_utf8(out).unwrap(), tls, stop: Some(stop), task }
     }
 

@@ -88,6 +88,11 @@ impl RpcUrl {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// Whether the endpoint is reached over TLS, as a production build requires.
+    fn is_https(&self) -> bool {
+        reqwest::Url::parse(&self.0).is_ok_and(|url| url.scheme() == "https")
+    }
 }
 
 impl fmt::Debug for RpcUrl {
@@ -140,15 +145,21 @@ impl<'de> Deserialize<'de> for Gwei {
 }
 
 impl Config {
-    /// Checks the chain sections: at least one endpoint and non-zero durations, a funding key that
-    /// is a keystore outside a dev build (`dev_build`), and claims only with a chain to claim on.
+    /// Checks the chain sections: at least one endpoint and non-zero durations, endpoints over TLS
+    /// and a funding key that is a keystore outside a dev build (`dev_build`), and claims only with a
+    /// chain to claim on.
     /// Error cases:
     /// - `[chain]` with no endpoint, or a zero duration
+    /// - a plain `http://` endpoint outside a dev build
     /// - a hex funding key outside a dev build
     /// - `[claims]` without `[chain]`, or with a zero interval
     pub(super) fn validate_chain(&self, dev_build: bool) -> anyhow::Result<()> {
         if let Some(chain) = &self.chain {
             ensure!(!chain.rpc.is_empty(), "chain.rpc: at least one endpoint");
+            ensure!(
+                dev_build || chain.rpc.iter().all(RpcUrl::is_https),
+                "chain.rpc: a production build takes only https:// endpoints; plain http:// is for a local dev chain"
+            );
             for (name, duration) in [
                 ("rpc_timeout", chain.rpc_timeout),
                 ("receipt_timeout", chain.receipt_timeout),

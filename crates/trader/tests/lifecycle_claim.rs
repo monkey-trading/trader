@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use trader::accounts::claim::{Batching, Claimed, watch, watch_batched};
 use trader::chain::contracts::Vault;
 use trader::keys::AccountKey;
+use trader::metrics::Metrics;
 
 use common::lifecycle::chain::VAULT;
 use common::lifecycle::{Setup, account, funding_wallet, until, wallet, within};
@@ -152,7 +153,7 @@ async fn the_bot_claims_while_it_runs() {
     let stop = async move {
         chain.sent_count(1).await;
     };
-    within(trader::bot::run(cfg, |_| None, stop)).await.unwrap();
+    within(trader::bot::run(cfg, |_| None, stop, &Metrics::new())).await.unwrap();
     let sent = s.chain.sent();
     assert_eq!((sent[0].from, sent[0].to), (funding_wallet(), VAULT));
     assert_eq!(&sent[0].input[..4], Vault::claimEmissionsCall::SELECTOR);
@@ -174,8 +175,8 @@ async fn a_claims_answer_from_another_signer_halts_the_bot() {
     s.node.tick(common::T0 + common::MINUTE);
     let claims = "[claims]\nthreshold = \"1\"\ninterval = \"50ms\"\n";
     let cfg = common::lifecycle::config(&s.node, &[s.chain.url()], s.dir.path(), true, claims);
-    let err = within(trader::bot::run(cfg, |_| None, std::future::pending())).await.unwrap_err();
-    assert!(format!("{err:#}").contains("not signed by the configured signer"), "{err:#}");
+    let err = within(trader::bot::run(cfg, |_| None, std::future::pending(), &Metrics::new())).await.unwrap_err();
+    assert!(format!("{err:#}").contains("not signed by the attested signer"), "{err:#}");
     assert!(s.node.with(|i| i.posts.is_empty()), "the resting order is left as it is");
     assert!(s.chain.sent().is_empty());
 }

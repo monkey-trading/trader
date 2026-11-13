@@ -5,17 +5,29 @@ use trader_core::risk::LossLimit;
 
 use super::*;
 
+mod production;
+
 /// The committed example, which the README and the dev stack point to.
 const EXAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/example.toml");
+
+/// The example's key and attestation lines, which tests replace.
+const KEYSTORE: &str =
+    "key = { type = \"keystore\", path = \"keys/account.json\", password = { env = \"TRADER_KEY_PASSWORD\" } }";
+const SEV_SNP: &str = "type = \"sev_snp\"\nreleases = [\"engine-release.toml\"]";
 
 /// The example loads, every relative path resolved against its directory.
 #[test]
 fn the_example_loads() {
     let cfg = Config::load(Path::new(EXAMPLE)).unwrap();
-    assert_eq!(cfg.node.url, NodeUrl { host: "127.0.0.1".into(), port: 18610 });
-    assert_eq!(cfg.node.chain_id, 31337);
-    assert_eq!(cfg.node.tls_key_sha256, Some(TlsPin([0; 32])));
+    assert_eq!(cfg.node.url, NodeUrl { host: "node.monkeytrading.example".into(), port: 443 });
+    assert_eq!(cfg.node.chain_id, 42161);
+    assert_eq!(cfg.node.tls_key_sha256, None);
     assert_eq!(cfg.node.request_timeout, Duration::from_secs(10));
+    let AttestationSection::SevSnp { releases, root: None } = &cfg.node.attestation else {
+        panic!("the example verifies an SEV-SNP attestation against the vendor's roots alone");
+    };
+    assert_eq!(releases, &[Path::new(EXAMPLE).parent().unwrap().join("engine-release.toml")]);
+    assert_eq!(cfg.metrics.as_ref().map(|m| m.listen), Some("127.0.0.1:9466".parse().unwrap()));
     assert_eq!(cfg.node.limits, LimitsSection::default());
     assert_eq!(cfg.plans.len(), 1);
     let strategy = &cfg.plans[0].strategies[0];
@@ -174,6 +186,10 @@ fn console_paths_resolve_against_the_config() {
 fn unknown_keys_are_refused() {
     let edits = [
         ("\n[node]\n", "\n[node]\nbogus = 1\n"),
+        ("\n[node.attestation]\n", "\n[node.attestation]\nbogus = 1\n"),
+        // A mock attestation takes no key but its type, a manifest included.
+        ("type = \"sev_snp\"", "type = \"mock\""),
+        ("\n[metrics]\n", "\n[metrics]\nbogus = 1\n"),
         ("\n[[account]]\n", "\n[[account]]\nbogus = 1\n"),
         ("\n[[account.strategy]]\n", "\n[[account.strategy]]\nbogus = 1\n"),
         ("\n[node.limits]\n", "\n[node.limits]\nbogus = 1\n"),
@@ -202,41 +218,31 @@ fn unknown_keys_are_refused() {
 /// A missing required key fails the load, naming it.
 #[test]
 fn required_keys_are_required() {
-    let keys = ["signer = ", "chain_id = ", "market = ", "max_slippage_bps = ", "kind = ", "by = ", "notional = "];
-    for key in
-        keys.into_iter().chain(["max_leverage = ", "max_open_positions = ", "max_total_notional = ", "daily_loss = "])
-    {
+    let keys = ["chain_id = ", "releases = ", "listen = ", "market = ", "max_slippage_bps = ", "kind = ", "by = "];
+    for key in keys.into_iter().chain([
+        "notional = ",
+        "max_leverage = ",
+        "max_open_positions = ",
+        "max_total_notional = ",
+        "daily_loss = ",
+    ]) {
         let text: String = example().lines().filter(|l| !l.starts_with(key)).collect::<Vec<_>>().join("\n");
         let err = parse(&text).expect_err(key);
         assert!(format!("{err:#}").contains(key.trim_end_matches(" = ")), "{key}: {err:#}");
     }
 }
 
-/// Without a pin the node's certificate must chain to a public root; timeouts default.
+/// Timeouts default, and the metrics section may be left out.
 #[test]
-fn optional_node_keys_default() {
+fn optional_keys_default() {
     let text: String = example()
         .lines()
-        .filter(|l| !["tls_key_sha256", "request_timeout", "stream_timeout"].iter().any(|key| l.starts_with(key)))
+        .filter(|l| !["request_timeout", "stream_timeout", "[metrics]", "listen"].iter().any(|key| l.starts_with(key)))
         .collect::<Vec<_>>()
         .join("\n");
     let cfg = parse(&text).unwrap();
-    assert_eq!(cfg.node.tls_key_sha256, None);
     assert_eq!((cfg.node.request_timeout, cfg.node.stream_timeout), (DEFAULT_REQUEST_TIMEOUT, DEFAULT_STREAM_TIMEOUT));
-}
-
-/// A hex key file loads in a dev build only.
-#[test]
-fn a_hex_key_is_dev_only() {
-    let text = example().replace(
-        "key = { type = \"keystore\", path = \"keys/account.json\", password = { env = \"TRADER_KEY_PASSWORD\" } }",
-        "key = { type = \"hex_file\", path = \"dev.hex\" }",
-    );
-    let cfg: Config = toml::from_str(&text).unwrap();
-    assert!(matches!(cfg.account[0].key, KeySource::HexFile { .. }));
-    cfg.validate(true).unwrap();
-    let err = cfg.validate(false).unwrap_err();
-    assert!(err.to_string().contains("only in a dev build"), "{err}");
+    assert!(cfg.metrics.is_none());
 }
 
 /// Each strategy value outside its bounds is refused, and each bound itself is accepted.
@@ -319,18 +325,25 @@ fn every_strategy_kind_loads() {
     assert!(parse(&wrong).is_err(), "a key another kind takes was accepted");
 }
 
-/// Relative key and password paths resolve against the config's directory; absolute ones stay.
+/// Relative key, password, release and root paths resolve against the config's directory; absolute
+/// ones stay.
 #[test]
 fn relative_paths_resolve_against_the_config() {
-    let mut cfg: Config = toml::from_str(
-        &example().replace("password = { env = \"TRADER_KEY_PASSWORD\" }", "password = { file = \"/run/pass\" }"),
-    )
-    .unwrap();
+    let text = example()
+        .replace("password = { env = \"TRADER_KEY_PASSWORD\" }", "password = { file = \"/run/pass\" }")
+        .replace(
+            SEV_SNP,
+            "type = \"sev_snp\"\nreleases = [\"engine-release.toml\", \"/srv/next.toml\"]\nroot = \"roots/test.pem\"",
+        );
+    let mut cfg: Config = toml::from_str(&text).unwrap();
     cfg.resolve_paths(Path::new("/etc/trader"));
     let KeySource::Keystore { path, password: PasswordSource::File(file) } = &cfg.account[0].key else {
         unreachable!()
     };
     assert_eq!((path.as_path(), file.as_path()), (Path::new("/etc/trader/keys/account.json"), Path::new("/run/pass")));
+    let AttestationSection::SevSnp { releases, root: Some(root) } = &cfg.node.attestation else { unreachable!() };
+    assert_eq!(releases, &[Path::new("/etc/trader/engine-release.toml"), Path::new("/srv/next.toml")]);
+    assert_eq!(root, Path::new("/etc/trader/roots/test.pem"));
 }
 
 /// An account trades each market once, at most `MAX_STRATEGIES` markets, and the config names an
@@ -416,15 +429,16 @@ fn an_empty_or_missing_directory_is_refused() {
 /// The node URL and the pin must be well formed.
 #[test]
 fn node_values_are_parsed() {
+    let pinned = example().replacen("vault = ", &format!("tls_key_sha256 = \"{}\"\nvault = ", "00".repeat(32)), 1);
     for (from, to) in [
-        ("url = \"https://127.0.0.1:18610\"", "url = \"http://127.0.0.1:18610\""),
+        ("url = \"https://node.monkeytrading.example:443\"", "url = \"http://node.monkeytrading.example:443\""),
         ("tls_key_sha256 = \"00", "tls_key_sha256 = \"zz"),
         ("tls_key_sha256 = \"00", "tls_key_sha256 = \""),
         ("vault = \"0x00", "vault = \"0x0"),
     ] {
-        assert!(parse(&example().replacen(from, to, 1)).is_err(), "{to} was accepted");
+        assert!(parse(&pinned.replacen(from, to, 1)).is_err(), "{to} was accepted");
     }
-    let cfg = parse(&example().replacen("tls_key_sha256 = \"", "tls_key_sha256 = \"0x", 1)).unwrap();
+    let cfg = parse(&pinned.replacen("tls_key_sha256 = \"", "tls_key_sha256 = \"0x", 1)).unwrap();
     assert_eq!(cfg.node.tls_key_sha256, Some(TlsPin([0; 32])));
 }
 

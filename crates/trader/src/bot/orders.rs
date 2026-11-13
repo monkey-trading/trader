@@ -170,6 +170,9 @@ impl Runner {
         asg.close_first = false;
         (asg.pending, asg.queued) = (None, false);
         self.out += 1;
+        if let Some(series) = fleet.metrics.markets.get(a as usize) {
+            series.orders_placed.inc();
+        }
         info!(account = %account.address, market = asg.market, side = ?intent.side, qty = %intent.qty, %quoted,
             reduce_only = intent.reduce_only, nonce, expires_at, client_id, "placing a market order");
         let node = Arc::clone(&self.node);
@@ -206,8 +209,10 @@ impl Runner {
     }
 
     /// Takes an order's answer: the account's nonce moves on when the engine used it, an account
-    /// whose key the node refuses stops, and an order refused for a nonce another request of the
-    /// account took has its target decided again.
+    /// whose key the node refuses stops, an order refused for a nonce another request of the account
+    /// took has its target decided again, and the node's refusal counts as declined in each market the
+    /// request named. The engine's rejections count as the log gives them (`Fleet::apply_event`, or
+    /// `Fleet::count_rejections` as the stop reads past the last order), whether this answer came or not.
     /// Error cases:
     /// - an answer signed by another key than the signer
     pub(super) fn order_done(
@@ -223,6 +228,17 @@ impl Runner {
         self.out -= 1;
         self.fleet.accounts[account as usize].busy = false;
         let mut failure = None;
+        if let Err(CallError::Refused { .. }) = &outcome {
+            // The request's markets are those its expiry fences: an order's own, or each a close names.
+            let range = self.fleet.accounts[account as usize].assignments.clone();
+            let fenced = |b: &u32| self.fleet.assignments[*b as usize].expires_at == Some(expires_at);
+            let mut named: Vec<_> =
+                range.clone().filter(fenced).map(|b| self.fleet.assignments[b as usize].market).collect();
+            if named.is_empty() {
+                named.push(self.fleet.assignments[assignment as usize].market);
+            }
+            self.fleet.order_series(range).declined(&named);
+        }
         let next = match outcome {
             Ok(answer) => {
                 log_order_events(self.fleet.accounts[account as usize].address, &answer.body);

@@ -131,6 +131,11 @@ impl Runner {
         account.flatten_after = fleet.log_ts.saturating_add(FLATTEN_RETRY_MS);
         account.flatten_bound = Some(slippage);
         self.out += 1;
+        for &a in &held {
+            if let Some(series) = fleet.metrics.markets.get(a as usize) {
+                series.orders_placed.inc();
+            }
+        }
         let node = Arc::clone(&self.node);
         self.in_flight.push(
             async move {

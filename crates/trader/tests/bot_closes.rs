@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::{
     MINUTE, StandIn, T0, account, account_view, btc_usd, command, eth_usd, next_seq, own_close, posted,
-    posts_after_settling, price_at, prices, start, warm,
+    posts_after_settling, price_at, prices, start, start_recording, warm,
 };
 use serde_json::json;
 
@@ -76,7 +76,9 @@ async fn a_queued_close_waits_while_its_account_is_behind_the_log() {
 }
 
 /// A close of two markets the engine rejects with no fill, or the node refuses for its nonce, moved
-/// nothing: the next try closes both again, and does not wait for the first's request to expire.
+/// nothing: the next try closes both again, and does not wait for the first's request to expire. Each
+/// close counts as placed in both markets; the node's refusal as declined in both, and the engine's
+/// rejection once, as the log gives it, in the market the rejected entry names.
 #[tokio::test]
 async fn a_rejected_close_of_two_markets_is_tried_again_for_both() {
     for nonce_refused in [false, true] {
@@ -105,7 +107,8 @@ async fn a_close_of_two_markets_is_tried_again_after(nonce_refused: bool) {
     let eth = "\n[[account.strategy]]\nmarket = \"ETH-USD\"\nbar = \"1m\"\nkind = \"sma_crossover\"\nfast = 1\n\
                slow = 2\nmax_slippage_bps = 25\n\n[sizing]";
     let edits = [LIMIT, ("\n[sizing]", eth), ("max_open_positions = 1", "max_open_positions = 2")];
-    let (stop, bot) = start(&stand_in, dir.path(), &edits);
+    let metrics = std::sync::Arc::new(trader::metrics::Metrics::new());
+    let (stop, bot) = start_recording(&stand_in, dir.path(), &edits, metrics.clone());
     warm(&stand_in).await;
     // The second market is priced as the first is, and its index is exact.
     for (seq, ts) in [(14, T0 + 7_000), (15, T0 + 8_001)] {
@@ -122,6 +125,15 @@ async fn a_close_of_two_markets_is_tried_again_after(nonce_refused: bool) {
     let (path, first) = posted(&stand_in, 1).await;
     assert_eq!(path, "/v1/positions/close-all");
     assert_eq!(first["closes"].as_array().unwrap().len(), 2, "both markets in one request");
+    if !nonce_refused {
+        // The log gives the engine's rejection of the second entry, as the answer did.
+        let rejected = json!([{ "type": "order_rejected", "account": account(), "client_id": 1,
+            "reason": { "kind": "market_closed" } }]);
+        let evidence = json!({ "result": "failed", "reason": "unavailable" });
+        let seq = next_seq(&stand_in);
+        let cmd = json!({ "type": "access_close_all", "request": first, "evidence": evidence });
+        stand_in.append((seq, 0), command(seq, T0 + MINUTE + 5_000, cmd, rejected));
+    }
     // The next try, past the retry time, names both again.
     let seq = next_seq(&stand_in);
     stand_in.append((seq, 0), command(seq, T0 + MINUTE + 6_000, json!({ "type": "tick" }), json!([])));
@@ -134,4 +146,13 @@ async fn a_close_of_two_markets_is_tried_again_after(nonce_refused: bool) {
     stand_in.append((seq, 0), command(seq, T0 + 10 * MINUTE, json!({ "type": "tick" }), json!([])));
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+    let text = metrics.encode();
+    // The answer's rejection of the first entry is not counted beside the log's of the second.
+    let declined = if nonce_refused { (1, 1) } else { (0, 1) };
+    for (name, (btc, eth)) in [("placed", (2, 2)), ("declined", declined)] {
+        for (market, count) in [("BTC-USD", btc), ("ETH-USD", eth)] {
+            let line = format!("trader_orders_{name}_total{{account=\"{}\",market=\"{market}\"}} {count}", account());
+            assert!(text.lines().any(|l| l == line), "no {line} in\n{text}");
+        }
+    }
 }

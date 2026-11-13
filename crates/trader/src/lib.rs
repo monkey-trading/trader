@@ -1,4 +1,4 @@
-//! The `trader` binary: its command line, the bot it runs, and the bot's console.
+//! The `trader` binary: its command line, the bot it runs, its console, and its metrics listener.
 
 pub mod accounts;
 pub mod bot;
@@ -8,20 +8,33 @@ pub mod console;
 mod files;
 pub mod keys;
 pub mod logging;
+pub mod metrics;
 pub mod node;
 pub mod stream;
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
 use engine_core::types::AccountId;
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+use tracing::{error, info};
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::Config;
 use crate::console::Prepared;
 use crate::logging::{Redacting, Secrets};
+use crate::metrics::Metrics;
+
+/// Built with the `production` feature: the config refuses what only a dev build takes, and no key
+/// this repository publishes unlocks.
+#[cfg(feature = "production")]
+pub(crate) const PRODUCTION_BUILD: bool = true;
+#[cfg(not(feature = "production"))]
+pub(crate) const PRODUCTION_BUILD: bool = false;
 
 /// The monkeytrading bot.
 #[derive(Debug, Parser)]
@@ -101,16 +114,45 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 /// Runs the bot until `stop` completes or it halts, with its console when `console` holds one
-/// prepared from the config's section.
+/// prepared from the config's section, and serving its metrics when the config has a `[metrics]`
+/// section. The listener's failure stops the bot as `stop` would.
 /// Error cases:
+/// - the metrics address cannot be bound
 /// - see `bot::run_with_console`
+/// - the metrics listener fails
 pub async fn serve(
     cfg: Config,
     env: impl Fn(&str) -> Option<String> + Sync,
     stop: impl Future<Output = ()>,
     console: Option<Prepared>,
 ) -> anyhow::Result<()> {
-    bot::run_with_console(cfg, env, stop, console).await
+    let metrics = Arc::new(Metrics::new());
+    let Some(listen) = cfg.metrics.as_ref().map(|section| section.listen) else {
+        return bot::run_with_console(cfg, env, stop, console, &metrics).await;
+    };
+    let listener = TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
+    info!(%listen, "serving metrics at /metrics");
+    let listening = metrics::serve(listener, Arc::clone(&metrics));
+    let (stop_bot, stopped) = oneshot::channel::<()>();
+    let stop = async move {
+        tokio::select! {
+            () = stop => {}
+            _ = stopped => {}
+        }
+    };
+    let bot = bot::run_with_console(cfg, env, stop, console, &metrics);
+    tokio::pin!(bot, listening);
+    tokio::select! {
+        result = &mut bot => result,
+        failure = &mut listening => {
+            error!(alert = "metrics_failed", "the metrics listener stopped, so the bot stops too: {failure:#}");
+            let _ = stop_bot.send(());
+            if let Err(e) = bot.await {
+                error!("{e:#}");
+            }
+            Err(failure.context("the metrics listener stopped"))
+        }
+    }
 }
 
 /// Loads the config at `path` and starts logging at its level, with no secret of the config in any

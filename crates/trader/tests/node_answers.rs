@@ -1,11 +1,11 @@
 //! The node client against the stand-in: an answer counts only once its signature verifies against
-//! the configured signer, the request as sent, and the challenge sent with it.
+//! the attested signer, the request as sent, and the challenge sent with it.
 
 mod common;
 
 use std::time::Duration;
 
-use common::{Answers, StandIn};
+use common::{Answers, Presented, StandIn};
 use engine_wire::Deployment;
 use serde_json::json;
 use trader::config::{LimitsSection, NodeUrl, TlsPin};
@@ -61,7 +61,8 @@ async fn a_post_answer_binds_its_body() {
     assert_eq!(stand_in.with(|i| i.posts.clone()), [("/v1/orders".to_owned(), json!({ "client_id": 1 }))]);
 }
 
-/// A node whose TLS key is not the pinned one is not reached at all.
+/// A node whose TLS key is not the pinned one is not reached at all, and is not the attested enclave:
+/// the call fails as another signer's answer would, which no retry cures.
 #[tokio::test]
 async fn a_tls_key_other_than_the_pin_is_refused() {
     let stand_in = StandIn::start().await;
@@ -76,19 +77,64 @@ async fn a_tls_key_other_than_the_pin_is_refused() {
         &LimitsSection::default(),
     );
     let err = node.nonce("0x1111111111111111111111111111111111111111".parse().unwrap()).await.unwrap_err();
-    assert!(matches!(err, CallError::Failed { .. }), "{err}");
+    assert!(matches!(err, CallError::WrongSigner { .. }), "{err}");
     assert!(stand_in.with(|i| i.posts.is_empty()));
 }
 
-/// Without a pin the certificate must chain to a public root, which a self-signed one does not.
+/// Another key's certificate from a server that cannot sign with that key proves nothing: the call
+/// fails as through an outage, which a retry may cure, and the next connection to the node answers.
+#[tokio::test]
+async fn a_replayed_certificate_is_a_failed_call() {
+    let stand_in = StandIn::start().await;
+    let node = node(&stand_in);
+    stand_in.present(Presented::Replayed);
+    let account = "0x1111111111111111111111111111111111111111".parse().unwrap();
+    let err = node.nonce(account).await.unwrap_err();
+    assert!(matches!(err, CallError::Failed { .. }), "{err}");
+    stand_in.present(Presented::Attested);
+    stand_in.with(|i| i.nonce = 7);
+    assert_eq!(node.nonce(account).await.unwrap().body.next_nonce, 7);
+}
+
+/// A connection made in the background that completes a handshake with another key than the attested
+/// one is not dropped as an outage: the next call fails as another signer's answer would, though a
+/// connection to the attested key is idle.
+#[tokio::test]
+async fn another_tls_key_on_a_background_connection_stops_the_next_call() {
+    let stand_in = StandIn::start().await;
+    let node = node(&stand_in);
+    let account = "0x1111111111111111111111111111111111111111".parse().unwrap();
+    node.nonce(account).await.unwrap();
+    stand_in.present(Presented::Other);
+    // The idle connection is taken, so the next ask makes one in the background.
+    let held = node.try_admit(None).expect("the idle connection");
+    assert!(node.try_admit(None).is_err());
+    drop(held);
+    let err = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match node.nonce(account).await {
+                Ok(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                Err(e) => break e,
+            }
+        }
+    })
+    .await
+    .expect("a call fails once the background connection is refused");
+    assert!(matches!(err, CallError::WrongSigner { .. }), "{err}");
+}
+
+/// Without a pin the certificate must chain to a public root, which a self-signed one does not, even
+/// once the attested key is the node's.
 #[tokio::test]
 async fn without_a_pin_a_self_signed_node_is_refused() {
     let stand_in = StandIn::start().await;
     let url = NodeUrl { host: "127.0.0.1".into(), port: stand_in.addr.port() };
-    let node =
-        Node::new(Tls::new(url, None).unwrap(), stand_in.signer(), deployment(), TIMEOUT, &LimitsSection::default());
-    let err = node.markets().await.unwrap_err();
-    assert!(format!("{err}").contains("certificate"), "{err}");
+    let public = Tls::new(url, None).unwrap();
+    for tls in [public.clone(), public.attested(stand_in.pin).unwrap()] {
+        let node = Node::new(tls, stand_in.signer(), deployment(), TIMEOUT, &LimitsSection::default());
+        let err = node.markets().await.unwrap_err();
+        assert!(format!("{err}").contains("certificate"), "{err}");
+    }
 }
 
 /// The marks history is read page by page through its window, each page verified, until the node

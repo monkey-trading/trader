@@ -138,7 +138,8 @@ connections=0
 end=$(( SECONDS + trade_seconds ))
 while (( SECONDS < end )); do
   kill -0 "$bot_pid" 2>/dev/null || fail "the bot exited while trading"
-  open="$(lsof -a -p "$bot_pid" -iTCP:"$port" -sTCP:ESTABLISHED -Fn 2>/dev/null | grep -c '^n' || true)"
+  # Counted at the node, the only other end of these connections, so a bot in a container counts too.
+  open="$(lsof -a -p "$dev_stack_node_pid" -iTCP:"$port" -sTCP:ESTABLISHED -Fn 2>/dev/null | grep -c '^n' || true)"
   (( open > connections )) && connections=$open
   sleep 1
 done
@@ -165,6 +166,7 @@ step "one stream connection, few others, and no request refused for rate"
 streams="$(grep -c 'stream connected' "$work/bot.log" || true)"
 [[ "$streams" == 1 ]] || fail "the bot connected its stream $streams times"
 echo "open connections to the node at most $connections (the stream and the bot's pool of 4)"
+(( connections >= 1 )) || fail "no connection to the node was seen: the count does not see the bot's"
 (( connections <= 5 )) || fail "$connections connections to the node for $accounts accounts"
 requests_line="$(grep 'requests to the node' "$work/bot.log" | tail -n 1)"
 echo "$requests_line"

@@ -339,7 +339,7 @@ async fn a_wrong_signer_on_a_startup_nonce_read_ends_the_run() {
     stand_in.with(|i| i.other_signer_path = Some(format!("{}/nonce", address(1))));
     let dir = tempfile::tempdir().unwrap();
     let err = run(config_many(&stand_in, dir.path(), "1m", &[0, 1], ""), std::future::pending()).await.unwrap_err();
-    assert!(err.to_string().contains("not signed by the configured signer"), "{err:#}");
+    assert!(err.to_string().contains("not signed by the attested signer"), "{err:#}");
     assert!(stand_in.with(|i| i.posts.is_empty() && i.connections.is_empty()), "nothing was sent, no stream opened");
 }
 

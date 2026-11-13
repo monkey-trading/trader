@@ -5,7 +5,7 @@
 # `.github/workflows/ci.yaml` runs it in its `changes` job; `scripts/ci-test.sh` tests it.
 set -euo pipefail
 
-all="rust console agent_docs agent_scripts merge_approval ci_scripts"
+all="rust console image agent_docs agent_scripts merge_approval ci_scripts"
 if [[ ${1:-} == --all ]]; then
   echo "$all"
   exit 0
@@ -30,15 +30,21 @@ while IFS= read -r file; do
       areas+=" agent_docs" ;;
     # Read by no build, test, or script.
     crates/*/README.md) ;;
-    # The dev stack is read by the dev scenarios and tested by the CI scripts job.
-    scripts/dev-stack.sh) areas+=" rust ci_scripts" ;;
-    # The Rust jobs, and the dev scenarios and the example config the tests load.
-    crates/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | deny.toml | config/* \
-      | scripts/dev-trade-one.sh | scripts/dev-trade-many.sh | scripts/dev-strategies.sh | scripts/dev-lifecycle.sh \
-      | scripts/dev-console-api.sh)
+    # The dev stack is read by the dev scenarios, the image's included, and tested by the CI scripts job.
+    scripts/dev-stack.sh) areas+=" rust image ci_scripts" ;;
+    # The Rust jobs, and the image, which builds the crates and runs the many-accounts scenario.
+    crates/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | scripts/dev-trade-many.sh) areas+=" rust image" ;;
+    # The Rust jobs: the format and supply-chain policies, the example config the tests load, and the
+    # other dev scenarios.
+    rustfmt.toml | deny.toml | config/* | scripts/dev-trade-one.sh | scripts/dev-strategies.sh \
+      | scripts/dev-lifecycle.sh | scripts/dev-console-api.sh)
       areas+=" rust" ;;
-    # The console app is checked on its own and embedded in the bot, whose console scenario runs on it.
-    console/*) areas+=" console rust" ;;
+    # The console's job, the Rust jobs that embed it, and the image, which embeds its build.
+    console/*) areas+=" console rust image" ;;
+    # The image's build, its check, the wrapper that runs it as the bot, and the scenario it runs.
+    Dockerfile | .dockerignore | docker/* | scripts/check-image-binary.sh | scripts/docker-trader.sh \
+      | scripts/dev-attestation.sh)
+      areas+=" image" ;;
     *)
       echo "$all"
       exit 0

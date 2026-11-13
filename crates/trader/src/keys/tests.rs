@@ -154,6 +154,28 @@ fn published_keys_are_dev_only() {
     refuse_published(other, false).unwrap();
 }
 
+/// A production build refuses, as it unlocks them, the keys a dev build takes: a published key from a
+/// keystore or a hex file, and a guessable one. CI's production lane runs this by its name.
+#[cfg(feature = "production")]
+#[tokio::test]
+async fn production_build_refuses_published_and_guessable_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let password = PasswordSource::File(write(&dir, "password", "testpassword\n"));
+    // The vectors' key, and Anvil's first account.
+    let anvil = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+    let published = [
+        KeySource::Keystore { path: write(&dir, "key.json", PBKDF2_KEYSTORE), password },
+        KeySource::HexFile { path: write(&dir, "anvil", anvil) },
+    ];
+    for source in published {
+        let err = AccountKey::load(&source, no_env).await.unwrap_err();
+        assert!(err.to_string().contains("published for development"), "{err}");
+    }
+    let counter = KeySource::HexFile { path: write(&dir, "counter", &format!("{:064x}", 7)) };
+    let err = AccountKey::load(&counter, no_env).await.unwrap_err();
+    assert!(err.to_string().contains("anyone can guess"), "{err}");
+}
+
 /// A key prints as its address only, never its secret.
 #[tokio::test]
 async fn a_key_prints_only_its_address() {

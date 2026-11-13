@@ -1,23 +1,31 @@
 # An example config for `trader run --config <file>`: accounts, each trading its markets with a
 # strategy, sized and held to risk limits. Every section refuses keys it does not know. Relative paths
-# are read from this file's directory. `scripts/dev-stack.sh` prints the [node] values of a local dev
-# node.
+# are read from this file's directory. `scripts/dev-stack.sh` prints the [node] section of a local
+# dev node instead.
 
 [node]
-# The node's API, https://host:port.
-url = "https://127.0.0.1:18610"
+# The node's API, https://host:port. OWNER: the production node's address, set at launch.
+url = "https://node.monkeytrading.example:443"
 # The custody chain and vault every signature names: the node's [custody] chain_id and vault.
-chain_id = 31337
+# OWNER: the production vault's address, set at launch.
+chain_id = 42161
 vault = "0x0000000000000000000000000000000000000000"
-# The enclave key's address, from the node's attestation (`enclave_address`). Every answer and
-# stream frame must carry its signature.
-signer = "0x0000000000000000000000000000000000000000"
-# The SHA-256 of the node's TLS key, from its attestation (`tls_public_key_sha256`), for a node
-# whose certificate no public CA signs, as a dev node's. Leave it out to require a public CA.
-tls_key_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 # How long one call may take, and the longest silence on the stream before it reconnects.
 request_timeout = "10s"
 stream_timeout = "30s"
+# A dev build also takes tls_key_sha256 = "<64 hex>", the node's TLS key hash, for a node whose
+# certificate no public CA signs, as a dev node's. Without it the certificate must chain to a public
+# root.
+
+# What the node's attestation must prove before the bot trusts it. The enclave address it names
+# signs every answer and stream frame, and the TLS key it names is the only one the bot accepts.
+[node.attestation]
+# An SEV-SNP quote whose certificate chain ends at the vendor's root and which matches one of these
+# release manifests, as each engine release publishes them. OWNER: the launch release's manifest.
+type = "sev_snp"
+releases = ["engine-release.toml"]
+# A dev build also takes root = "<file>", a PEM root certificate for a test chain, and
+# type = "mock" alone for a dev node's mock attestation, which proves nothing.
 
 # The node's limits on this bot, which it paces its requests under so that a burst of orders queues
 # in bar order instead of failing with 429. Set them to the node's api.per_ip, api.per_account and
@@ -129,8 +137,8 @@ slow = 20
 # in production. Leave the section out to only trade and declare.
 [chain]
 # JSON-RPC endpoints, tried in order: a read moves to the next when one fails, and every transaction
-# is sent to each. https://, or http:// on this machine. A provider's API key in a URL is never
-# printed: logs name an endpoint by its place here.
+# is sent to each. https://, or, in a dev build, http:// on this machine. A provider's API key in a
+# URL is never printed: logs name an endpoint by its place here.
 rpc = ["https://arbitrum.example/rpc"]
 # How long one RPC request may take; how long a sent transaction may take to be mined; how long the
 # bot waits on the node for a deposit's credit, a withdrawal's approval and its authorization (run
@@ -181,3 +189,9 @@ refresh_interval = "5s"
 
 [logging]
 level = "info"
+
+# Prometheus metrics at http://<listen>/metrics: orders placed and declined, fills, each account's
+# equity and margin level, and the stream's lag. The address must be a loopback one. Leave the
+# section out to serve none.
+[metrics]
+listen = "127.0.0.1:9466"

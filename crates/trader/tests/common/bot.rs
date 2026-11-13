@@ -1,6 +1,7 @@
 //! The bot against the stand-in: its config, its run, and the log and account the tests script.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use engine_core::command::OrderRequest;
@@ -9,6 +10,7 @@ use engine_core::types::AccountId;
 use k256::ecdsa::SigningKey;
 use serde_json::{Value, json};
 use trader::config::Config;
+use trader::metrics::Metrics;
 
 use super::{ACCOUNT_SECRET, CHAIN_ID, StandIn, VAULT, command, prices};
 
@@ -26,14 +28,24 @@ pub fn domain() -> eip712::Eip712Domain {
     eip712::domain(CHAIN_ID, AccountId(VAULT))
 }
 
-/// A config for the stand-in, with the test account's key in a hex file in `dir`: BTC-USD, `bar`
-/// bars, a one-bar average over a two-bar one, 100 USD a side, closing on stop.
+/// The config template's attestation line: the stand-in's mock, as a dev build takes it.
+pub const MOCK_ATTESTATION: &str = r#"attestation = { type = "mock" }"#;
+
+/// A config for the stand-in, which takes its mock attestation, with the test account's key in a hex
+/// file in `dir`: BTC-USD, `bar` bars, a one-bar average over a two-bar one, 100 USD a side, closing
+/// on stop.
 pub fn config(stand_in: &StandIn, dir: &Path, bar: &str) -> Config {
     config_with(stand_in, dir, bar, &[])
 }
 
 /// `config` with each `(from, to)` replacing the first `from` in the config's text.
 pub fn config_with(stand_in: &StandIn, dir: &Path, bar: &str, edits: &[(&str, &str)]) -> Config {
+    Config::load(&write_config(stand_in, dir, bar, edits)).unwrap()
+}
+
+/// Writes `config_with`'s file for the stand-in to `dir`, with the test account's key beside it; its
+/// path.
+pub fn write_config(stand_in: &StandIn, dir: &Path, bar: &str, edits: &[(&str, &str)]) -> PathBuf {
     std::fs::write(dir.join("account.hex"), hex::encode(ACCOUNT_SECRET)).unwrap();
     let text = format!(
         r#"
@@ -41,7 +53,7 @@ pub fn config_with(stand_in: &StandIn, dir: &Path, bar: &str, edits: &[(&str, &s
 url = "https://127.0.0.1:{port}"
 chain_id = {CHAIN_ID}
 vault = "0x{vault}"
-signer = "0x{signer}"
+{MOCK_ATTESTATION}
 tls_key_sha256 = "{pin}"
 request_timeout = "2s"
 stream_timeout = "30s"
@@ -72,7 +84,6 @@ min_hold = "0s"
 "#,
         port = stand_in.addr.port(),
         vault = hex::encode(VAULT),
-        signer = hex::encode(stand_in.signer()),
         pin = hex::encode(stand_in.pin),
     );
     let text = edits.iter().fold(text, |text, (from, to)| {
@@ -81,7 +92,7 @@ min_hold = "0s"
     });
     let path = dir.join("bot.toml");
     std::fs::write(&path, text).unwrap();
-    Config::load(&path).unwrap()
+    path
 }
 
 /// The secret of test account `n`, obviously fake: the first, `account()`'s, is `ACCOUNT_SECRET`.
@@ -103,7 +114,7 @@ pub fn config_many(stand_in: &StandIn, dir: &Path, bar: &str, accounts: &[u8], e
 url = "https://127.0.0.1:{port}"
 chain_id = {CHAIN_ID}
 vault = "0x{vault}"
-signer = "0x{signer}"
+{MOCK_ATTESTATION}
 tls_key_sha256 = "{pin}"
 request_timeout = "2s"
 stream_timeout = "30s"
@@ -122,7 +133,6 @@ min_hold = "0s"
 "#,
         port = stand_in.addr.port(),
         vault = hex::encode(VAULT),
-        signer = hex::encode(stand_in.signer()),
         pin = hex::encode(stand_in.pin),
     );
     for &n in accounts {
@@ -151,12 +161,21 @@ max_slippage_bps = 25
 
 /// Runs the bot until `stop`.
 pub async fn run(cfg: trader::config::Config, stop: impl Future<Output = ()> + Send + 'static) -> anyhow::Result<()> {
+    run_recording(cfg, stop, Arc::new(Metrics::new())).await
+}
+
+/// Runs the bot until `stop`, recording into `metrics`.
+pub async fn run_recording(
+    cfg: trader::config::Config,
+    stop: impl Future<Output = ()> + Send + 'static,
+    metrics: Arc<Metrics>,
+) -> anyhow::Result<()> {
     // `TRADER_TEST_LOG=info` (or `debug`) shows the bot's log in a failing test's output.
     if let Ok(filter) = std::env::var("TRADER_TEST_LOG") {
         let _ = tracing_subscriber::fmt().with_env_filter(filter).with_test_writer().try_init();
     }
     // A run that never ends fails its test instead of hanging the suite.
-    tokio::time::timeout(Duration::from_secs(120), trader::bot::run(cfg, |_| None, stop))
+    tokio::time::timeout(Duration::from_secs(120), trader::bot::run(cfg, |_| None, stop, &metrics))
         .await
         .unwrap_or_else(|_| Err(anyhow::anyhow!("the bot did not finish within two minutes")))
 }

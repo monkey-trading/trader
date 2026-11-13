@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
-use super::{MINUTE, StandIn, account, command, config_with, prices, run};
+use super::{MINUTE, StandIn, account, command, config_with, prices, run_recording};
 
 pub const DAY: i64 = 24 * 60 * MINUTE;
 
@@ -59,9 +59,18 @@ pub fn start(
     dir: &std::path::Path,
     edits: &[(&str, &str)],
 ) -> (oneshot::Sender<()>, tokio::task::JoinHandle<anyhow::Result<()>>) {
+    start_recording(stand_in, dir, edits, std::sync::Arc::new(trader::metrics::Metrics::new()))
+}
+
+/// Starts the bot as `start` does, recording into `metrics`.
+pub fn start_recording(
+    stand_in: &std::sync::Arc<StandIn>,
+    dir: &std::path::Path,
+    edits: &[(&str, &str)],
+    metrics: std::sync::Arc<trader::metrics::Metrics>,
+) -> (oneshot::Sender<()>, tokio::task::JoinHandle<anyhow::Result<()>>) {
     let (stop, stopped) = oneshot::channel::<()>();
-    let bot = tokio::spawn(run(config_with(stand_in, dir, "1m", edits), async {
-        _ = stopped.await;
-    }));
+    let cfg = config_with(stand_in, dir, "1m", edits);
+    let bot = tokio::spawn(run_recording(cfg, async { _ = stopped.await }, metrics));
     (stop, bot)
 }

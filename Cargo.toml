@@ -12,8 +12,10 @@ repository = "https://github.com/monkey-trading/trader"
 trader-core = { path = "crates/trader-core", version = "0.1.0" }
 
 # The engine's crates, pinned to one commit so the bot signs and verifies exactly what that node
-# release checks. A bump moves both together and names the node releases it supports in the README.
+# release checks, and verifies its attestation as the engine does. A bump moves all three together
+# and names the node releases it supports in the README.
 engine-core = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721b0062e48ee944ab063205f3dbccb01ae6", version = "0.1.0" }
+engine-verify = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721b0062e48ee944ab063205f3dbccb01ae6", version = "0.1.0" }
 engine-wire = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721b0062e48ee944ab063205f3dbccb01ae6", version = "0.1.0" }
 
 # The custody chain: transactions, their signing hashes and encoding, and JSON-RPC over reqwest,
@@ -30,7 +32,7 @@ alloy-transport = { version = "2.5", default-features = false }
 anyhow = "1"
 # The console's login: one Argon2id hash of the generated password.
 argon2 = { version = "0.6", features = ["zeroize"] }
-# The console's HTTPS server and WebSocket.
+# The console's HTTPS server and WebSocket, and the metrics listener.
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
@@ -44,6 +46,8 @@ hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
 # The same curve crate engine-core signs with, so a key loads straight into its signing type.
 k256 = { version = "0.14.0", default-features = false, features = ["ecdsa"] }
+# Prometheus metrics in a registry the process owns, as the engine's node exports its own.
+prometheus-client = "0.25"
 rand = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 # The console's self-signed certificate, generated on first run.
