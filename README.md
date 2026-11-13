@@ -8,7 +8,7 @@ host's address.
 > **Early development.** The bot trades one or many accounts, each in its own markets, with a simple
 > moving-average crossover, takes accounts from an empty wallet to trading and back on a local chain,
 > and serves the console's API behind a login, against a local development node. It has not been
-> released, the console app is a placeholder page, and nothing here has held real funds.
+> released, the console app is new, and nothing here has held real funds.
 
 ## Supported node
 
@@ -111,8 +111,14 @@ the bot embeds it:
 cd console
 npm ci
 npm run build   # writes console/dist/, which the bot embeds when built after it
-npm run dev     # Vite's dev server on 127.0.0.1
+npm run dev     # Vite's dev server on 127.0.0.1, proxying /api to CONSOLE_BOT_URL
+npm run stub    # a stand-in console API with three accounts, for the dev server or the browser test
 ```
+
+The console signs in with the bot's password, lists every account with its equity, profit and loss,
+margin level, positions and MONKEY, and opens each account's page to start and stop its strategies,
+change their parameters within the bot's bounds, and flatten it. Figures update over the bot's
+WebSocket; a failed control says so at the control.
 
 ## Checks
 
