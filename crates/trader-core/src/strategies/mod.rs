@@ -9,7 +9,7 @@ mod macd;
 mod rsi_reversion;
 
 use engine_core::Fixed;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::bands::MAX_CLOSE;
 use crate::sma::MAX_PERIOD;
@@ -51,7 +51,7 @@ pub(crate) fn next_target(previous: Target, signals: Signals) -> Target {
 
 /// A strategy and its parameters, as a `[strategy]` section names it by `kind`. Fields a strategy
 /// has a conventional value for may be left out.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StrategyParams {
     SmaCrossover {

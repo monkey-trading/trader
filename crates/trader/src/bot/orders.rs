@@ -78,7 +78,7 @@ impl Runner {
             asg.queued = false;
             return false;
         };
-        if account.failed.is_some() {
+        if account.failed.is_some() || !account.running || !asg.running {
             (asg.pending, asg.queued) = (None, false);
             return false;
         }

@@ -6,9 +6,9 @@ crossover, across one or many funded keys, each its own account, and serves a we
 host's address.
 
 > **Early development.** The bot trades one or many accounts, each in its own markets, with a simple
-> moving-average crossover, and takes accounts from an empty wallet to trading and back on a local
-> chain, against a local development node. It has not been released, the console is an empty page,
-> and nothing here has held real funds.
+> moving-average crossover, takes accounts from an empty wallet to trading and back on a local chain,
+> and serves the console's API behind a login, against a local development node. It has not been
+> released, the console app is a placeholder page, and nothing here has held real funds.
 
 ## Supported node
 
@@ -26,9 +26,10 @@ and the bot stops rather than act on them.
   and prices arrive as arguments, so strategies are tested and benchmarked without a network.
 - `crates/trader` is the binary. It does the IO: it reads the node's API and the public log over
   one signed stream, checks every answer and stream frame against the node's enclave signer,
-  unlocks the account key, and signs orders. It records an account's declaration, deposits USDC
+  unlocks the account keys, and signs orders. It records an account's declaration, deposits USDC
   into the vault, claims MONKEY and withdraws, on the custody chain, every payout going to the
-  account's own address. The console server is to come.
+  account's own address. It also serves the console over HTTPS on the host's address: the app's files
+  and an API for everything the console shows and controls, behind a login.
 - `console/` is the web console, a Vite, React and TypeScript app built to static files that the
   binary will embed.
 - The engine's own crates, `engine-core` and `engine-wire`, are Cargo git dependencies on
@@ -93,12 +94,23 @@ declaration, deposits, trading, MONKEY claims through a funding key, and a withd
 
 ## The console
 
-The console needs the Node.js version in `console/.nvmrc` and npm:
+With a `[console]` section in its config, the bot serves the console on every interface, port 8443,
+over HTTPS. On first run it generates a self-signed certificate and a login password, keeps the
+certificate and only an Argon2 hash of the password in the console's data directory, and prints the
+password once; every start prints the certificate's SHA-256 fingerprint. Open
+`https://<host>:8443`, check that the certificate the browser shows has that fingerprint, and log in.
+The config may name a certificate and key of its own instead. The console shows every account and
+their totals, and starts, stops and flattens accounts and their strategies; nothing it can do moves
+funds away from an account's own key, and no route returns a key. `./scripts/dev-console-api.sh`
+runs the bot with its console against a dev node and checks its API against the node's answers.
+
+Building the app needs the Node.js version in `console/.nvmrc` and npm; build it before the bot, so
+the bot embeds it:
 
 ```bash
 cd console
 npm ci
-npm run build   # writes console/dist/
+npm run build   # writes console/dist/, which the bot embeds when built after it
 npm run dev     # Vite's dev server on 127.0.0.1
 ```
 

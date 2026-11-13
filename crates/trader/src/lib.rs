@@ -1,9 +1,11 @@
-//! The `trader` binary: its command line, and the bot it runs.
+//! The `trader` binary: its command line, the bot it runs, and the bot's console.
 
 pub mod accounts;
 pub mod bot;
 pub mod chain;
 pub mod config;
+pub mod console;
+mod files;
 pub mod keys;
 pub mod logging;
 pub mod node;
@@ -18,6 +20,7 @@ use engine_core::types::AccountId;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::Config;
+use crate::console::Prepared;
 use crate::logging::{Redacting, Secrets};
 
 /// The monkeytrading bot.
@@ -59,17 +62,20 @@ pub enum Command {
 /// Parses the process's arguments and runs the command; `--version` and `--help` print and exit.
 /// Error cases:
 /// - the config does not load (see `Config::load`)
-/// - the bot fails to start, or halts (see `bot::run`)
+/// - the console cannot be prepared (see `console::prepare`)
+/// - the bot fails to start, or halts (see `serve`)
 /// - an account action fails (see `accounts::cli::run`)
 pub fn run() -> anyhow::Result<()> {
     let env = |name: &str| std::env::var(name).ok();
     match Cli::parse().command {
         Command::Run { config } => {
             let (cfg, secrets) = start(&config)?;
+            let console = cfg.console.as_ref().map(|section| console::prepare(section, &mut std::io::stdout()));
+            let console = console.transpose()?;
             let runtime = tokio::runtime::Runtime::new().context("the async runtime")?;
             let result = runtime.block_on(async {
                 let stop = bot::stop_signal()?;
-                bot::run(cfg, env, stop).await
+                serve(cfg, env, stop, console).await
             });
             redacted(result, &secrets)
         }
@@ -92,6 +98,19 @@ pub fn run() -> anyhow::Result<()> {
             redacted(result, &secrets)
         }
     }
+}
+
+/// Runs the bot until `stop` completes or it halts, with its console when `console` holds one
+/// prepared from the config's section.
+/// Error cases:
+/// - see `bot::run_with_console`
+pub async fn serve(
+    cfg: Config,
+    env: impl Fn(&str) -> Option<String> + Sync,
+    stop: impl Future<Output = ()>,
+    console: Option<Prepared>,
+) -> anyhow::Result<()> {
+    bot::run_with_console(cfg, env, stop, console).await
 }
 
 /// Loads the config at `path` and starts logging at its level, with no secret of the config in any

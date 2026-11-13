@@ -49,14 +49,16 @@ ask us before you do it.
 ## Scope
 
 The policy covers the code in this repository and what is built from it: `trader-core`, the
-strategy logic; `trader`, the binary, which is being built to talk to a monkeytrading node, sign for its
-keys, and serve the console; and the console in `console/`, a web app the binary will embed. The CI workflows
-and scripts in the repository are in scope too, as they guard what merges.
+strategy logic; `trader`, the binary, which talks to a monkeytrading node, signs for its keys, and
+serves the console and its API over HTTPS behind a login; and the console in `console/`, a web app
+the binary embeds. The CI workflows and scripts in the repository are in scope too, as they guard
+what merges.
 
 The findings that matter most let someone obtain or use a key the bot holds, make the bot sign an
 order its operator did not configure, make the bot act on an answer from the node that fails its
-signature check, move funds away from an account's own key through the console, or reach the
-console without the operator's login.
+signature check, move funds away from an account's own key through the console, read a key or the
+login password through it, act through the console from another site's page, or reach the console
+without the operator's login.
 
 The engine, its node, and its contracts have their own policy in the
 [engine repository](https://github.com/monkey-trading/engine/blob/main/SECURITY.md); report a

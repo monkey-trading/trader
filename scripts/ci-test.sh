@@ -28,12 +28,13 @@ check "a Rust source file" "rust" "$(areas crates/trader/src/lib.rs)"
 check "the manifests, lockfile, toolchain and policy" "rust" \
   "$(areas Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml deny.toml)"
 check "the example config and the dev scenarios" "rust" \
-  "$(areas config/example.toml scripts/dev-trade-one.sh scripts/dev-trade-many.sh scripts/dev-strategies.sh scripts/dev-lifecycle.sh)"
+  "$(areas config/example.toml scripts/dev-trade-one.sh scripts/dev-trade-many.sh scripts/dev-strategies.sh \
+    scripts/dev-lifecycle.sh scripts/dev-console-api.sh)"
 check "the dev stack feeds the dev scenario and its test" "ci_scripts rust" "$(areas scripts/dev-stack.sh)"
 check "the dev stack's test" "ci_scripts" "$(areas scripts/dev-stack-test.sh)"
 check "the line cap feeds the Rust jobs and its test" "ci_scripts rust" "$(areas scripts/check-file-loc.sh)"
 check "a crate README reads nothing" "" "$(areas crates/trader/README.md)"
-check "a console file" "console" "$(areas console/src/App.tsx console/package-lock.json)"
+check "a console file, which the bot embeds" "console rust" "$(areas console/src/App.tsx console/package-lock.json)"
 check "the README, SECURITY.md and LICENSE feed the link checker" "agent_docs" \
   "$(areas README.md SECURITY.md LICENSE)"
 check "the agent docs and the link checker" "agent_docs" \

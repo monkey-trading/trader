@@ -225,7 +225,7 @@ pub fn routes() -> Router<Arc<StandIn>> {
 }
 
 /// The canned answer to a GET of the path, or 404.
-async fn canned(State(s): State<Arc<StandIn>>, uri: Uri) -> Response {
+pub async fn canned(State(s): State<Arc<StandIn>>, uri: Uri) -> Response {
     let answer = s.with(|i| {
         *i.lifecycle.reads.entry(uri.path().to_owned()).or_default() += 1;
         i.lifecycle.answers.get(uri.path()).cloned()

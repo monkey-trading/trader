@@ -58,7 +58,16 @@ pub fn key(n: u64) -> Arc<AccountKey> {
 
 /// One strategy: `market`, `bar_ms` bars, an SMA crossover of 1 bar over 2, flat.
 pub fn strategy(market: u32, bar_ms: Millis) -> StrategyIn {
-    StrategyIn { market, bar_ms, params: sma(1, 2), max_slippage_bps: 25, position: Fixed::ZERO, entry: Fixed::ZERO }
+    StrategyIn {
+        market,
+        bar_ms,
+        params: sma(1, 2),
+        max_slippage_bps: 25,
+        position: Fixed::ZERO,
+        entry: Fixed::ZERO,
+        running: true,
+        bounds: None,
+    }
 }
 
 /// Controls that size every new position at 100 USD and hold no account back.
@@ -84,6 +93,7 @@ pub fn account(n: u64, strategies: Vec<StrategyIn>) -> AccountIn {
         state_file: StateFile::new(std::path::Path::new("/nonexistent"), key.address()),
         key,
         close_on_stop: false,
+        running: true,
         balance: "1000".parse().unwrap(),
         nonce: Some(0),
         controls: controls(),

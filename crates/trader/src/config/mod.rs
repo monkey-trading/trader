@@ -4,8 +4,10 @@
 
 mod chain;
 pub use chain::*;
+pub mod bounds;
 mod validation;
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -16,10 +18,16 @@ use trader_core::risk::RiskParams;
 use trader_core::sizing::Sizing;
 use trader_core::strategies::StrategyParams;
 
+pub use bounds::ParamBounds;
+
 /// The default time a call to the node may take, connection included.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The default longest silence on the stream; the node sends a heartbeat every few seconds.
 const DEFAULT_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
+/// The console's default address: every interface, so it is reachable at the host's IP.
+const DEFAULT_CONSOLE_BIND: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8443);
+/// How often, by default, the console reads each account from the node.
+const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The whole config file.
 #[derive(Debug, Deserialize)]
@@ -46,6 +54,9 @@ pub struct Config {
     pub funding: Option<FundingSection>,
     #[serde(default)]
     pub claims: Option<ClaimsSection>,
+    /// The console; without the section the bot serves none.
+    #[serde(default)]
+    pub console: Option<ConsoleSection>,
     #[serde(default)]
     pub logging: LoggingSection,
     /// Every account the config names, directories expanded; filled by `load`.
@@ -210,10 +221,39 @@ pub struct StrategySection {
     pub bar: Duration,
     /// How far, in bps, a market order may fill from the mark it was quoted at.
     pub max_slippage_bps: i64,
+    /// For each parameter the console may set, its lowest and highest value; a parameter without
+    /// bounds is the config's alone.
+    #[serde(default)]
+    pub bounds: Option<ParamBounds>,
     /// The strategy by `kind`, with its parameters. Not `deny_unknown_fields`, which serde cannot
     /// combine with `flatten`: the strategy's own section refuses a key it does not know.
     #[serde(flatten)]
     pub params: StrategyParams,
+}
+
+/// The console: an HTTPS server on the host's address, behind a login.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsoleSection {
+    #[serde(default = "default_console_bind")]
+    pub bind: SocketAddr,
+    /// Where the console keeps its generated certificate, its login, and the controls it set.
+    #[serde(default = "default_console_data_dir")]
+    pub data_dir: PathBuf,
+    /// A certificate and key to serve instead of the generated ones.
+    #[serde(default)]
+    pub tls: Option<ConsoleTls>,
+    /// How often the console reads each account from the node.
+    #[serde(default = "default_refresh_interval", with = "humantime_serde")]
+    pub refresh_interval: Duration,
+}
+
+/// PEM files: a certificate chain, and its private key.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsoleTls {
+    pub cert: PathBuf,
+    pub key: PathBuf,
 }
 
 /// Where the bot keeps its state.
@@ -303,6 +343,13 @@ impl Config {
             resolve(&mut account_dir.path);
             resolve_password(&mut account_dir.password);
         }
+        if let Some(console) = &mut self.console {
+            resolve(&mut console.data_dir);
+            if let Some(tls) = &mut console.tls {
+                resolve(&mut tls.cert);
+                resolve(&mut tls.key);
+            }
+        }
     }
 
     /// The accounts in config order: the listed ones, then each directory's keystores by file name.
@@ -339,6 +386,21 @@ impl Config {
         }
         Ok(plans)
     }
+}
+
+/// `DEFAULT_CONSOLE_BIND`, for serde.
+fn default_console_bind() -> SocketAddr {
+    DEFAULT_CONSOLE_BIND
+}
+
+/// `data`, beside the config file, for serde.
+fn default_console_data_dir() -> PathBuf {
+    PathBuf::from("data")
+}
+
+/// `DEFAULT_REFRESH_INTERVAL`, for serde.
+fn default_refresh_interval() -> Duration {
+    DEFAULT_REFRESH_INTERVAL
 }
 
 /// The directory of the saved state, beside the config.

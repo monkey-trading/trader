@@ -24,6 +24,7 @@ use trader_core::strategy::{OrderIntent, Target};
 
 use crate::bot::day::{Saved, StateFile};
 use crate::bot::warm::WarmRequest;
+use crate::config::ParamBounds;
 use crate::keys::AccountKey;
 
 /// How far behind the node's time a bar may close and still be acted on; one further behind is
@@ -53,6 +54,8 @@ pub struct MarketIn {
 pub struct AccountIn {
     pub key: Arc<AccountKey>,
     pub close_on_stop: bool,
+    /// Whether the console lets the account's strategies place orders.
+    pub running: bool,
     pub balance: Fixed,
     /// The account's next nonce, when the startup read gave it.
     pub nonce: Option<u64>,
@@ -71,6 +74,10 @@ pub struct StrategyIn {
     pub max_slippage_bps: i64,
     pub position: Fixed,
     pub entry: Fixed,
+    /// Whether the console lets the strategy place orders.
+    pub running: bool,
+    /// The parameters the console may set, and their limits.
+    pub bounds: Option<ParamBounds>,
 }
 
 /// Where an account's nonce stands.
@@ -87,6 +94,10 @@ pub struct Account {
     pub key: Arc<AccountKey>,
     pub address: AccountId,
     pub close_on_stop: bool,
+    /// Whether the console lets the account's strategies place orders.
+    pub running: bool,
+    /// Whether the account is in `Fleet::changed`.
+    pub changed: bool,
     /// Its strategies in `Fleet::assignments`.
     pub assignments: std::ops::Range<u32>,
     /// The signatures of the last orders this process signed for the account, to tell its fills
@@ -145,6 +156,10 @@ pub struct Assignment {
     pub market: MarketId,
     pub market_slot: u32,
     pub max_slippage_bps: i64,
+    /// Whether the console lets the strategy place orders.
+    pub running: bool,
+    /// The parameters the console may set, and their limits.
+    pub bounds: Option<ParamBounds>,
     pub position: Fixed,
     /// The position's entry price as the last read of the account at the log gave it.
     pub entry: Fixed,
@@ -197,6 +212,8 @@ pub struct Shared {
     pub strategy: Strategy,
     /// The target after the last bar.
     pub target: Option<Target>,
+    /// Whether the last bar changed the target.
+    pub changed: bool,
 }
 
 /// The bars of a market at a bar length, the strategies that read them, and the assignments that
@@ -270,6 +287,10 @@ pub struct Fleet {
     pub decisions: u64,
     /// How many accounts have stopped trading.
     pub failed: usize,
+    /// Accounts whose status for the console changed since it last heard: a target, a warm-up, a
+    /// failure, a day's stop, or a control. Each is listed once, so it never outgrows the capacity
+    /// it starts with.
+    pub changed: Vec<u32>,
 }
 
 impl Fleet {
@@ -334,7 +355,12 @@ impl Fleet {
                     None => {
                         let strategy = s.params.build()?;
                         state.history_bars = state.history_bars.max(s.params.warm_up_bars());
-                        state.strategies.push(Shared { params: s.params.clone(), strategy, target: None });
+                        state.strategies.push(Shared {
+                            params: s.params.clone(),
+                            strategy,
+                            target: None,
+                            changed: false,
+                        });
                         state.strategies.len() - 1
                     }
                 };
@@ -348,6 +374,8 @@ impl Fleet {
                     market: s.market,
                     market_slot: slot,
                     max_slippage_bps: s.max_slippage_bps,
+                    running: s.running,
+                    bounds: s.bounds.clone(),
                     position: s.position,
                     entry: s.entry,
                     close_first: false,
@@ -361,6 +389,8 @@ impl Fleet {
                 key: account.key,
                 address,
                 close_on_stop: account.close_on_stop,
+                running: account.running,
+                changed: false,
                 assignments: first..u32::try_from(assignments.len())?,
                 signed: VecDeque::with_capacity(2 * account.strategies.len().max(2)),
                 nonce: account.nonce.map_or(Nonce::Unknown, Nonce::Synced),
@@ -410,7 +440,22 @@ impl Fleet {
             stopped: Vec::new(),
             decisions: 0,
             failed: 0,
+            changed: Vec::with_capacity(accounts_len),
         })
+    }
+
+    /// The slot of the account `address` names, if the fleet trades it.
+    pub fn index_of(&self, address: AccountId) -> Option<u32> {
+        self.by_address.get(&address).copied()
+    }
+
+    /// Notes that account `account`'s status for the console changed.
+    pub fn mark_changed(&mut self, account: u32) {
+        let entry = &mut self.accounts[account as usize];
+        if !entry.changed {
+            entry.changed = true;
+            self.changed.push(account);
+        }
     }
 
     /// The slot of `address`'s account, if the fleet trades it.
@@ -435,5 +480,6 @@ impl Fleet {
             let asg = &mut self.assignments[a as usize];
             (asg.wanted, asg.pending) = (None, None);
         }
+        self.mark_changed(account);
     }
 }

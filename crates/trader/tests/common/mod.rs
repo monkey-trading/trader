@@ -4,12 +4,15 @@
 #![allow(dead_code, unused_imports)]
 
 mod bot;
+pub mod console;
 mod controls;
 mod messages;
+mod reads;
 pub use bot::*;
 pub use controls::*;
 pub use messages::*;
 pub mod lifecycle;
+pub use reads::{emissions_answer, history_fill};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
@@ -17,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
@@ -134,6 +137,15 @@ pub struct Inner {
     /// The most units of a position one close-all takes (the engine's `Fixed::MAX_INPUT`); the rest stays open.
     pub close_cap: Option<engine_core::Fixed>,
     pub lifecycle: lifecycle::Canned,
+    /// A position a settled cancel-all opens, by market id: a resting order that filled first.
+    pub filled_before_cancel: Option<(String, Value)>,
+    /// Each account's fill history, newest first, by lower-case address, and the most events a page
+    /// of it holds, below the request's limit.
+    pub history: BTreeMap<String, Vec<Value>>,
+    pub history_page: Option<usize>,
+    pub history_reads: usize,
+    /// Each account's emissions answer, by lower-case address; an absent one answers 404.
+    pub emissions: BTreeMap<String, Value>,
 }
 
 /// A running stand-in.
@@ -177,8 +189,10 @@ impl StandIn {
         let router = lifecycle::routes()
             .route("/v1/markets", get(markets))
             .route("/v1/markets/{id}/marks", get(marks))
-            .route("/v1/accounts/{address}", get(account_view_route))
-            .route("/v1/accounts/{address}/nonce", get(nonce))
+            .route("/v1/accounts/{address}", get(reads::account_view))
+            .route("/v1/accounts/{address}/nonce", get(reads::nonce))
+            .route("/v1/accounts/{address}/history", get(reads::history))
+            .route("/v1/accounts/{address}/emissions", get(reads::emissions))
             .route("/v1/orders", post(record))
             .route("/v1/orders/cancel-all", post(record))
             .route("/v1/positions/close-all", post(record))
@@ -349,25 +363,6 @@ async fn marks(State(s): State<Arc<StandIn>>, Query(query): Query<BTreeMap<Strin
     .into_response()
 }
 
-async fn account_view_route(State(s): State<Arc<StandIn>>, Path(address): Path<String>) -> Response {
-    let view = s.with(|i| {
-        i.account_reads += 1;
-        i.accounts.get(&address.to_lowercase()).cloned()
-    });
-    match view {
-        Some(view) => axum::Json(view).into_response(),
-        None => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": "not found" }))).into_response(),
-    }
-}
-
-async fn nonce(State(s): State<Arc<StandIn>>, Path(address): Path<String>) -> Response {
-    let nonce = s.with(|i| {
-        i.nonce_reads += 1;
-        i.nonces.get(&address.to_lowercase()).copied().unwrap_or(i.nonce)
-    });
-    axum::Json(json!({ "next_nonce": nonce })).into_response()
-}
-
 /// Records a POST, settles a cancel-all or close-all when `Inner::settle` says so, and answers
 /// with the next scripted status or events, after `Inner::post_delay`.
 async fn record(State(s): State<Arc<StandIn>>, uri: Uri, body: Bytes) -> Response {
@@ -378,7 +373,12 @@ async fn record(State(s): State<Arc<StandIn>>, uri: Uri, body: Bytes) -> Respons
         let account = body["account"].as_str().unwrap_or_default().to_lowercase();
         if let (true, None, Some(view)) = (i.settle, status, i.accounts.get_mut(&account)) {
             match uri.path() {
-                "/v1/orders/cancel-all" => view["orders"] = json!({}),
+                "/v1/orders/cancel-all" => {
+                    view["orders"] = json!({});
+                    if let Some((market, position)) = i.filled_before_cancel.take() {
+                        view["positions"][market] = position;
+                    }
+                }
                 "/v1/positions/close-all" => {
                     for close in body["closes"].as_array().unwrap() {
                         let positions = view["positions"].as_object_mut().unwrap();

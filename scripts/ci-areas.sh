@@ -30,13 +30,15 @@ while IFS= read -r file; do
       areas+=" agent_docs" ;;
     # Read by no build, test, or script.
     crates/*/README.md) ;;
-    # The dev stack is read by the dev scenario and tested by the CI scripts job.
+    # The dev stack is read by the dev scenarios and tested by the CI scripts job.
     scripts/dev-stack.sh) areas+=" rust ci_scripts" ;;
-    # The Rust jobs, and the dev scenario and the example config the tests load.
+    # The Rust jobs, and the dev scenarios and the example config the tests load.
     crates/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | deny.toml | config/* \
-      | scripts/dev-trade-one.sh | scripts/dev-trade-many.sh | scripts/dev-strategies.sh | scripts/dev-lifecycle.sh)
+      | scripts/dev-trade-one.sh | scripts/dev-trade-many.sh | scripts/dev-strategies.sh | scripts/dev-lifecycle.sh \
+      | scripts/dev-console-api.sh)
       areas+=" rust" ;;
-    console/*) areas+=" console" ;;
+    # The console app is checked on its own and embedded in the bot, whose console scenario runs on it.
+    console/*) areas+=" console rust" ;;
     *)
       echo "$all"
       exit 0

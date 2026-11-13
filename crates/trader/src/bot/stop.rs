@@ -11,11 +11,11 @@ use std::time::Duration;
 use engine_core::Fixed;
 use engine_core::auth::RequestAuth;
 use engine_core::command::{CancelAllRequest, CloseAllRequest, CloseEntry};
-use engine_core::eip712::{Eip712Domain, cancel_all_hash, close_all_hash};
+use engine_core::eip712::{Eip712Domain, Signature, cancel_all_hash, close_all_hash};
 use engine_core::types::{AccountId, MarketId, Millis};
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Instant, timeout_at};
 use tracing::{error, info, warn};
 
@@ -53,8 +53,12 @@ struct Quotes {
     read: Mutex<Option<(Instant, Marks)>>,
 }
 
+/// A close an account's flatten signed, reported before it is sent: the account's slot, the
+/// signature, and the expiry until which the close may still enter the log.
+pub(super) type SignedClose = (u32, Signature, Millis);
+
 /// What one account's stop needs.
-struct Stop {
+pub(super) struct Stop {
     node: Arc<Node>,
     domain: Eip712Domain,
     key: Arc<AccountKey>,
@@ -62,10 +66,13 @@ struct Stop {
     /// Each market the account trades, the position the log last gave, and the market's slippage bound.
     markets: Vec<(MarketId, Fixed, i64)>,
     quotes: Arc<Quotes>,
+    /// Where the closes are reported before they go, with the account's slot, when the stop runs
+    /// beside the log's reading: their fills are then the account's own.
+    report: Option<(u32, mpsc::Sender<SignedClose>)>,
 }
 
 /// Why an account's stop did not complete.
-enum Failed {
+pub(super) enum Failed {
     WrongSigner,
     Incomplete(String),
 }
@@ -123,6 +130,7 @@ impl Runner {
                     close_on_stop: account.close_on_stop,
                     markets,
                     quotes: Arc::clone(&quotes),
+                    report: None,
                 }
                 .run()
             })
@@ -191,6 +199,31 @@ impl Runner {
     }
 }
 
+impl Runner {
+    /// The stop of account `a` that cancels its resting orders and closes its positions, run while
+    /// the bot follows the log: each close is sent on `report` before it goes. It acts on the account
+    /// as the log last gave it, at the markets' marks as the fleet has them.
+    pub(super) fn stop_of(&self, a: u32, report: Option<mpsc::Sender<SignedClose>>) -> Stop {
+        let account = &self.fleet.accounts[a as usize];
+        let markets = account
+            .assignments
+            .clone()
+            .map(|i| &self.fleet.assignments[i as usize])
+            .map(|asg| (asg.market, asg.position, asg.max_slippage_bps))
+            .collect();
+        let last = self.fleet.markets.iter().map(|m| (m.id, m.mark)).collect();
+        Stop {
+            node: Arc::clone(&self.node),
+            domain: self.domain.clone(),
+            key: Arc::clone(&account.key),
+            close_on_stop: true,
+            markets,
+            quotes: Arc::new(Quotes { last, read: Mutex::new(None) }),
+            report: report.map(|report| (a, report)),
+        }
+    }
+}
+
 impl Quotes {
     /// The marks of the traded markets as the node gives them, and when they were read: again when the
     /// last read is older than `QUOTE_AGE`; the log's last mark stands in for one the node does not give.
@@ -222,7 +255,7 @@ impl Quotes {
 impl Stop {
     /// Stops the account: cancels its resting orders, closes its positions when configured, and
     /// confirms with a read.
-    async fn run(self) -> Result<(), Failed> {
+    pub(super) async fn run(self) -> Result<(), Failed> {
         let account = self.key.address();
         let result = self.stop(account).await;
         if let Err(Failed::Incomplete(reason)) = &result {
@@ -273,18 +306,19 @@ impl Stop {
                 .collect();
             let progressed =
                 before.iter().zip(&remaining).any(|((_, was, _), (_, now, _))| !now.is_zero() && now.abs() < was.abs());
-            if closing && progressed && Instant::now() < deadline {
+            // A resting order can fill before its cancel, opening a position the account did not hold when
+            // it was read.
+            let appeared =
+                before.iter().zip(&remaining).any(|((_, was, _), (_, now, _))| was.is_zero() && !now.is_zero());
+            if self.close_on_stop && (closing && progressed || appeared) && Instant::now() < deadline {
                 before = remaining;
                 continue;
             }
             break left;
         };
-        let open: Vec<_> = self
-            .markets
-            .iter()
-            .filter_map(|(m, ..)| left.positions.get(m).map(|p| (*m, p.qty)))
-            .filter(|(_, qty)| !qty.is_zero())
-            .collect();
+        // Every position counts, in a market the account trades or not: one a resting order opened in
+        // another market before its cancel has no slippage bound to close at, and is left, said so.
+        let open: Vec<_> = left.positions.iter().map(|(m, p)| (*m, p.qty)).filter(|(_, qty)| !qty.is_zero()).collect();
         if !left.orders.is_empty() || (self.close_on_stop && !open.is_empty()) {
             let orders = left.orders.len();
             let positions: Vec<_> =
@@ -366,7 +400,13 @@ impl Stop {
             let Some(expires_at) = self.expiry() else { continue };
             let mut request = CloseAllRequest { account, closes, max_slippage_bps: Some(slippage), auth: None };
             let hash = close_all_hash(&self.domain, &request, nonce, expires_at);
-            request.auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
+            let signature = self.key.sign(&hash);
+            request.auth = Some(RequestAuth { nonce, expires_at, signature });
+            if let Some((slot, report)) = &self.report {
+                // The runner takes this in before it applies any message of the log, so the fill
+                // the close makes is known for the account's own. A runner that ended has no use for it.
+                let _ = report.send((*slot, signature, expires_at)).await;
+            }
             match self.node.close_all(&request, admission).await {
                 Ok(answer) => log_order_events(account, &answer.body),
                 Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
