@@ -161,7 +161,9 @@ max_fee_gwei = "1"
 # login password, keeps the certificate and only a hash of the password in data_dir, and prints
 # the password once; every start prints the certificate's SHA-256 fingerprint, which the browser's
 # certificate details must show. Delete data_dir's login.argon2 for a new password. Nothing the
-# console can do moves funds away from an account's own key, and no route returns a key.
+# console can do moves funds away from an account's own key, and no route returns a key. With a
+# [chain] section it also declares, deposits for, claims for and withdraws from the accounts, each
+# action paying only the account's own address.
 [console]
 # Every interface, so the console is reachable at the host's IP: https://<host>:8443.
 bind = "0.0.0.0:8443"

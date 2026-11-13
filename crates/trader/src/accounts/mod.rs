@@ -133,6 +133,12 @@ impl Lifecycle {
         })
     }
 
+    /// Whether a funding key is configured, which `Source::Funding` and the gas of claims and
+    /// withdrawals need.
+    pub fn has_funding(&self) -> bool {
+        self.funding.is_some()
+    }
+
     /// What `account` holds and owes.
     /// Error cases:
     /// - a chain read fails, or a node read does not verify or is refused

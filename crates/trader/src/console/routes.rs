@@ -1,8 +1,10 @@
 //! The console's routes. Every one but the login and the static files needs a live session, and
 //! every one that changes state checks `Origin` (`guard`). Reads answer from what the accounts and
 //! the refresher last published; controls ask the bot's runner, which alone changes the accounts'
-//! controls. No route moves funds or returns a key: the controls start, stop and flatten an account
-//! and set a strategy's parameters within the config's bounds, and nothing else.
+//! controls. The controls start, stop and flatten an account and set a strategy's parameters within
+//! the config's bounds. The funding routes (`funding`) are the only ones that move funds, each acting
+//! for the account it names with that account's own key, so what they pay goes to the account's own
+//! address; no route returns a key.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -29,7 +31,7 @@ use zeroize::Zeroizing;
 use crate::bot::link::{AccountRequest, Control, Refusal};
 use crate::console::guard::{self, MAX_BODY, RequestId, refusal};
 use crate::console::live::{self, LIVE_PATH};
-use crate::console::{Server, assets, login, session};
+use crate::console::{Server, assets, funding, login, session};
 
 /// The longest password the login hashes; the generated one is far shorter.
 const MAX_PASSWORD: usize = 128;
@@ -48,6 +50,7 @@ struct LoginBody {
 /// Every route, its guards, and the static files.
 pub fn router(server: Arc<Server>) -> Router {
     let api = Router::new()
+        .merge(funding::routes())
         .route("/api/accounts", get(accounts))
         .route("/api/accounts/{address}", get(account))
         .route("/api/accounts/{address}/fills", get(fills))
@@ -252,7 +255,7 @@ async fn control(
 }
 
 /// A JSON request body; one that is not the JSON expected is refused as `bad_request`.
-struct Body<T>(T);
+pub(in crate::console) struct Body<T>(pub T);
 
 impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
     type Rejection = Response;

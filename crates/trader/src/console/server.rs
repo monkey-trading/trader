@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 
 use crate::bot::link::{AccountLink, AccountRequest, AccountState, AccountStatus};
 use crate::console::board::{AccountView, FillView, NodeView, Totals, totals};
+use crate::console::funding::Funding;
 use crate::console::login::Limiter;
 use crate::console::session::Sessions;
 
@@ -35,6 +36,8 @@ pub struct Server {
     checking: Arc<Semaphore>,
     feeds: Arc<Semaphore>,
     next_id: AtomicU64,
+    /// The accounts' funding, when the config has a `[chain]`.
+    funding: Option<Arc<Funding>>,
 }
 
 /// One account: its link to the runner, and the refresher's view of it.
@@ -53,7 +56,12 @@ pub struct Watched {
 
 impl Server {
     /// The state for `accounts`, each with the refresher's view of it, in the same order.
-    pub fn new(accounts: Vec<AccountLink>, views: Vec<watch::Receiver<NodeView>>, password_hash: String) -> Self {
+    pub fn new(
+        accounts: Vec<AccountLink>,
+        views: Vec<watch::Receiver<NodeView>>,
+        password_hash: String,
+        funding: Option<Arc<Funding>>,
+    ) -> Self {
         assert_eq!(accounts.len(), views.len(), "the refresher reads every account");
         let accounts: Vec<Account> =
             accounts.into_iter().zip(views).map(|(link, node)| Account { link, node }).collect();
@@ -76,7 +84,13 @@ impl Server {
             checking: Arc::new(Semaphore::new(1)),
             feeds: Arc::new(Semaphore::new(FEEDS)),
             next_id: AtomicU64::new(1),
+            funding,
         }
+    }
+
+    /// The accounts' funding, when there is any.
+    pub fn funding(&self) -> Option<&Arc<Funding>> {
+        self.funding.as_ref()
     }
 
     /// A new id for a request or a feed.

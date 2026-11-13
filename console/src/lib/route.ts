@@ -3,6 +3,7 @@
 /** A page of the console. */
 export type Route =
   | { readonly name: "overview" }
+  | { readonly name: "funding" }
   | { readonly name: "account"; readonly address: string }
   | { readonly name: "not-found" };
 
@@ -13,6 +14,9 @@ export function parseRoute(pathname: string): Route {
   if (pathname === "/") {
     return { name: "overview" };
   }
+  if (pathname === "/funding" || pathname === "/funding/") {
+    return { name: "funding" };
+  }
   const match = /^\/accounts\/([^/]+)\/?$/.exec(pathname);
   const address = match?.[1];
   return address !== undefined && ADDRESS.test(address) ? { name: "account", address } : { name: "not-found" };
@@ -22,3 +26,6 @@ export function parseRoute(pathname: string): Route {
 export function accountPath(address: string): string {
   return `/accounts/${address}`;
 }
+
+/** The path of the funding page. */
+export const FUNDING_PATH = "/funding";

@@ -8,6 +8,7 @@ import { extname, join, normalize } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { createFunding, read as readFunding, start as startFunding } from "./funding.mjs";
 import { createModel, fills, flatten, overview, tick, view } from "./model.mjs";
 import { accept } from "./websocket.mjs";
 
@@ -23,6 +24,7 @@ const SECURITY_HEADERS = {
 };
 
 const model = createModel(() => Date.now());
+const funding = createFunding(model.accounts.map((item) => item.address).filter((address) => address !== null));
 const sessions = new Set();
 const feeds = new Set();
 let failedLogins = 0;
@@ -160,6 +162,13 @@ async function api(request, response, url) {
     sessions.clear();
     response.writeHead(204, { ...SECURITY_HEADERS, "Set-Cookie": "session=; Max-Age=0; Path=/" });
     return response.end();
+  }
+  if (parts[0] === "funding" && parts.length === 1 && request.method === "GET") {
+    return send(response, 200, readFunding(funding));
+  }
+  if (parts[0] === "funding" && parts.length === 2 && request.method === "POST") {
+    const answer = startFunding(funding, parts[1], await readJson(request));
+    return send(response, answer.status, answer.body);
   }
   if (parts[0] === "accounts" && parts.length === 1) {
     return send(response, 200, overview(model));

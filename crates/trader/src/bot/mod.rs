@@ -35,7 +35,7 @@ use tracing::{Instrument, Span, error, info};
 use crate::accounts::{Lifecycle, claim};
 use crate::bot::link::ConsoleEnd;
 use crate::config::Config;
-use crate::console::{Console, Prepared};
+use crate::console::{Console, Funding, Prepared};
 use crate::keys::AccountKey;
 use crate::node::CallError;
 
@@ -111,18 +111,23 @@ pub async fn run_with_console(
             return Err(e);
         }
     };
-    let startup::Started { fleet, node, mut stream, domain, failed, kept } = started;
+    let startup::Started { fleet, node, mut stream, domain, failed, kept, idle } = started;
     // With `[claims]`, a task claims every account's MONKEY alongside the trading: should it end, the
     // bot stops as on a stop signal and fails, or, when the node answered it with another key's
     // signature, halts.
-    let mut claims = match &cfg.claims {
-        Some(claims) => {
-            let lifecycle = Arc::new(Lifecycle::with_node(&cfg, node.clone(), &env).await?);
+    // One lifecycle serves the claims and the console's funding, with the funding key unlocked once.
+    let lifecycle = match cfg.claims.is_some() || (console.is_some() && cfg.chain.is_some()) {
+        true => Some(Arc::new(Lifecycle::with_node(&cfg, node.clone(), &env).await?)),
+        false => None,
+    };
+    let mut claims = match (&cfg.claims, &lifecycle) {
+        (Some(claims), Some(lifecycle)) => {
+            let lifecycle = lifecycle.clone();
             let keys = fleet.accounts.iter().map(|account| account.key.clone()).collect();
             let watch = claim::watch(lifecycle, keys, claims.threshold.0, claims.interval);
             Some(tokio::spawn(watch.instrument(Span::current())))
         }
-        None => None,
+        _ => None,
     };
     let cap = cfg.node.limits.connections;
     let mut runner = Runner::new(fleet, Arc::clone(&node), domain, cap);
@@ -133,7 +138,12 @@ pub async fn run_with_console(
         let (end, mut links) = ConsoleEnd::new(&runner.fleet, kept);
         runner.console = Some(end);
         links.extend(ConsoleEnd::halted(&failed));
-        let mut console = Console::start(section, prepared, node, cfg.node.limits.per_ip, links).await?;
+        // With `[chain]`, the console funds every account whose key unlocked, trading or not.
+        let funding = lifecycle.map(|lifecycle| {
+            let keys = runner.fleet.accounts.iter().map(|a| a.key.clone()).chain(idle).collect();
+            Funding::new(lifecycle, keys)
+        });
+        let mut console = Console::start(section, prepared, node, cfg.node.limits.per_ip, links, funding).await?;
         watcher = Some(tokio::spawn(async move {
             let _ = console_failed.send(console.failed().await);
         }));

@@ -95,8 +95,9 @@ list.
   (`server.rs`); the live WebSocket feed (`live.rs`); the figures, views, totals and in-memory equity
   curves (`board.rs`) the refresher reads from the node through the bot's paced pool
   (`refresh.rs`); and the embedded app (`assets.rs`), which `build.rs` lists from `console/dist`.
-  `files.rs` writes files only the bot's user can read. No route moves funds away from an account's
-  own key or returns a key. Its `README.md` lists every file.
+  `files.rs` writes files only the bot's user can read. The funding routes (`console/funding/`,
+  with `[chain]`) declare, deposit, claim and withdraw for the accounts named, as jobs; no request
+  names a destination. No route moves funds away from an account's own key or returns a key. Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, with a `[console]` section and a
   strategy's `bounds`, which the config tests load.
 - **console/** — the Vite, React and TypeScript app. `src/main.tsx` mounts `App.tsx` (the page frame,
@@ -109,9 +110,12 @@ list.
   (`session-store.ts`); `src/lib/` holds pure helpers (exact decimals, formatting, market names,
   routes, curve layout, parameter checks, reconnect delay); `src/pages/` has the login, overview and
   account pages; `src/components/` the shared components and the app context; `src/test-harness.tsx`
-  mounts the app over stand-in calls for the component tests (`App.test.tsx`, `controls.test.tsx`).
-  `stub/` is a stand-in console API with three accounts (`npm run stub`), and `browser-test/run.mjs`
-  the Playwright test run against it or a bot's console from outside the repository. Config:
+  mounts the app over stand-in calls for the component tests (`App.test.tsx`, `controls.test.tsx`,
+  `funding.test.tsx`); the funding page (`pages/FundingPage.tsx`, `components/Funding*.tsx`) reads
+  `/api/funding` on a timer (`use-funding.ts`), its answers parsed in `api/funding-parsers.ts`.
+  `stub/` is a stand-in console API with three accounts and their funding (`npm run stub`), and
+  `browser-test/run.mjs` and `funding.mjs` the Playwright tests run against it or a bot's console from
+  outside the repository. Config:
   `index.html`, `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`, `tsconfig.json`;
   Node.js from `.nvmrc`, exact versions pinned by `.npmrc` and `package-lock.json`. `npm run build`
   writes the gitignored `dist/`, which the `trader` binary embeds when built after it.
@@ -175,7 +179,10 @@ list.
   the API's figures against the node's answers; `dev-console.sh`, the console app's scenario on the
   real server: three accounts trading, then the browser test signs in, checks each account against the
   API, stops and starts a strategy, flattens an account, and checks phone width and the keyboard (run
-  by hand: it needs Playwright in a scratch directory); `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
+  by hand: it needs Playwright in a scratch directory); `dev-console-funding.sh`, the console's funding on
+  the chain stack: two accounts the bot started without a credit are declared, deposited into (one from
+  its own wallet, one from the funding key's), claimed for and withdrawn from through the Funding page,
+  every balance checked on chain and in the node (run by hand: Playwright and Foundry); `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
   `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
@@ -219,7 +226,9 @@ Run from the repo root:
   `npm run typecheck`, `npm test`, `npm run build`; `npm audit --audit-level=high`; `npm run dev`
   serves it on loopback, `npm run stub` runs the stand-in API; the browser test:
   `CONSOLE_URL=… CONSOLE_PASSWORD=… PLAYWRIGHT_DIR=<scratch dir with playwright 1.64.0> node browser-test/run.mjs`,
-  or against the real server: `PLAYWRIGHT_DIR=<scratch dir> ./scripts/dev-console.sh` (about five minutes)
+  or against the real server: `PLAYWRIGHT_DIR=<scratch dir> ./scripts/dev-console.sh` (about five minutes);
+  the funding page's, on the chain stack: `PLAYWRIGHT_DIR=<scratch dir> ./scripts/dev-console-funding.sh` (about
+  fifteen minutes, up to forty; also needs Anvil, `cast`, and `forge` once per engine commit)
 - CI scripts test: `./scripts/ci-test.sh` (needs `jq` and `yq`); the dev stack's: `./scripts/dev-stack-test.sh`
   (needs `git`)
 - Merge approval gate tests: `scripts/check-merge-approved-test.sh` (stubs the GitHub API; needs
@@ -261,7 +270,8 @@ Run from the repo root:
 - **The node's answers are verified.** Every signed answer and stream frame is checked against the
   node's signer before the bot acts on it; one that fails the check is no data.
 - **Keys stay with the bot.** No route of the console returns a key, and nothing the console can do
-  moves funds away from an account's own key.
+  moves funds away from an account's own key: the funding routes act for the accounts they name and
+  take no destination.
 - **Public text.** The repository is public. Its README, docs, code comments, issues, and PR text
   are polished prose that never describes agent workflow, review rounds, or waves of work (that
   lives only inside `agents/`). They name no competing product and no product monkeytrading is

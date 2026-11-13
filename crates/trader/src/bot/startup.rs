@@ -59,6 +59,9 @@ pub(super) struct Started {
     /// Each started account's controls and what the console names its strategies by, in the fleet's
     /// order.
     pub kept: Vec<Kept>,
+    /// The keys of the accounts that did not start but unlocked, which the console's funding acts
+    /// for: an account the node has not credited yet starts only once it is funded and declared.
+    pub idle: Vec<Arc<AccountKey>>,
 }
 
 /// The fleet for `cfg`'s accounts, and the log from the seq after the head before the reads.
@@ -116,12 +119,15 @@ pub(super) async fn start(
     }
 
     let mut candidates = Vec::new();
+    let mut idle: Vec<Arc<AccountKey>> = Vec::new();
     for (order, plan, key) in unlocked {
+        let key = Arc::new(key);
         match plan.strategies.iter().find_map(|s| usable[&s.market].as_ref().err()) {
             Some(reason) => {
-                failed.push(failure(order, plan, Some(key.address()), "market_unsupported", reason.clone()))
+                failed.push(failure(order, plan, Some(key.address()), "market_unsupported", reason.clone()));
+                idle.push(key);
             }
-            None => candidates.push((order, plan, Arc::new(key))),
+            None => candidates.push((order, plan, key)),
         }
     }
     let mut views = Vec::with_capacity(candidates.len());
@@ -154,10 +160,12 @@ pub(super) async fn start(
             Err(CallError::Refused { status: 404, .. }) => {
                 let reason = format!("the node has never credited {address}: fund and declare it first");
                 failed.push(failure(order, plan, Some(address), "no_balance", reason));
+                idle.push(key);
                 continue;
             }
             Err(e) => {
                 failed.push(failure(order, plan, Some(address), "account_unread", e.to_string()));
+                idle.push(key);
                 continue;
             }
         };
@@ -167,6 +175,7 @@ pub(super) async fn start(
                 Ok(saved) => saved,
                 Err(e) => {
                     failed.push(failure(order, plan, Some(address), "controls_unreadable", format!("{e:#}")));
+                    idle.push(key);
                     continue;
                 }
             },
@@ -174,13 +183,16 @@ pub(super) async fn start(
         };
         read_at = read_at.max(view.time_ms);
         info!(%address, balance = %view.body.balance, head_seq, "account read");
-        match account_in(plan, key, &view, nonce, &usable, head_seq, &cfg.state.dir, &saved).await {
+        match account_in(plan, key.clone(), &view, nonce, &usable, head_seq, &cfg.state.dir, &saved).await {
             Ok(account) => {
                 accounts.push(account);
                 let strategies = plan.strategies.iter().map(|s| (s.market.clone(), s.bar)).collect();
                 kept.push(Kept { order, path, saved, strategies });
             }
-            Err(e) => failed.push(failure(order, plan, Some(address), e.code, format!("{:#}", e.error))),
+            Err(e) => {
+                failed.push(failure(order, plan, Some(address), e.code, format!("{:#}", e.error)));
+                idle.push(key);
+            }
         }
     }
     for StartFailure { label, reason, .. } in &failed {
@@ -201,7 +213,7 @@ pub(super) async fn start(
     let fleet = Fleet::new(&markets, accounts, trading_from)?;
     let domain = eip712::domain(node_cfg.chain_id, node_cfg.vault);
     let stream = Stream::new(tls, node_cfg.signer.0, deployment, node_cfg.stream_timeout, head_seq + 1);
-    Ok(Started { fleet, node, stream, domain, failed, kept })
+    Ok(Started { fleet, node, stream, domain, failed, kept, idle })
 }
 
 /// `address`'s account, read again after a failure that may pass (no answer, or a request to try again

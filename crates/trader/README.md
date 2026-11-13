@@ -169,7 +169,13 @@ MONKEY, and withdraws, every payout going to the account's own address.
   until it ends. The runner acts on each request, and the controls are saved in
   `data_dir/accounts/`, so a restart keeps a stop; a stop that cannot be saved holds, and says so. A
   parameter change builds the strategy afresh and warms its series up again from the node's marks
-  history, so the strategy decides nothing until it has. No route moves funds away from an
+  history, so the strategy decides nothing until it has. With `[chain]`, the funding routes
+  (`/api/funding`, and `declare`, `deposit`, `claim` and `withdraw` beneath it) read each account's
+  funding and run each action for the accounts a request names, one background job per account that
+  ends once its transactions land: a declaration is refused unless it carries the class's statement,
+  an account with a job that has not ended is refused another, and a request names no destination,
+  so every payout goes to the account's own address. The accounts are every one whose key unlocked,
+  those that could not start for want of a credit included. No route moves funds away from an
   account's own key or returns a key
 - The console app's build, `console/dist`, embedded at compile time and served at `/`, with any
   page path routed to its `index.html`; a binary built without it serves a page saying so
@@ -240,6 +246,9 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `src/console/guard.rs`: the request span, the security headers, the limits on a body's time and
   size, and the `Origin` and session checks
 - `src/console/routes.rs`: the API's routes
+- `src/console/funding/`: the funding of the accounts, their status reads and the jobs that declare,
+  deposit, claim and withdraw for them (`mod.rs`), the jobs' states (`jobs.rs`), the figures as the
+  console reads them (`view.rs`) and the routes (`routes.rs`)
 - `src/console/server.rs`: the state the routes share
 - `src/console/live.rs`: the live WebSocket feed
 - `src/console/board.rs`: the figures, account views, totals and equity curves the API serves;
@@ -255,8 +264,11 @@ MONKEY, and withdraws, every payout going to the account's own address.
   entitlement
 - `tests/common/console.rs`: the bot run with its console, and an HTTPS and WebSocket client for it
 - `tests/console_access.rs`: the login, its rate limit, sessions, the `Origin` check, the security
-  headers, that no answer carries a key or no route moves funds, and the unbuilt page
+  headers, that no answer carries a key and no route names a destination for funds, and the unbuilt page
 - `tests/console_logs.rs`: that no log line carries the password
+- `tests/console_funding.rs`: the funding routes against the stand-in node and chain: every account
+  with a key listed, a declaration's statement and signer, refusals that start nothing, a busy
+  account, a failed job's reason, a deposit's transaction, and that no request names a destination
 - `tests/console_reads.rs`: the figures against the node's answers, marks and close-outs, the fill
   history, the equity curve, failed reads, and the live feed
 - `tests/console_controls.rs`: stopping and starting an account and its strategy, parameters within
