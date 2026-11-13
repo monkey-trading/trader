@@ -74,6 +74,17 @@ export function withCurve(book: Book, key: string, points: readonly CurvePoint[]
   return { ...book, curves: new Map(book.curves).set(key, mergeCurve(book.curves.get(key) ?? [], points)) };
 }
 
+/** Whether the bot has read the figures of the account under `key`; until it has, it answers its fills as none. */
+export function reported(book: Book, key: string): boolean {
+  const figures = book.accounts.get(key)?.figures;
+  return figures !== undefined && figures !== null;
+}
+
+/** Drops the curve held under `key`. */
+export function withoutCurve(book: Book, key: string): Book {
+  return book.curves.has(key) ? { ...book, curves: new Map([...book.curves].filter(([held]) => held !== key)) } : book;
+}
+
 /**
  * Takes the feed's opening snapshot: the accounts and totals replace what was known, fills and curves of kept
  * accounts stay; curves are held only for the accounts in `shown`, when given.

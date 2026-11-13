@@ -11,6 +11,11 @@ import { useFundingAction, type FundingAction } from "./use-funding-action";
 const FIELD = "min-h-9 rounded border border-line bg-surface px-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 const CLASS_NAMES: Readonly<Record<EligibilityClass, string>> = { professional: "Professional client", eligible_client: "Eligible client" };
 
+/** What an amount does to an account that trades under a daily loss limit, which counts the day's change in equity. */
+const DEPOSIT_NOTE = "A deposit counts toward the account's loss for the day: it hides a loss that has already happened.";
+const WITHDRAW_NOTE =
+  "A withdrawal counts toward the account's loss for the day. One larger than what is left of the account's daily loss limit closes its positions and stops it until the next UTC day.";
+
 interface Props {
   readonly funding: Extract<Funding, { enabled: true }>;
   /** The addresses selected. */
@@ -124,11 +129,13 @@ function DepositForm({ funding, accounts, reload }: Props) {
   const [from, setFrom] = useState<DepositFrom>("account");
   const amountId = useId();
   const fromId = useId();
+  const noteId = useId();
   return (
     <fieldset className="flex flex-col gap-2 rounded border border-line p-3">
       <legend className="px-1 font-semibold">Deposit</legend>
       <label htmlFor={amountId}>Amount of USDC for each account</label>
-      <input id={amountId} inputMode="decimal" value={amount} onChange={(e) => { setAmount(e.target.value.trim()); }} className={FIELD} />
+      <input id={amountId} aria-describedby={noteId} inputMode="decimal" value={amount} onChange={(e) => { setAmount(e.target.value.trim()); }} className={FIELD} />
+      <p id={noteId} className="text-muted">{DEPOSIT_NOTE}</p>
       <label htmlFor={fromId}>From</label>
       <select id={fromId} value={from} onChange={(e) => { setFrom(e.target.value === "funding" ? "funding" : "account"); }} className={FIELD}>
         <option value="account">The account's own wallet</option>
@@ -154,6 +161,7 @@ function PayoutForms({ accounts, reload }: Props) {
   const withdraw = useFundingAction(reload);
   const [amount, setAmount] = useState("");
   const amountId = useId();
+  const noteId = useId();
   return (
     <>
       <fieldset className="flex flex-col gap-2 rounded border border-line p-3">
@@ -167,8 +175,9 @@ function PayoutForms({ accounts, reload }: Props) {
       <fieldset className="flex flex-col gap-2 rounded border border-line p-3">
         <legend className="px-1 font-semibold">Withdraw</legend>
         <label htmlFor={amountId}>Amount of USDC from each account; empty pays only what the vault has approved</label>
-        <input id={amountId} inputMode="decimal" value={amount} onChange={(e) => { setAmount(e.target.value.trim()); }} className={FIELD} />
+        <input id={amountId} aria-describedby={noteId} inputMode="decimal" value={amount} onChange={(e) => { setAmount(e.target.value.trim()); }} className={FIELD} />
         <p className="text-muted">Each account is paid at its own address.</p>
+        <p id={noteId} className="text-muted">{WITHDRAW_NOTE}</p>
         <div>
           <Submit
             label="Withdraw"

@@ -41,6 +41,27 @@ describe("the funding page", () => {
     expect(within(second).getByText("1,000")).toBeInTheDocument();
   });
 
+  it("says the withdrawals are still loading, empty or not, until the node has loaded the payouts", async () => {
+    const [one, two] = fundingBody().accounts as Record<string, unknown>[];
+    const api = funded({ accounts: [{ ...one, payouts_loaded: false }, { ...two, payouts_loaded: true }] });
+    mount(api, "/funding");
+
+    const table = await screen.findByRole("region", { name: "Funding of each account" });
+    expect(within(within(table).getByRole("row", { name: /0x1111…1111/ })).getByText("Loading payouts…")).toBeInTheDocument();
+    const loaded = within(table).getByRole("row", { name: /0x2222…2222/ });
+    expect(within(loaded).queryByText("Loading payouts…")).not.toBeInTheDocument();
+    expect(within(loaded).getByText("—")).toBeInTheDocument();
+  });
+
+  it("says that a deposit and a withdrawal count toward the account's loss for the day", async () => {
+    mount(funded(), "/funding");
+
+    const deposit = await screen.findByLabelText("Amount of USDC for each account");
+    expect(deposit).toHaveAccessibleDescription(/^A deposit counts toward the account's loss for the day: it hides a loss/);
+    const withdraw = screen.getByLabelText(/^Amount of USDC from each account/);
+    expect(withdraw).toHaveAccessibleDescription(/larger than what is left of the account's daily loss limit closes its positions and stops it until the next UTC day\.$/);
+  });
+
   it("says funding is off when the bot has no chain", async () => {
     const api = stubApi();
     mount(api, "/funding");

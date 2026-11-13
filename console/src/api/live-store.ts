@@ -4,9 +4,9 @@ import { reconnectDelay } from "@/lib/backoff";
 import type { Outcome } from "./client";
 import { CURVE_RETRY_MS, CURVE_TRIES, ReadFailures } from "./read-failures";
 import { Silence } from "./silence";
-import { EMPTY_BOOK, identityOf, keyOf, withAccount, withCurve, withFills, withMessage, type Book } from "./live-state";
+import { EMPTY_BOOK, identityOf, keyOf, withAccount, withCurve, withFills, withMessage, reported, withoutCurve, type Book } from "./live-state";
 import { INITIAL_SNAPSHOT, type Connection, type FeedSocket, type LiveDeps, type LiveSnapshot } from "./live-types";
-import { parseWith, readLiveMessage } from "./parsers";
+import { readFrame, snapshotOf } from "./live-frames";
 
 /** Holds the book of accounts and keeps it current from the feed. */
 export class LiveStore {
@@ -69,6 +69,9 @@ export class LiveStore {
       const left = (this.tracked.get(address) ?? 1) - 1;
       if (left <= 0) {
         this.tracked.delete(address);
+        this.book = withoutCurve(this.book, keyOf(address));
+        this.failures.clearCurve(keyOf(address));
+        this.publish();
       } else {
         this.tracked.set(address, left);
       }
@@ -88,17 +91,20 @@ export class LiveStore {
       return;
     }
     if (outcome.status === "ok") {
+      const wasReported = reported(this.book, key);
+      const shown = this.shown();
       this.book =
         (this.viewVersions.get(key) ?? 0) === version
-          ? withAccount(this.book, outcome.value)
-          : withCurve(this.book, key, outcome.value.curve);
+          ? withAccount(this.book, outcome.value, shown)
+          : shown.has(key) ? withCurve(this.book, key, outcome.value.curve) : this.book;
       this.failures.clearCurve(key);
+      this.readIfNewlyReported(key, wasReported, epoch);
       this.publish();
     } else if (outcome.status === "unauthenticated") {
       this.endSession();
     } else {
       // The account read alone brings the whole curve: say it is missing, and try again a few times.
-      if (this.failures.failCurve(key, outcome.message) < CURVE_TRIES) {
+      if (this.tracked.has(address) && this.failures.failCurve(key, outcome.message) < CURVE_TRIES) {
         this.deps.timeout(() => {
           if (epoch === this.epoch && this.tracked.has(address)) {
             void this.refresh(address);
@@ -193,21 +199,15 @@ export class LiveStore {
   }
 
   private receive(data: string, epoch: number): void {
-    let json: unknown;
-    try {
-      json = JSON.parse(data);
-    } catch {
-      this.drop();
-      return;
-    }
-    const parsed = parseWith(readLiveMessage, json);
     // The bot opens every feed with its snapshot; anything before it is not part of the protocol.
-    if (parsed.status === "invalid" || (!this.loadedOnThisFeed() && parsed.value.type !== "snapshot")) {
+    const message = readFrame(data, this.connection === "live");
+    if (message === null) {
       this.drop();
       return;
     }
-    const message = parsed.value;
-    const before = message.type === "account" ? this.book.accounts.get(identityOf(message.account))?.figures?.timeMs : undefined;
+    const accountKey = message.type === "account" ? identityOf(message.account) : "";
+    const wasReported = reported(this.book, accountKey);
+    const before = message.type === "account" ? this.book.accounts.get(accountKey)?.figures?.timeMs : undefined;
     if (message.type === "account") {
       this.bump(this.viewVersions, identityOf(message.account));
     } else if (message.type === "fills") {
@@ -216,13 +216,17 @@ export class LiveStore {
       // Fills that arrived whole are read: an earlier failed read of them no longer stands.
       this.failures.clearFills(key);
     }
-    this.book = withMessage(this.book, message, new Set([...this.tracked.keys()].map(keyOf)));
+    this.book = withMessage(this.book, message, this.shown());
     const after = message.type === "account" ? message.account.figures?.timeMs : undefined;
-    this.armSilence(epoch, before !== undefined && after !== undefined ? Math.max(0, after - before) : 0);
     if (message.type === "snapshot") {
       this.loaded = true;
       this.attempt = 0;
       this.connection = "live";
+    }
+    this.armSilence(epoch, before !== undefined && after !== undefined ? Math.max(0, after - before) : 0);
+    if (message.type === "account") {
+      this.readIfNewlyReported(accountKey, wasReported, epoch);
+    } else if (message.type === "snapshot") {
       for (const [index, account] of message.overview.accounts.entries()) {
         this.bump(this.viewVersions, identityOf(account, index));
       }
@@ -234,11 +238,6 @@ export class LiveStore {
     this.publish();
   }
 
-  /** Whether the open connection has delivered its snapshot. */
-  private loadedOnThisFeed(): boolean {
-    return this.connection === "live";
-  }
-
   private drop(): void {
     this.dropped += 1;
     this.publish();
@@ -248,9 +247,26 @@ export class LiveStore {
     versions.set(key, (versions.get(key) ?? 0) + 1);
   }
 
-  /** Reads an account's fills; a feed message that arrived meanwhile is newer than the read. */
+  /** The keys of the accounts whose pages are open, the only ones whose curve is held. */
+  private shown(): ReadonlySet<string> {
+    return new Set([...this.tracked.keys()].map(keyOf));
+  }
+
+  /** Reads a tracked account's fills once its figures have first arrived, as the earlier read was not made. */
+  private readIfNewlyReported(key: string, wasReported: boolean, epoch: number): void {
+    if (!wasReported && reported(this.book, key)) {
+      for (const address of [...this.tracked.keys()].filter((held) => keyOf(held) === key)) {
+        void this.readFills(address, epoch);
+      }
+    }
+  }
+
+  /** Reads an account's fills, if the bot has read its history; a feed message that arrived meanwhile is newer than the read. */
   private async readFills(address: string, epoch: number): Promise<void> {
     const key = keyOf(address);
+    if (!reported(this.book, key)) {
+      return;
+    }
     const version = this.fillVersions.get(key) ?? 0;
     const outcome = await this.deps.api.fills(address);
     if (epoch !== this.epoch || (this.fillVersions.get(key) ?? 0) !== version) {
@@ -275,17 +291,7 @@ export class LiveStore {
     }
     this.cancelFrame = this.deps.frame(() => {
       this.cancelFrame = null;
-      this.snapshot = {
-        connection: this.connection,
-        dropped: this.dropped,
-        loaded: this.loaded,
-        accounts: [...this.book.accounts.values()],
-        totals: this.book.totals,
-        curves: this.book.curves,
-        fills: this.book.fills,
-        fillFailures: this.failures.fills,
-        curveFailures: this.failures.curves,
-      };
+      this.snapshot = snapshotOf(this.connection, this.dropped, this.loaded, this.book, this.failures);
       for (const listener of this.listeners) {
         listener();
       }

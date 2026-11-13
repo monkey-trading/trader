@@ -1,5 +1,5 @@
 /** Tests of what the live store does when its reads fail or its feed goes quiet. */
-import { ADDRESS, figuresBody, fillBody, viewBody } from "./fixtures";
+import { ADDRESS, figuresBody, fillBody, overviewBody, totalsBody, viewBody } from "./fixtures";
 import { accountMessage, harness, ok, snapshot } from "./live-store-harness";
 import { readAccount } from "./parsers";
 import type { AccountView } from "./types";
@@ -86,5 +86,21 @@ describe("LiveStore reads", () => {
     expect(silences.at(-1)?.ms).toBe(900_000);
     expect(store.getSnapshot().connection).toBe("live");
   });
-});
 
+  it("does not take a silent feed as lost while no account has reported, and times it once one does", async () => {
+    const { store, feeds, silences, settle } = harness();
+    store.start();
+    feeds[0]?.handlers.onOpen();
+    await settle();
+    const armed = silences.length;
+    feeds[0]?.handlers.onMessage(JSON.stringify({ type: "snapshot", ...overviewBody([viewBody({ figures: null })], totalsBody()) }));
+    await settle();
+
+    expect(store.getSnapshot().connection).toBe("live");
+    expect(silences).toHaveLength(armed);
+
+    feeds[0]?.handlers.onMessage(accountMessage("10300"));
+    await settle();
+    expect(silences).toHaveLength(armed + 1);
+  });
+});

@@ -9,10 +9,14 @@ export type LoginResult =
   | { readonly status: "signed-in" }
   | { readonly status: "refused"; readonly message: string };
 
-/** What a sign out came to, for the control to show. */
+/**
+ * What a sign out came to, for the control to show. `ignored` is a press while one is pending, and an answer
+ * that came after the session it was asked in had ended: neither changes anything.
+ */
 export type LogoutResult =
   | { readonly status: "signed-out" }
-  | { readonly status: "failed"; readonly message: string };
+  | { readonly status: "failed"; readonly message: string }
+  | { readonly status: "ignored" };
 
 /** Holds the session status for components. */
 export class SessionStore {
@@ -20,6 +24,7 @@ export class SessionStore {
   private status: SessionStatus = "checking";
   /** Moves on at each login, sign out and expiry, so a check that began before one is not taken as its news. */
   private transitions = 0;
+  private signingOut = false;
   private readonly listeners = new Set<() => void>();
 
   constructor(api: Api) {
@@ -63,7 +68,18 @@ export class SessionStore {
    * the console stays signed in and says so: showing the login page would hide a cookie that is good for hours.
    */
   async logout(): Promise<LogoutResult> {
-    const outcome = await this.api.logout();
+    if (this.signingOut) {
+      return { status: "ignored" };
+    }
+    this.signingOut = true;
+    const generation = this.transitions;
+    const outcome = await this.api.logout().finally(() => {
+      this.signingOut = false;
+    });
+    // An answer from a session that has since ended, or been replaced by a new login, is not news of this one.
+    if (generation !== this.transitions) {
+      return { status: "ignored" };
+    }
     if (outcome.status === "ok" || outcome.status === "unauthenticated") {
       this.transitions += 1;
       this.set("anonymous");

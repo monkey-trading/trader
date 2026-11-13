@@ -10,6 +10,7 @@ const HEAD = [
 ] as const;
 const NUMERIC = [3, 4, 5, 6, 7] as const;
 const NONE = "—";
+const LOADING = "Loading payouts…";
 
 /** What the account's withdrawals come to, in words. */
 function withdrawals(account: FundingAccount): string {
@@ -20,7 +21,8 @@ function withdrawals(account: FundingAccount): string {
     ),
   ];
   if (parts.length === 0) {
-    return NONE;
+    // An unfinished read of the payouts is not an empty queue.
+    return account.payoutsLoaded ? NONE : LOADING;
   }
   return account.payoutsLoaded ? parts.join("; ") : `${parts.join("; ")} (more may still load)`;
 }
