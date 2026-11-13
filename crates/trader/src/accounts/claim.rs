@@ -8,7 +8,7 @@ use std::time::Duration;
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{SolCall, SolEvent, SolInterface};
 use anyhow::{bail, ensure};
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::{Instant, MissedTickBehavior, interval, sleep};
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::accounts::Lifecycle;
@@ -104,35 +104,95 @@ fn claimed_already(data: &[u8]) -> bool {
     matches!(Vault::VaultErrors::abi_decode(data), Ok(Vault::VaultErrors::NothingToClaim(_)))
 }
 
-/// Every `every`, claims each of `accounts`' MONKEY once `threshold` base units are unclaimed. A
-/// failed claim is a warning, tried again at the next check. It returns only when the node answers
-/// with another key's signature, which nothing the bot does may follow; that error.
+/// How a claims pass walks its accounts. The node keeps the proofs of the 128 accounts asked about
+/// most recently, so a pass asks `size` accounts at a time, well under that, and holds a batch while
+/// any of its accounts waits for the vault to record a checkpoint, asking those again every `poll`
+/// until `bound` passes: an account is not left to fall out of the node's watch set before it can
+/// be claimed.
+#[derive(Clone, Copy, Debug)]
+pub struct Batching {
+    pub size: usize,
+    pub poll: Duration,
+    pub bound: Duration,
+}
+
+impl Default for Batching {
+    fn default() -> Self {
+        Self { size: 64, poll: Duration::from_secs(10), bound: Duration::from_secs(300) }
+    }
+}
+
+/// Every `every`, claims each of `accounts`' MONKEY once `threshold` base units are unclaimed, in
+/// batches (see `Batching`). A failed claim is a warning, tried again at the next check, and so is
+/// an account still waiting for the vault to record its checkpoint when its batch's bound passes. It
+/// returns only when the node answers with another key's signature, which nothing the bot does may
+/// follow; that error.
 pub async fn watch(
     lifecycle: Arc<Lifecycle>,
     accounts: Vec<Arc<AccountKey>>,
     threshold: U256,
     every: Duration,
 ) -> anyhow::Error {
+    watch_batched(lifecycle, accounts, threshold, every, Batching::default()).await
+}
+
+/// `watch` with the batches `batching` sets.
+pub async fn watch_batched(
+    lifecycle: Arc<Lifecycle>,
+    accounts: Vec<Arc<AccountKey>>,
+    threshold: U256,
+    every: Duration,
+    batching: Batching,
+) -> anyhow::Error {
     let mut tick = interval(every);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut failing = vec![false; accounts.len()];
+    let mut waiting = vec![false; accounts.len()];
+    let size = batching.size.max(1);
     loop {
         tick.tick().await;
-        for (key, failing) in accounts.iter().zip(failing.iter_mut()) {
-            let account = key.address();
-            match lifecycle.claim(key, threshold).await {
-                Ok(_) => {
-                    if std::mem::take(failing) {
-                        info!(alert_resolved = "monkey_claim_failed", account = %account, "the claim check succeeds again");
+        for first in (0..accounts.len()).step_by(size) {
+            let started = Instant::now();
+            let mut pending: Vec<usize> = (first..accounts.len().min(first + size)).collect();
+            while !pending.is_empty() {
+                let mut again = Vec::new();
+                for at in pending {
+                    let account = accounts[at].address();
+                    match lifecycle.claim(&accounts[at], threshold).await {
+                        Ok(claimed) => {
+                            if std::mem::take(&mut failing[at]) {
+                                info!(alert_resolved = "monkey_claim_failed", account = %account, "the claim check succeeds again");
+                            }
+                            if matches!(claimed, Claimed::Waiting { .. }) {
+                                again.push(at);
+                            } else if std::mem::take(&mut waiting[at]) {
+                                info!(alert_resolved = "monkey_claim_waiting", account = %account, "the vault records its checkpoint");
+                            }
+                        }
+                        Err(e) if is_wrong_signer(&e) => return e,
+                        Err(e) => {
+                            if !std::mem::replace(&mut failing[at], true) {
+                                warn!(alert = "monkey_claim_failed", account = %account, "MONKEY was not claimed; trying again in {every:?}: {e:#}");
+                            } else {
+                                debug!(account = %account, "MONKEY still not claimed: {e:#}");
+                            }
+                        }
                     }
                 }
-                Err(e) if is_wrong_signer(&e) => return e,
-                Err(e) => {
-                    if !std::mem::replace(failing, true) {
-                        warn!(alert = "monkey_claim_failed", account = %account, "MONKEY was not claimed; trying again in {every:?}: {e:#}");
-                    } else {
-                        debug!(account = %account, "MONKEY still not claimed: {e:#}");
-                    }
+                pending = again;
+                let left = batching.bound.saturating_sub(started.elapsed());
+                if pending.is_empty() || left.is_zero() {
+                    break;
+                }
+                sleep(batching.poll.min(left)).await;
+            }
+            for at in pending {
+                if !std::mem::replace(&mut waiting[at], true) {
+                    let account = accounts[at].address();
+                    warn!(
+                        alert = "monkey_claim_waiting", account = %account,
+                        "its MONKEY waits for the vault to record a checkpoint; asking again in {every:?}"
+                    );
                 }
             }
         }
