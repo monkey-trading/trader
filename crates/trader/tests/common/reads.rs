@@ -5,11 +5,17 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
 use super::StandIn;
+
+/// Whether a lifecycle test scripted an answer to this path, which then takes the read in place of the
+/// console's own maps.
+fn scripted(s: &StandIn, uri: &Uri) -> bool {
+    s.with(|i| i.lifecycle.answers.contains_key(uri.path()))
+}
 
 /// An account's view, or 404 for an account the stand-in does not hold.
 pub async fn account_view(State(s): State<Arc<StandIn>>, Path(address): Path<String>) -> Response {
@@ -35,9 +41,13 @@ pub async fn nonce(State(s): State<Arc<StandIn>>, Path(address): Path<String>) -
 /// One page of an account's fills, newest first, strictly between the cursors `after` and `before`.
 pub async fn history(
     State(s): State<Arc<StandIn>>,
+    uri: Uri,
     Path(address): Path<String>,
     Query(query): Query<BTreeMap<String, String>>,
 ) -> Response {
+    if scripted(&s, &uri) {
+        return super::lifecycle::canned(State(s), uri).await;
+    }
     assert_eq!(query.get("kind").map(String::as_str), Some("fill"), "the console reads fills only");
     let cursor = |text: &str| {
         let (seq, index) = text.split_once(':').unwrap();
@@ -67,7 +77,10 @@ pub async fn history(
 }
 
 /// The account's entitlement, or 404 while it has none.
-pub async fn emissions(State(s): State<Arc<StandIn>>, Path(address): Path<String>) -> Response {
+pub async fn emissions(State(s): State<Arc<StandIn>>, uri: Uri, Path(address): Path<String>) -> Response {
+    if scripted(&s, &uri) {
+        return super::lifecycle::canned(State(s), uri).await;
+    }
     match s.with(|i| i.emissions.get(&address.to_lowercase()).cloned()) {
         Some(answer) => axum::Json(answer).into_response(),
         None => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": "not found" }))).into_response(),

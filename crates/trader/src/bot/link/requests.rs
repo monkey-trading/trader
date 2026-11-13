@@ -26,6 +26,11 @@ impl Runner {
             let Some(a) = self.fleet.index_of(account) else {
                 return answer(reply, Err(Refusal::failed("no_account", format!("{account} is not traded here"))));
             };
+            // The account may have halted since the console took the request.
+            if self.fleet.accounts[a as usize].failed.is_some() {
+                let message = "the account is halted: its controls do nothing";
+                return answer(reply, Err(Refusal::invalid("account_halted", message)));
+            }
             let flattening = {
                 let end = self.console_end(a);
                 end.flattening || !end.flattens.is_empty()

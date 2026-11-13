@@ -191,9 +191,8 @@ Run from the repo root:
   (about twenty minutes, the same variables); with a local chain: `./scripts/dev-stack.sh --chain`
   (also needs Foundry's `anvil` and `cast`, and `forge` once per engine commit), and its scenario
   `./scripts/dev-lifecycle.sh` (about fifteen minutes, up to forty: it trades until each account has
-  a MONKEY entitlement)
-  (about twenty minutes, the same variables); the console's: `./scripts/dev-console-api.sh` (about
-  ten minutes; also needs Node.js and npm to build the app; the same variables)
+  a MONKEY entitlement); the console's: `./scripts/dev-console-api.sh` (about ten minutes; also needs
+  Node.js and npm to build the app; the same variables as `dev-trade-one.sh`)
 - Many accounts: `./scripts/dev-trade-many.sh` (twenty accounts, about seventeen minutes; same
   requirements as `dev-trade-one.sh`, and `lsof`); `trader addresses --config <file>` prints the
   accounts' addresses; the hot-path benchmark: `cargo test -p trader --test hot_path -- --nocapture`
