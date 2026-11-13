@@ -74,8 +74,10 @@ start_bot() {
   done
   fail "the console never listened"
 }
-# Stops the bot with SIGTERM; it must exit 0.
+# Stops the bot with SIGTERM; it must exit with $1 (default 0): a bot that started without some accounts
+# exits 1 to say so.
 stop_bot() {
+  local want="${1:-0}"
   local status=""
   kill -TERM "$bot_pid"
   for _ in $(seq 1 1200); do
@@ -83,7 +85,7 @@ stop_bot() {
     sleep 0.1
   done
   bot_pid=""
-  [[ "$status" == 0 ]] || fail "the bot exited with '${status:-no exit within two minutes}'"
+  [[ "$status" == "$want" ]] || fail "the bot exited with '${status:-no exit within two minutes}', not $want"
 }
 # The console's status for a call; its body is left in $work/body.
 console_status() {
@@ -218,7 +220,9 @@ done
 [[ "$(nonce_of "${managed[1]}")" == "${nonce_before[1]}" ]] || fail "the second managed account sent a transaction"
 
 step "restart the bot so all three trade, until the two have a MONKEY entitlement (at most three periods)"
-stop_bot
+# The first run started without the two unfunded accounts, and exits 1 to say so.
+stop_bot 1
+grep -q "2 accounts could not start" "$work/bot.log" || fail "the first run did not report the two accounts that could not start"
 restart_ms="$(now_ms)"
 start_bot bot-restarted.log
 entitled() { node_get "/v1/accounts/$1/emissions" 2>/dev/null | jq -r '.newest_entitled // "0"' 2>/dev/null || echo 0; }
