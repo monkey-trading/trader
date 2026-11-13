@@ -1,22 +1,48 @@
-//! The bot's orders against the stand-in when an order is refused, goes unanswered, or is a
-//! reversal the engine refuses whole, and when someone else trades the account.
+//! The bot's orders against the stand-in when an order is refused, for its nonce or otherwise, goes
+//! unanswered, or is a reversal the engine refuses whole, and when someone else trades the account.
 
 mod common;
 
 use std::time::Duration;
 
+use common::console::{BOUNDS, Running, SAME, console_config, seed, until_started, within};
 use common::{
     MINUTE, StandIn, T0, account, account_view, btc_usd, bucket, command, config, order, own_fill, prices, run, warm,
 };
+use hyper::Method;
 use serde_json::json;
 use tokio::sync::oneshot;
 
-/// A signed refusal of the order, such as a stale nonce, is logged, and the next bar orders again.
+/// An order the node refuses for its nonce never entered the log, as when another request of the
+/// account took the nonce: its target is decided again on the node's next nonce, once for its bar, and
+/// a second refusal leaves it to the next bar.
 #[tokio::test]
-async fn a_refused_order_is_retried_on_the_next_bar() {
+async fn an_order_refused_for_its_nonce_is_decided_again_once_per_bar() {
     let stand_in = StandIn::start().await;
     flat_account(&stand_in);
-    stand_in.with(|i| i.statuses.push_back(409));
+    stand_in.with(|i| i.statuses.extend([409, 409]));
+    let dir = tempfile::tempdir().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
+        _ = stopped.await;
+    }));
+    rising(&stand_in, 11, &["100", "100", "101", "102"]);
+    assert_eq!(order(&stand_in, 1).await["client_id"], T0 + MINUTE);
+    // No command comes between: the bar's order is sent again from the refusal alone.
+    assert_eq!(order(&stand_in, 2).await["client_id"], T0 + MINUTE, "decided again for its bar");
+    stand_in.append((15, 0), command(15, T0 + 3 * MINUTE, prices(1, "103", T0 + 3 * MINUTE), json!([])));
+    assert_eq!(order(&stand_in, 3).await["client_id"], T0 + 2 * MINUTE, "the second refusal waits for the next bar");
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+}
+
+/// An order refused for another reason than its nonce is not decided again within its bar: the next
+/// bar orders.
+#[tokio::test]
+async fn an_order_refused_otherwise_waits_for_the_next_bar() {
+    let stand_in = StandIn::start().await;
+    flat_account(&stand_in);
+    stand_in.with(|i| i.statuses.push_back(400));
     let dir = tempfile::tempdir().unwrap();
     let (stop, stopped) = oneshot::channel::<()>();
     let bot = tokio::spawn(run(config(&stand_in, dir.path(), "1m"), async {
@@ -28,6 +54,42 @@ async fn a_refused_order_is_retried_on_the_next_bar() {
     assert_eq!(order(&stand_in, 2).await["client_id"], T0 + 2 * MINUTE);
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+}
+
+/// An order refused for its nonce after its strategy's parameters changed is not decided again: its
+/// target came from the old parameters, and the series warms up anew.
+#[tokio::test]
+async fn an_order_refused_for_its_nonce_after_a_parameter_change_is_not_decided_again() {
+    let stand_in = StandIn::start().await;
+    seed(&stand_in);
+    let dir = tempfile::tempdir().unwrap();
+    let running = Running::start(console_config(&stand_in, dir.path(), BOUNDS)).await;
+    let cookie = running.session().await;
+    until_started(&running, &cookie).await;
+    within(warm(&stand_in)).await;
+    // The order's answer, a refusal of its nonce, takes a second, within the bot's wait for it.
+    stand_in.with(|i| {
+        i.post_delay = Some(Duration::from_secs(1));
+        i.statuses.push_back(409);
+    });
+    for (seq, minute, mid) in [(14, 1, "101"), (15, 2, "102")] {
+        let ts = T0 + minute * MINUTE;
+        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
+    }
+    let posted = || stand_in.with(|i| i.posts.len());
+    within(async {
+        while posted() == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let path = format!("/api/accounts/{}/strategies/0/params", account());
+    let params = json!({ "kind": "sma_crossover", "fast": 2, "slow": 3 });
+    assert_eq!(running.call(Method::PUT, &path, SAME, Some(&cookie), Some(params)).await.status, 204);
+    // The refusal comes, and the series warms up again from the marks history: no order follows.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(posted(), 1, "the old parameters' target is not ordered again");
+    running.stop_after(&stand_in).await.unwrap();
 }
 
 /// An order whose answer never comes may still be in the log, so the bar that closes before it

@@ -100,9 +100,12 @@ certificate and only an Argon2 hash of the password in the console's data direct
 password once; every start prints the certificate's SHA-256 fingerprint. Open
 `https://<host>:8443`, check that the certificate the browser shows has that fingerprint, and log in.
 The config may name a certificate and key of its own instead. The console shows every account and
-their totals, and starts, stops and flattens accounts and their strategies; nothing it can do moves
-funds away from an account's own key, and no route returns a key. `./scripts/dev-console-api.sh`
-runs the bot with its console against a dev node and checks its API against the node's answers.
+their totals, starts, stops and flattens accounts and their strategies, and, with a `[chain]` section,
+declares, deposits for, claims for and withdraws from the accounts; nothing it can do moves funds
+away from an account's own key, and no route returns a key. `./scripts/dev-console-api.sh`
+runs the bot with its console against a dev node and checks its API against the node's answers;
+`./scripts/dev-console-funding.sh` funds, claims for and withdraws from two accounts through the
+console on a local chain.
 
 Building the app needs the Node.js version in `console/.nvmrc` and npm; build it before the bot, so
 the bot embeds it:
@@ -117,8 +120,11 @@ npm run stub    # a stand-in console API with three accounts, for the dev server
 
 The console signs in with the bot's password, lists every account with its equity, profit and loss,
 margin level, positions and MONKEY, and opens each account's page to start and stop its strategies,
-change their parameters within the bot's bounds, and flatten it. Figures update over the bot's
-WebSocket; a failed control says so at the control.
+change their parameters within the bot's bounds, and flatten it. Its Funding page shows each
+account's declaration, wallet, balance, unclaimed MONKEY and withdrawals, and declares, deposits,
+claims and withdraws for the accounts selected, each action's state shown until it lands, with every
+payout going to the account's own address. Figures update over the bot's WebSocket; a failed control
+says so at the control.
 
 ## Checks
 

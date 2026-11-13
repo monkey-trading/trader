@@ -10,7 +10,7 @@ import { PageTitle } from "@/components/PageTitle";
 import { Pnl } from "@/components/Pnl";
 import { formatBpsPercent, formatMonkey, formatUsdc, shortAddress } from "@/lib/format";
 import { identityOf } from "@/api/live-state";
-import { accountPath } from "@/lib/route";
+import { accountPath, FUNDING_PATH } from "@/lib/route";
 
 const HEAD = [
   "Account", "State", "Equity (USDC)", "Realised P&L (USDC)", "Unrealised P&L (USDC)", "Margin level",
@@ -72,6 +72,7 @@ export function OverviewPage() {
   return (
     <>
       <PageTitle>Accounts</PageTitle>
+      <p className="mb-4"><Link to={FUNDING_PATH}>Funding</Link></p>
       {!loaded || totals === null ? (
         <p className="text-muted">Loading accounts…</p>
       ) : accounts.length === 0 ? (

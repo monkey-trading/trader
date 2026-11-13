@@ -7,6 +7,7 @@ import { ConnectionStatus } from "@/components/ConnectionStatus";
 import { Link } from "@/components/Link";
 import { useRoute } from "@/components/use-route";
 import { AccountPage } from "@/pages/AccountPage";
+import { FundingPage } from "@/pages/FundingPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { OverviewPage } from "@/pages/OverviewPage";
 
@@ -19,6 +20,8 @@ function Pages() {
   switch (route.name) {
     case "overview":
       return <OverviewPage />;
+    case "funding":
+      return <FundingPage />;
     case "account":
       return <AccountPage key={route.address} address={route.address} />;
     case "not-found":

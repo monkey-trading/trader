@@ -55,11 +55,11 @@ list.
   seconds of log after a market's index is exact each series warms up from the node's log-derived
   marks history (`warm.rs`); a fill from an order an account did not sign stops that account
   (`fills.rs`); `day.rs` keeps each account's day loss, its positions' opening times and a split's halt in a file under `[state] dir`, and the daily loss limit closes the account's positions; a split or a failed corporate action in a traded market halts the bot. The `Runner` (`run.rs`, `orders.rs`, `flatten.rs`, `reads.rs`) turns decisions into signed market orders, one
-  request out per account at a time, each account on its own nonce read again after a refusal, none
+  request out per account at a time, each account on its own nonce read again after a refusal (an order refused for its nonce decided again once for its bar), none
   for a bar behind the node's time or before the log has passed every order of that account and
   market that could still enter it; on SIGINT or SIGTERM, once the log has passed those orders, it
   cancels resting orders and optionally closes positions account by account, exiting non-zero when
-  it leaves either behind or cannot confirm it did not (`stop.rs`). A halt (an answer or frame signed
+  it leaves either behind or cannot confirm it did not (`stop/`). A halt (an answer or frame signed
   by another key, a log it cannot follow) stops the bot and leaves the accounts as they are; an
   account that cannot start or that fails stops alone.
   `trader accounts --config` takes each account from an empty wallet to trading and back: `accounts/`
@@ -70,7 +70,8 @@ list.
   `Vault.withdraw`; every payout goes to the account's own address, and the funding key only pays
   gas and funds `depositFor`. `chain/` reads the chain over one or more JSON-RPC endpoints (after a
   transaction lands, only from one that has reached its block) and sends each transaction to all of
-  them, estimated first, followed to its receipt, signed again only once another transaction has
+  them, estimated first, one per key at a time, its steps reported to a job that shows them
+  (`progress.rs`), followed to its receipt, signed again only once another transaction has
   spent its nonce (a deposit only once the vault holds none of its transactions at a block by which
   the nonce was taken), a revert reported with its reason; `logging.rs` replaces every endpoint's
   URL and key in each log line, output and error; its bindings come from `abi/`, the entries of the pinned engine's vault and
@@ -86,7 +87,7 @@ list.
   new strategy and warms its series up again from the marks history (`bot/params.rs`); and the
   controls those requests set, saved per account under the console's data directory
   (`link/saved.rs`), so a restart keeps a stop. A flatten runs the account's stop with its positions
-  closed (`stop.rs`). `console/` is the console server (with a `[console]` section): HTTPS on `bind`
+  closed (`stop/`). `console/` is the console server (with a `[console]` section): HTTPS on `bind`
   (every interface, port 8443, by default) with a configured certificate or one generated into
   `data_dir` on first run, whose SHA-256 fingerprint every start prints (`tls.rs`); one generated
   password, printed once and kept as an Argon2id hash, with a per-client rate limit (`login.rs`);
@@ -95,8 +96,9 @@ list.
   (`server.rs`); the live WebSocket feed (`live.rs`); the figures, views, totals and in-memory equity
   curves (`board.rs`) the refresher reads from the node through the bot's paced pool
   (`refresh.rs`); and the embedded app (`assets.rs`), which `build.rs` lists from `console/dist`.
-  `files.rs` writes files only the bot's user can read. No route moves funds away from an account's
-  own key or returns a key. Its `README.md` lists every file.
+  `files.rs` writes files only the bot's user can read. The funding routes (`console/funding/`,
+  with `[chain]`) declare, deposit, claim and withdraw for the accounts named, as jobs, and read
+  their figures in the background while the console watches; no request names a destination. No route moves funds away from an account's own key or returns a key. Its `README.md` lists every file.
 - **config/** — `example.toml`, the bot's documented example config, with a `[console]` section and a
   strategy's `bounds`, which the config tests load.
 - **console/** — the Vite, React and TypeScript app. `src/main.tsx` mounts `App.tsx` (the page frame,
@@ -109,9 +111,13 @@ list.
   (`session-store.ts`); `src/lib/` holds pure helpers (exact decimals, formatting, market names,
   routes, curve layout, parameter checks, reconnect delay); `src/pages/` has the login, overview and
   account pages; `src/components/` the shared components and the app context; `src/test-harness.tsx`
-  mounts the app over stand-in calls for the component tests (`App.test.tsx`, `controls.test.tsx`).
-  `stub/` is a stand-in console API with three accounts (`npm run stub`), and `browser-test/run.mjs`
-  the Playwright test run against it or a bot's console from outside the repository. Config:
+  mounts the app over stand-in calls for the component tests (`App.test.tsx`, `controls.test.tsx`,
+  `funding.test.tsx`); the funding page (`pages/FundingPage.tsx`, `components/Funding*.tsx`) reads
+  `/api/funding` on a timer (`use-funding.ts`), its answers parsed in `api/funding-parsers.ts` (types in `funding-types.ts`, fixtures in `funding-fixtures.ts`), each
+  action's state in `use-funding-action.ts`.
+  `stub/` is a stand-in console API with three accounts and their funding (`npm run stub`), and
+  `browser-test/run.mjs` and `funding.mjs` the Playwright tests run against it or a bot's console from
+  outside the repository. Config:
   `index.html`, `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`, `tsconfig.json`;
   Node.js from `.nvmrc`, exact versions pinned by `.npmrc` and `package-lock.json`. `npm run build`
   writes the gitignored `dist/`, which the `trader` binary embeds when built after it.
@@ -175,7 +181,10 @@ list.
   the API's figures against the node's answers; `dev-console.sh`, the console app's scenario on the
   real server: three accounts trading, then the browser test signs in, checks each account against the
   API, stops and starts a strategy, flattens an account, and checks phone width and the keyboard (run
-  by hand: it needs Playwright in a scratch directory); `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
+  by hand: it needs Playwright in a scratch directory); `dev-console-funding.sh`, the console's funding on
+  the chain stack: two accounts the bot started without a credit are declared, deposited into (one from
+  its own wallet, one from the funding key's), claimed for and withdrawn from through the Funding page,
+  every balance checked on chain and in the node (run by hand: Playwright and Foundry); `check-file-loc.sh`, the 500-line cap per Rust file, opted in per crate, with
   `check-file-loc-test.sh` testing its 500/501-line boundary and rejection in each opted-in crate;
   `dev-stack-test.sh`, testing the dev stack's cached paths against a stand-in cargo;
   `check-merge-approved.sh`, the merge queue's approval gate, with `check-merge-approved-test.sh`
@@ -219,7 +228,9 @@ Run from the repo root:
   `npm run typecheck`, `npm test`, `npm run build`; `npm audit --audit-level=high`; `npm run dev`
   serves it on loopback, `npm run stub` runs the stand-in API; the browser test:
   `CONSOLE_URL=… CONSOLE_PASSWORD=… PLAYWRIGHT_DIR=<scratch dir with playwright 1.64.0> node browser-test/run.mjs`,
-  or against the real server: `PLAYWRIGHT_DIR=<scratch dir> ./scripts/dev-console.sh` (about five minutes)
+  or against the real server: `PLAYWRIGHT_DIR=<scratch dir> ./scripts/dev-console.sh` (about five minutes);
+  the funding page's, on the chain stack: `PLAYWRIGHT_DIR=<scratch dir> ./scripts/dev-console-funding.sh` (about
+  fifteen minutes, up to forty; also needs Anvil, `cast`, and `forge` once per engine commit)
 - CI scripts test: `./scripts/ci-test.sh` (needs `jq` and `yq`); the dev stack's: `./scripts/dev-stack-test.sh`
   (needs `git`)
 - Merge approval gate tests: `scripts/check-merge-approved-test.sh` (stubs the GitHub API; needs
@@ -261,7 +272,8 @@ Run from the repo root:
 - **The node's answers are verified.** Every signed answer and stream frame is checked against the
   node's signer before the bot acts on it; one that fails the check is no data.
 - **Keys stay with the bot.** No route of the console returns a key, and nothing the console can do
-  moves funds away from an account's own key.
+  moves funds away from an account's own key: the funding routes act for the accounts they name and
+  take no destination.
 - **Public text.** The repository is public. Its README, docs, code comments, issues, and PR text
   are polished prose that never describes agent workflow, review rounds, or waves of work (that
   lives only inside `agents/`). They name no competing product and no product monkeytrading is

@@ -11,7 +11,8 @@ pub mod declare;
 pub mod deposit;
 pub mod withdraw;
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
@@ -50,6 +51,10 @@ pub struct Lifecycle {
     chain_id: u64,
     vault: Address,
     funding: Option<AccountKey>,
+    /// One deposit at a time pays from each address, from its allowance check to its deposit's
+    /// sending: the deposits of one payer share one allowance, which each sets for itself. A payer is
+    /// an account's key or the funding key, so the map holds at most one entry per key.
+    deposit_turns: Mutex<BTreeMap<Address, Arc<tokio::sync::Mutex<()>>>>,
     settle_timeout: Duration,
     poll_interval: Duration,
 }
@@ -128,9 +133,16 @@ impl Lifecycle {
             chain_id: node_cfg.chain_id,
             vault: Address::from(node_cfg.vault.0),
             funding,
+            deposit_turns: Mutex::default(),
             settle_timeout,
             poll_interval,
         })
+    }
+
+    /// Whether a funding key is configured, which `Source::Funding` and the gas of claims and
+    /// withdrawals need.
+    pub fn has_funding(&self) -> bool {
+        self.funding.is_some()
     }
 
     /// What `account` holds and owes.

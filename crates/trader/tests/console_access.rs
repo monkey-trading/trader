@@ -27,6 +27,19 @@ fn api_routes() -> Vec<(Method, String, Option<serde_json::Value>)> {
         (Method::POST, format!("/api/accounts/{a}/strategies/0/start"), None),
         (Method::POST, format!("/api/accounts/{a}/strategies/0/stop"), None),
         (Method::PUT, format!("/api/accounts/{a}/strategies/0/params"), params),
+        (Method::GET, "/api/funding".into(), None),
+        (
+            Method::POST,
+            "/api/funding/declare".into(),
+            Some(json!({ "class": "professional", "statement": "x", "accounts": [a] })),
+        ),
+        (
+            Method::POST,
+            "/api/funding/deposit".into(),
+            Some(json!({ "accounts": [a], "amount": "1", "from": "account" })),
+        ),
+        (Method::POST, "/api/funding/claim".into(), Some(json!({ "accounts": [a] }))),
+        (Method::POST, "/api/funding/withdraw".into(), Some(json!({ "accounts": [a] }))),
         (Method::POST, "/api/logout".into(), None),
     ]
 }
@@ -197,9 +210,10 @@ async fn answers_carry_the_security_headers() {
     running.stop_after(&stand_in).await.unwrap();
 }
 
-/// No answer carries the account's key, in any form, and no route moves funds or reads a key.
+/// No answer carries the account's key, in any form, and no route moves funds away from an account's
+/// own key or reads a key: the paths that would name a destination or a key do not exist.
 #[tokio::test]
-async fn no_route_returns_a_key_or_moves_funds() {
+async fn no_route_returns_a_key_or_names_a_destination() {
     let stand_in = StandIn::start().await;
     seed(&stand_in);
     let dir = tempfile::tempdir().unwrap();

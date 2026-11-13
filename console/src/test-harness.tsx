@@ -38,6 +38,11 @@ export function stubApi(
     flatten: vi.fn<Api["flatten"]>(done),
     setStrategyRunning: vi.fn<Api["setStrategyRunning"]>(done),
     setParams: vi.fn<Api["setParams"]>(done),
+    funding: vi.fn<Api["funding"]>(() => Promise.resolve({ status: "ok", value: { enabled: false } })),
+    declare: vi.fn<Api["declare"]>(() => Promise.resolve({ status: "ok", value: [] })),
+    deposit: vi.fn<Api["deposit"]>(() => Promise.resolve({ status: "ok", value: [] })),
+    claim: vi.fn<Api["claim"]>(() => Promise.resolve({ status: "ok", value: [] })),
+    withdraw: vi.fn<Api["withdraw"]>(() => Promise.resolve({ status: "ok", value: [] })),
     overview,
   };
 }

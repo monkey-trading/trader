@@ -4,6 +4,8 @@
 //! confirms what is left. Accounts stop side by side under the node's pacing; one that fails to
 //! stop does not hold back the others, and a signer that is not the node's ends them all at once.
 
+mod quotes;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +26,7 @@ use crate::bot::Halt;
 use crate::bot::fleet::EXPIRES_IN_MS;
 use crate::bot::orders::log_order_events;
 use crate::bot::run::Runner;
+use crate::bot::stop::quotes::Quotes;
 use crate::keys::AccountKey;
 use crate::node::{Admission, CallError, Node};
 use crate::stream::message::{CommandMessage, Head};
@@ -42,17 +45,9 @@ const MAX_EXPIRY_WAIT: Duration = Duration::from_millis(EXPIRES_IN_MS as u64 + 5
 const QUOTE_AGE: Duration = Duration::from_secs(2);
 /// How many times a close reads the marks again after waiting too long to be admitted.
 const QUOTE_ATTEMPTS: u32 = 3;
-
-/// Each traded market's mark, where there is one.
-type Marks = BTreeMap<MarketId, Option<Fixed>>;
-
-/// The markets' marks as the node gives them, read again when the last read is older than
-/// `QUOTE_AGE`, shared by every account's stop.
-struct Quotes {
-    /// The log's last mark of each traded market, which stands in for one the node does not give.
-    last: Marks,
-    read: Mutex<Option<(Instant, Marks)>>,
-}
+/// How many times a cancel or close the node refused for its nonce, which another request of the
+/// account took (such as the console's withdrawal), is signed again on the next nonce.
+const NONCE_ATTEMPTS: u32 = 3;
 
 /// A close an account's flatten signed, reported before it is sent: the account's slot, the
 /// signature, and the expiry until which the close may still enter the log.
@@ -235,34 +230,6 @@ impl Runner {
     }
 }
 
-impl Quotes {
-    /// The marks of the traded markets as the node gives them, and when they were read: again when the
-    /// last read is older than `QUOTE_AGE`; the log's last mark stands in for one the node does not give.
-    /// Error cases:
-    /// - an answer signed by another key than the signer
-    async fn get(&self, node: &Node) -> Result<(Marks, Instant), Failed> {
-        let mut held = self.read.lock().await;
-        if let Some((at, marks)) = held.as_ref().filter(|(at, _)| at.elapsed() < QUOTE_AGE) {
-            return Ok((marks.clone(), *at));
-        }
-        let marks = match node.markets().await {
-            Ok(listed) => self
-                .last
-                .iter()
-                .map(|(id, mark)| (*id, listed.body.iter().find(|m| m.spec.id == *id).and_then(|m| m.mark).or(*mark)))
-                .collect(),
-            Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
-            Err(e) => {
-                warn!("the markets' marks were not read: {e}");
-                self.last.clone()
-            }
-        };
-        let read_at = Instant::now();
-        *held = Some((read_at, marks.clone()));
-        Ok((marks, read_at))
-    }
-}
-
 impl Stop {
     /// Stops the account: cancels its resting orders, closes its positions when configured, and
     /// confirms with a read.
@@ -354,18 +321,26 @@ impl Stop {
     }
 
     /// Signs and sends a cancel of every resting order, on the account's next nonce, once the node's
-    /// limits let it go. A failed cancel is logged: the account read that follows shows what it did.
+    /// limits let it go, and again on the next nonce when the node refuses it for its nonce. A failed
+    /// cancel is logged: the account read that follows shows what it did.
     async fn cancel(&self, account: AccountId) -> Result<(), Failed> {
-        self.check_halt()?;
-        let Some(nonce) = self.nonce(account).await? else { return Ok(()) };
-        let admission = self.admit(account).await?;
-        let Some(expires_at) = self.expiry() else { return Ok(()) };
-        let hash = cancel_all_hash(&self.domain, account, nonce, expires_at);
-        let auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
-        match self.node.cancel_all(&CancelAllRequest { account, auth }, admission).await {
-            Ok(answer) => log_order_events(account, &answer.body),
-            Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
-            Err(e) => warn!(%account, "the cancel failed: {e}"),
+        for attempt in 1..=NONCE_ATTEMPTS {
+            self.check_halt()?;
+            let Some(nonce) = self.nonce(account).await? else { return Ok(()) };
+            let admission = self.admit(account).await?;
+            let Some(expires_at) = self.expiry() else { return Ok(()) };
+            let hash = cancel_all_hash(&self.domain, account, nonce, expires_at);
+            let auth = Some(RequestAuth { nonce, expires_at, signature: self.key.sign(&hash) });
+            match self.node.cancel_all(&CancelAllRequest { account, auth }, admission).await {
+                Ok(answer) => log_order_events(account, &answer.body),
+                Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
+                Err(e @ CallError::Refused { status: 409, .. }) if attempt < NONCE_ATTEMPTS => {
+                    info!(%account, "the cancel's nonce was taken by another request of the account; signing again: {e}");
+                    continue;
+                }
+                Err(e) => warn!(%account, "the cancel failed: {e}"),
+            }
+            break;
         }
         Ok(())
     }
@@ -373,60 +348,84 @@ impl Stop {
     /// Signs and sends the closes of the positions in `held`: one request for the markets that share
     /// a slippage bound, each market quoted at the node's mark as it was read no more than
     /// `QUOTE_AGE` before the request was admitted, which is when it is signed, and bounded as its
-    /// strategy sets. A failed close is logged: the account read that follows shows what it did.
+    /// strategy sets; again on the next nonce when the node refuses one for its nonce. A failed close
+    /// is logged: the account read that follows shows what it did.
     async fn close(&self, account: AccountId, held: &[(MarketId, Fixed, i64)]) -> Result<(), Failed> {
         let mut by_slippage: BTreeMap<i64, Vec<(MarketId, Fixed)>> = BTreeMap::new();
         for (market, qty, slippage) in held.iter().filter(|(_, qty, _)| !qty.is_zero()) {
             by_slippage.entry(*slippage).or_default().push((*market, *qty));
         }
         for (slippage, markets) in by_slippage {
-            self.check_halt()?;
-            let Some(nonce) = self.nonce(account).await? else { continue };
-            // The marks are read, and then the limits let the request go; if that took long, again.
-            let (marks, admission) = {
-                let mut attempt = 0;
-                loop {
-                    let (marks, read_at) = self.quotes.get(&self.node).await?;
-                    let admission = self.admit(account).await?;
-                    attempt += 1;
-                    if read_at.elapsed() < QUOTE_AGE {
-                        break (marks, admission);
-                    }
-                    if attempt == QUOTE_ATTEMPTS {
-                        return Err(Failed::Incomplete(format!(
-                            "the marks were older than {QUOTE_AGE:?} when the close could be sent, {QUOTE_ATTEMPTS} times"
-                        )));
-                    }
+            for attempt in 1..=NONCE_ATTEMPTS {
+                if !self.close_group(account, slippage, &markets, attempt == NONCE_ATTEMPTS).await? {
+                    break;
                 }
-            };
-            let closes: Vec<CloseEntry> = markets
-                .iter()
-                .filter_map(|(market, qty)| {
-                    let quoted = marks.get(market).copied().flatten()?;
-                    info!(%account, market, position = %qty, %quoted, "closing the position");
-                    Some(CloseEntry { market: *market, quoted })
-                })
-                .collect();
-            if closes.is_empty() {
-                continue;
-            }
-            let Some(expires_at) = self.expiry() else { continue };
-            let mut request = CloseAllRequest { account, closes, max_slippage_bps: Some(slippage), auth: None };
-            let hash = close_all_hash(&self.domain, &request, nonce, expires_at);
-            let signature = self.key.sign(&hash);
-            request.auth = Some(RequestAuth { nonce, expires_at, signature });
-            if let Some((slot, report)) = &self.report {
-                // The runner takes this in before it applies any message of the log, so the fill
-                // the close makes is known for the account's own. A runner that ended has no use for it.
-                let _ = report.send((*slot, signature, expires_at)).await;
-            }
-            match self.node.close_all(&request, admission).await {
-                Ok(answer) => log_order_events(account, &answer.body),
-                Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
-                Err(e) => warn!(%account, "the close failed: {e}"),
             }
         }
         Ok(())
+    }
+
+    /// Signs and sends one close of `markets`, which share the slippage bound `slippage`; whether the
+    /// node refused it for its nonce, and it is to be signed again, which the `last` attempt is not.
+    /// Error cases:
+    /// - see `close`
+    async fn close_group(
+        &self,
+        account: AccountId,
+        slippage: i64,
+        markets: &[(MarketId, Fixed)],
+        last: bool,
+    ) -> Result<bool, Failed> {
+        self.check_halt()?;
+        let Some(nonce) = self.nonce(account).await? else { return Ok(false) };
+        // The marks are read, and then the limits let the request go; if that took long, again.
+        let (marks, admission) = {
+            let mut attempt = 0;
+            loop {
+                let (marks, read_at) = self.quotes.get(&self.node).await?;
+                let admission = self.admit(account).await?;
+                attempt += 1;
+                if read_at.elapsed() < QUOTE_AGE {
+                    break (marks, admission);
+                }
+                if attempt == QUOTE_ATTEMPTS {
+                    return Err(Failed::Incomplete(format!(
+                        "the marks were older than {QUOTE_AGE:?} when the close could be sent, {QUOTE_ATTEMPTS} times"
+                    )));
+                }
+            }
+        };
+        let closes: Vec<CloseEntry> = markets
+            .iter()
+            .filter_map(|(market, qty)| {
+                let quoted = marks.get(market).copied().flatten()?;
+                info!(%account, market, position = %qty, %quoted, "closing the position");
+                Some(CloseEntry { market: *market, quoted })
+            })
+            .collect();
+        if closes.is_empty() {
+            return Ok(false);
+        }
+        let Some(expires_at) = self.expiry() else { return Ok(false) };
+        let mut request = CloseAllRequest { account, closes, max_slippage_bps: Some(slippage), auth: None };
+        let hash = close_all_hash(&self.domain, &request, nonce, expires_at);
+        let signature = self.key.sign(&hash);
+        request.auth = Some(RequestAuth { nonce, expires_at, signature });
+        if let Some((slot, report)) = &self.report {
+            // The runner takes this in before it applies any message of the log, so the fill
+            // the close makes is known for the account's own. A runner that ended has no use for it.
+            let _ = report.send((*slot, signature, expires_at)).await;
+        }
+        match self.node.close_all(&request, admission).await {
+            Ok(answer) => log_order_events(account, &answer.body),
+            Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
+            Err(e @ CallError::Refused { status: 409, .. }) if !last => {
+                info!(%account, "the close's nonce was taken by another request of the account; signing again: {e}");
+                return Ok(true);
+            }
+            Err(e) => warn!(%account, "the close failed: {e}"),
+        }
+        Ok(false)
     }
 
     /// Ends the stop of an account that has stopped trading since it began, before anything more is signed.

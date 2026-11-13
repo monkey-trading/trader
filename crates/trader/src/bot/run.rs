@@ -45,6 +45,9 @@ pub(super) enum Done {
         nonce: u64,
         /// The expiry the request was signed with: until the log passes it, it may still enter the log.
         expires_at: engine_core::types::Millis,
+        /// The target an order was decided from, decided again if the node refuses its nonce while its
+        /// series is still on the warm-up `generation` it was decided in; none for a flatten's close.
+        wanted: Option<(crate::bot::fleet::Wanted, u32)>,
         outcome: Result<Verified<Vec<engine_core::event::Event>>, CallError>,
     },
     Nonce {
@@ -129,14 +132,15 @@ impl Runner {
     }
 
     /// Applies the log's messages and the answers to the requests they start, until `stop`
-    /// completes or the bot halts.
+    /// completes or the bot halts. A fleet that started with no account, which the console's funding
+    /// serves, follows the log until `stop`.
     /// Error cases:
     /// - see `Halt`
     pub async fn follow(&mut self, stream: &mut Stream, stop: impl Future<Output = ()>) -> Result<(), Halt> {
         tokio::pin!(stop);
         let mut requests = self.console.as_mut().and_then(ConsoleEnd::take_requests);
         loop {
-            if self.fleet.failed == self.fleet.accounts.len() {
+            if !self.fleet.accounts.is_empty() && self.fleet.failed == self.fleet.accounts.len() {
                 let reasons: Vec<_> = self.fleet.accounts.iter().filter_map(|a| a.failed.as_deref()).collect();
                 return Err(Halt::AllStopped(reasons.join("; ")));
             }
@@ -187,8 +191,8 @@ impl Runner {
     /// - an answer signed by another key than the signer
     pub(super) fn handle(&mut self, done: Done) -> Result<(), Halt> {
         match done {
-            Done::Order { account, assignment, nonce, expires_at, outcome } => {
-                self.order_done(account, assignment, nonce, expires_at, outcome)
+            Done::Order { account, assignment, nonce, expires_at, wanted, outcome } => {
+                self.order_done(account, assignment, nonce, expires_at, wanted, outcome)
             }
             Done::Nonce { account, outcome } => self.nonce_done(account, outcome),
             Done::View { account, outcome } => self.view_done(account, outcome),

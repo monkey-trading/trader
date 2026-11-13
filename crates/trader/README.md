@@ -44,7 +44,9 @@ MONKEY, and withdraws, every payout going to the account's own address.
   a read is sent again after it, an order is not
 - Each account tracks its own nonce, moved on after an order the engine used, and read again from
   `/v1/accounts/{address}/nonce` after any refusal, rejection or unanswered order. One request is out
-  per account at a time, so nonces reach the node in order
+  per account at a time, so nonces reach the node in order. An order the node refuses for its nonce
+  never entered the log, as when a withdrawal of the account took the nonce, so its target is decided
+  again on the next nonce, once for its bar
 - The node's time for an order is counted on from a verified answer to a request sent after the
   bar completed, on the monotonic clock, not read again for every order
 - Five seconds of log after the index the bot derives is exact, a warm-up from the node's
@@ -169,8 +171,20 @@ MONKEY, and withdraws, every payout going to the account's own address.
   until it ends. The runner acts on each request, and the controls are saved in
   `data_dir/accounts/`, so a restart keeps a stop; a stop that cannot be saved holds, and says so. A
   parameter change builds the strategy afresh and warms its series up again from the node's marks
-  history, so the strategy decides nothing until it has. No route moves funds away from an
-  account's own key or returns a key
+  history, so the strategy decides nothing until it has. With `[chain]`, the funding routes
+  (`/api/funding`, and `declare`, `deposit`, `claim` and `withdraw` beneath it) read each account's
+  funding and run each action for the accounts a request names, one background job per account that
+  ends once its transactions land: a declaration is refused unless it carries the class's statement,
+  an account with a job that has not ended is refused another, and a request names no destination,
+  so every payout goes to the account's own address. The accounts are every one whose key unlocked,
+  those that could not start for want of a credit included, and a bot none of whose accounts started
+  still serves them. A job shows each transaction it sent and where it stands; the jobs live in
+  memory, so a restart ends them, logging each that had not ended, and the figures show what landed.
+  The figures are read in the background while the console is watching, at most a quarter of
+  `per_ip`, accounts never read or changed by a job first, and answered from the last reads. A key
+  sends one transaction at a time, and one deposit from the funding key at a time sets and spends its
+  allowance. A request may name 500 accounts (32 KiB). No route moves funds away from an account's own
+  key or returns a key
 - The console app's build, `console/dist`, embedded at compile time and served at `/`, with any
   page path routed to its `index.html`; a binary built without it serves a page saying so
 
@@ -197,7 +211,8 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `src/node/tls.rs`: the pinned or publicly rooted TLS connections
 - `src/chain/mod.rs`: `Chain`, its endpoints and reads
 - `src/chain/rpc.rs`: the JSON-RPC calls the bot makes of an endpoint
-- `src/chain/send.rs`: the transactions the bot sends, followed to their receipts
+- `src/chain/send.rs`: the transactions the bot sends, one per key at a time, followed to their receipts
+- `src/chain/progress.rs`: where a task's transactions report their steps while a call is running
 - `src/chain/contracts.rs`: the vault's and the token's bindings, and revert reasons
 - `abi/`: the entries of the vault's and OpenZeppelin `ERC20`'s ABIs the bot uses, generated from
   the pinned engine commit's build; `scripts/dev-stack.sh --chain` checks they still match it
@@ -228,8 +243,10 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `src/bot/flatten.rs`: the daily loss limit's close of an account, one slippage group at a time
 - `src/bot/reads.rs`: the reads of accounts, taken in the order they were started, and the writes of their state
 - `src/bot/startup.rs`: unlocking the keys, the startup reads, and the stop signals
-- `src/bot/stop.rs`: the stop: the wait for the log, then each account's signed cancel and close,
-  and the check; the flatten runs the same stop for one account
+- `src/bot/stop/`: the stop (`mod.rs`): the wait for the log, then each account's signed cancel and
+  close, each signed again when another request of the account took its nonce, and the check; the
+  flatten runs the same stop for one account; the markets' marks its closes are quoted at
+  (`quotes.rs`)
 - `src/config/bounds.rs`: the parameters the console may set for a strategy, each with its lowest and
   highest value, and what a change must hold to; `bounds/tests.rs` tests them
 - `src/console/mod.rs`: preparing the console's data directory, and the server's accept loop
@@ -240,6 +257,9 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `src/console/guard.rs`: the request span, the security headers, the limits on a body's time and
   size, and the `Origin` and session checks
 - `src/console/routes.rs`: the API's routes
+- `src/console/funding/`: the funding of the accounts, their status reads and the jobs that declare,
+  deposit, claim and withdraw for them (`mod.rs`), the jobs' states and transactions (`jobs.rs`), the
+  figures as the console reads them (`view.rs`) and the routes (`routes.rs`)
 - `src/console/server.rs`: the state the routes share
 - `src/console/live.rs`: the live WebSocket feed
 - `src/console/board.rs`: the figures, account views, totals and equity curves the API serves;
@@ -255,8 +275,15 @@ MONKEY, and withdraws, every payout going to the account's own address.
   entitlement
 - `tests/common/console.rs`: the bot run with its console, and an HTTPS and WebSocket client for it
 - `tests/console_access.rs`: the login, its rate limit, sessions, the `Origin` check, the security
-  headers, that no answer carries a key or no route moves funds, and the unbuilt page
+  headers, that no answer carries a key and no route names a destination for funds, and the unbuilt page
 - `tests/console_logs.rs`: that no log line carries the password
+- `tests/console_funding.rs`: the funding routes against the stand-in node and chain: every account
+  with a key listed, a bot with none funded, a declaration's statement and signer, refusals that start
+  nothing, the largest request, that no request names a destination, and the halt on an answer another
+  key signed
+- `tests/console_funding_jobs.rs`: the funding jobs: a busy account, a failed job's reason and
+  transactions, a deposit's transactions, jobs the funding key pays taking turns, a replaced
+  transaction, a withdrawal left in the queue, and the jobs a stop or halt ends
 - `tests/console_reads.rs`: the figures against the node's answers, marks and close-outs, the fill
   history, the equity curve, failed reads, and the live feed
 - `tests/console_controls.rs`: stopping and starting an account and its strategy, parameters within
@@ -288,8 +315,11 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `tests/bot_warm_up.rs`: the warm-up from the marks history, which moves of the mark make bars,
   and where the stream starts
 - `tests/common/chain.rs`: a local stand-in chain that decodes each signed transaction and applies
-  the token's and the vault's calls the bot makes, with their events
+  the token's and the vault's calls the bot makes, with their events, or holds them in its pool until
+  a test releases them
 - `tests/common/lifecycle.rs`: the lifecycle's config and the node's answers the tests script
+- `tests/common/lifecycle/funding.rs`: the bot with its console and funding, and the funding routes'
+  answers, for the funding tests
 - `tests/chain.rs`: the chain client's endpoints, broadcast and refusals
 - `tests/lifecycle_declare.rs`, `tests/lifecycle_deposit.rs`, `tests/lifecycle_claim.rs`,
   `tests/lifecycle_withdraw.rs`: each action against the stand-in node and chain

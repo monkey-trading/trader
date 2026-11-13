@@ -288,12 +288,12 @@ fn describe_status(status: &AccountStatus) -> String {
 }
 
 /// MONKEY base units as MONKEY.
-fn monkey(units_of: U256) -> String {
+pub(crate) fn monkey(units_of: U256) -> String {
     units(units_of, MONKEY_DECIMALS)
 }
 
 /// `value` base units of a token with `decimals`, as a decimal without trailing zeros.
-fn units(value: U256, decimals: u8) -> String {
+pub(crate) fn units(value: U256, decimals: u8) -> String {
     let text = format_units(value, decimals).expect("decimals within range");
     match text.split_once('.') {
         Some((whole, fraction)) => {

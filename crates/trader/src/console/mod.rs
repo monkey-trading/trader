@@ -6,6 +6,7 @@
 
 mod assets;
 mod board;
+mod funding;
 mod guard;
 mod live;
 mod login;
@@ -14,6 +15,8 @@ mod routes;
 mod server;
 mod session;
 mod tls;
+
+pub use funding::Funding;
 
 use std::io::Write;
 use std::net::SocketAddr;
@@ -96,7 +99,8 @@ impl Prepared {
 
 impl Console {
     /// Starts serving `accounts` on the prepared address, with figures `node` gives, read at most at
-    /// half `per_ip`, the node's limit on the bot.
+    /// half `per_ip`, the node's limit on the bot, and the accounts' `funding` when there is any, its
+    /// figures read at most at a quarter.
     /// Error cases:
     /// - the prepared listener cannot be handed to the async runtime
     pub async fn start(
@@ -105,6 +109,7 @@ impl Console {
         node: Arc<Node>,
         per_ip: RateSection,
         accounts: Vec<AccountLink>,
+        funding: Option<Arc<Funding>>,
     ) -> anyhow::Result<Self> {
         let local_addr = prepared.local_addr()?;
         prepared.listener.set_nonblocking(true).context("the console's listener")?;
@@ -127,8 +132,14 @@ impl Console {
                 }
             })
             .collect();
-        let router = routes::router(Arc::new(Server::new(accounts, views, prepared.password_hash)));
+        let reads = funding.clone();
+        let router = routes::router(Arc::new(Server::new(accounts, views, prepared.password_hash, funding)));
         let mut tasks = JoinSet::new();
+        // An answer another key signed, read by a funding read or action, ends this task, which stops
+        // the bot as one the runner reads does.
+        if let Some(funding) = reads {
+            tasks.spawn(funding.run_reads(per_ip));
+        }
         tasks.spawn(serve(listener, prepared.identity.config, router));
         tasks.spawn(refresher.run());
         Ok(Self { tasks })

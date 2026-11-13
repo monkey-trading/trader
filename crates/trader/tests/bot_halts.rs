@@ -1,6 +1,6 @@
 //! The bot against the stand-in when something goes wrong: a new listing of its market, a log
-//! message it cannot read, a node that signs with another key mid-run, and a stop that cannot
-//! confirm the account is left as it should be.
+//! message it cannot read, a node that signs with another key mid-run, a stop whose request's nonce
+//! another request took, and a stop that cannot confirm the account is left as it should be.
 
 mod common;
 
@@ -188,6 +188,30 @@ async fn a_declined_close_is_an_incomplete_stop() {
     assert!(err.to_string().contains("a position of 1 in market 1 are left"), "{err:#}");
     let posts = stand_in.with(|i| i.posts.clone());
     assert_eq!(posts.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["/v1/positions/close-all"]);
+}
+
+/// A cancel or close the node refuses for its nonce, which another request of the account took, is
+/// signed again on the node's next nonce, and the stop completes.
+#[tokio::test]
+async fn a_stop_signs_a_cancel_or_close_again_when_its_nonce_was_taken() {
+    for (path, position, orders) in [
+        ("/v1/orders/cancel-all", json!({}), json!({ "9": resting_order(9) })),
+        ("/v1/positions/close-all", json!({ "1": { "qty": "1", "entry": "99" } }), json!({})),
+    ] {
+        let stand_in = StandIn::start().await;
+        stand_in.with(|i| {
+            i.markets = json!([btc_usd(Some("99"))]);
+            i.accounts.insert(account().to_string(), account_view("1000", position, orders));
+            i.nonce = 7;
+            i.statuses.push_back(409);
+        });
+        stand_in.tick(T0 + MINUTE);
+        let dir = tempfile::tempdir().unwrap();
+        run(config(&stand_in, dir.path(), "1m"), async {}).await.unwrap();
+        let posts = stand_in.with(|i| i.posts.clone());
+        assert_eq!(posts.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), [path, path], "{path}");
+        assert_eq!((&posts[0].1["auth"]["nonce"], &posts[1].1["auth"]["nonce"]), (&json!(7), &json!(8)), "{path}");
+    }
 }
 
 /// A position larger than one close takes, long or short, is closed by further reduce-only closes on

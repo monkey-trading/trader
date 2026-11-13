@@ -1,4 +1,6 @@
 /** The console's only door to the bot: every route, request and response check lives here. */
+import { readFunding, readJobs } from "./funding-parsers";
+import type { DepositFrom, EligibilityClass, Funding, FundingJob } from "./funding-types";
 import { parseWith, readAccount, readError, readFills, type Parsed } from "./parsers";
 import type { AccountView, Fill } from "./types";
 
@@ -43,6 +45,13 @@ export interface Api {
   flatten(address: string): Promise<Outcome<Warned | null>>;
   setStrategyRunning(address: string, strategyId: number, running: boolean): Promise<Outcome<Warned | null>>;
   setParams(address: string, strategyId: number, params: Readonly<Record<string, string | number>>): Promise<Outcome<Warned | null>>;
+  /** What each account holds and owes, and the funding jobs. */
+  funding(): Promise<Outcome<Funding>>;
+  /** Each action starts one job per account, answered with the jobs as they stand. */
+  declare(accounts: readonly string[], cls: EligibilityClass, statement: string): Promise<Outcome<readonly FundingJob[]>>;
+  deposit(accounts: readonly string[], amount: string, from: DepositFrom): Promise<Outcome<readonly FundingJob[]>>;
+  claim(accounts: readonly string[]): Promise<Outcome<readonly FundingJob[]>>;
+  withdraw(accounts: readonly string[], amount: string | null): Promise<Outcome<readonly FundingJob[]>>;
 }
 
 /** The routes of the bot's console API, the one place their paths are written. */
@@ -58,6 +67,8 @@ export const routes = {
     `/api/accounts/${encodeURIComponent(address)}/strategies/${String(id)}/${action}`,
   strategyParams: (address: string, id: number) =>
     `/api/accounts/${encodeURIComponent(address)}/strategies/${String(id)}/params`,
+  funding: "/api/funding",
+  fundingAction: (action: "declare" | "deposit" | "claim" | "withdraw") => `/api/funding/${action}`,
   /** The live feed's path, on the page's own origin. */
   feed: "/api/live",
 } as const;
@@ -188,5 +199,13 @@ export function createApi(fetchFn: Fetch, deadlineMs?: number): Api {
         ? control("POST", routes.strategyRun(address, id, "start"), {})
         : savedOutcome(await control("POST", routes.strategyRun(address, id, "stop"), {}), STOP_UNSAVED),
     setParams: (address, id, params) => control("PUT", routes.strategyParams(address, id), params),
+    funding: () => call(fetchFn, "GET", routes.funding, undefined, readFunding, deadlineMs),
+    declare: (accounts, cls, statement) =>
+      call(fetchFn, "POST", routes.fundingAction("declare"), { accounts, class: cls, statement }, readJobs, deadlineMs),
+    deposit: (accounts, amount, from) =>
+      call(fetchFn, "POST", routes.fundingAction("deposit"), { accounts, amount, from }, readJobs, deadlineMs),
+    claim: (accounts) => call(fetchFn, "POST", routes.fundingAction("claim"), { accounts }, readJobs, deadlineMs),
+    withdraw: (accounts, amount) =>
+      call(fetchFn, "POST", routes.fundingAction("withdraw"), amount === null ? { accounts } : { accounts, amount }, readJobs, deadlineMs),
   };
 }

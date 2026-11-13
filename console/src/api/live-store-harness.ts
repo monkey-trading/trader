@@ -22,6 +22,7 @@ export function harness(api: Partial<Api> = {}) {
   const store = new LiveStore({
     api: {
       login: unused, logout: unused, setAccountRunning: unused, flatten: unused, setStrategyRunning: unused, setParams: unused,
+      funding: unused, declare: unused, deposit: unused, claim: unused, withdraw: unused,
       session: () => Promise.resolve(ok(null)),
       account: () => Promise.resolve(ok<AccountView>(readAccount(viewBody()))),
       fills: () => Promise.resolve(ok<readonly Fill[]>(readFills({ fills: [fillBody()] }))),

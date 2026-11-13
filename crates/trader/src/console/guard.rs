@@ -17,6 +17,7 @@ use tokio::time::{Instant, timeout};
 use tracing::{Instrument, debug, info_span, warn};
 
 use crate::console::Server;
+use crate::console::funding;
 use crate::console::live::LIVE_PATH;
 use crate::console::session;
 
@@ -40,6 +41,12 @@ const SECURITY_HEADERS: [(&str, &str); 6] = [
 pub const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// The largest request body: a login or a strategy's parameters.
 pub const MAX_BODY: usize = 4096;
+
+/// The largest body the request to `path` may carry: a funding request names accounts, as many as a
+/// fleet may have.
+pub fn body_limit(path: &str) -> usize {
+    if path.starts_with("/api/funding/") { funding::MAX_BODY } else { MAX_BODY }
+}
 
 /// A console request's id, which the requests it sends an account carry.
 #[derive(Clone, Copy, Debug)]
@@ -69,11 +76,12 @@ pub async fn headers(request: Request, next: Next) -> Response {
     response
 }
 
-/// Reads the request's whole body, at most `MAX_BODY` bytes, within `BODY_TIMEOUT`, before the
+/// Reads the request's whole body, at most `body_limit` bytes, within `BODY_TIMEOUT`, before the
 /// handler sees it; refuses one too slow (408) or too large (413).
 pub async fn read_body(request: Request, next: Next) -> Response {
     let (parts, body) = request.into_parts();
-    let bytes = match timeout(BODY_TIMEOUT, to_bytes(body, MAX_BODY)).await {
+    let limit = body_limit(parts.uri.path());
+    let bytes = match timeout(BODY_TIMEOUT, to_bytes(body, limit)).await {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(_)) => {
             return refusal(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large", "the request's body is too large");

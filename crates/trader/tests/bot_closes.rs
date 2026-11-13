@@ -75,10 +75,17 @@ async fn a_queued_close_waits_while_its_account_is_behind_the_log() {
     tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
 }
 
-/// A close of two markets the engine rejects, with no fill, moved nothing: the next try closes both again,
-/// and does not wait for the first's request to expire.
+/// A close of two markets the engine rejects with no fill, or the node refuses for its nonce, moved
+/// nothing: the next try closes both again, and does not wait for the first's request to expire.
 #[tokio::test]
 async fn a_rejected_close_of_two_markets_is_tried_again_for_both() {
+    for nonce_refused in [false, true] {
+        a_close_of_two_markets_is_tried_again_after(nonce_refused).await;
+    }
+}
+
+/// That test with the first close rejected by the engine, or refused for its nonce.
+async fn a_close_of_two_markets_is_tried_again_after(nonce_refused: bool) {
     let stand_in = StandIn::start().await;
     let dir = tempfile::tempdir().unwrap();
     stand_in.with(|i| {
@@ -88,8 +95,12 @@ async fn a_rejected_close_of_two_markets_is_tried_again_for_both() {
         i.head_seq = 10;
         i.nonce = 3;
         i.settle = false;
-        i.replies.push_back(json!([{ "type": "order_rejected", "account": account(), "client_id": 0,
-            "reason": { "kind": "market_closed" } }]));
+        if nonce_refused {
+            i.statuses.push_back(409);
+        } else {
+            i.replies.push_back(json!([{ "type": "order_rejected", "account": account(), "client_id": 0,
+                "reason": { "kind": "market_closed" } }]));
+        }
     });
     let eth = "\n[[account.strategy]]\nmarket = \"ETH-USD\"\nbar = \"1m\"\nkind = \"sma_crossover\"\nfast = 1\n\
                slow = 2\nmax_slippage_bps = 25\n\n[sizing]";

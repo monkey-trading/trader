@@ -7,6 +7,7 @@
 //! without answering, one that answered that its nonce is spent because it was itself mined, or one
 //! that fails to say whether it holds a receipt, leaves it to be followed.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use tokio::time::{Instant, sleep};
 use tracing::{debug, info, warn};
 
 use crate::chain::contracts::revert_reason;
+use crate::chain::progress::{self, Progress};
 use crate::chain::{Call, Chain, ReadError, TxError, describe, request};
 use crate::keys::AccountKey;
 
@@ -111,8 +113,21 @@ impl Chain {
         self.send_with(payer, call, Some(guard)).await
     }
 
-    /// `send` and `send_guarded`.
+    /// `send` and `send_guarded`, one transaction of the payer's at a time: a call that arrives while
+    /// another of the payer's is being followed waits for it, and reports its progress to the task's
+    /// sink (`progress`).
     async fn send_with(&self, payer: &AccountKey, call: &Call, guard: Option<&Guard<'_>>) -> Result<Sent, TxError> {
+        let from = Address::from(payer.address().0);
+        let turn = {
+            let mut senders = self.senders.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::clone(senders.entry(from).or_default())
+        };
+        let _turn = turn.lock().await;
+        self.send_unqueued(payer, call, guard).await
+    }
+
+    /// `send_with`, without waiting for the payer's turn.
+    async fn send_unqueued(&self, payer: &AccountKey, call: &Call, guard: Option<&Guard<'_>>) -> Result<Sent, TxError> {
         let from = Address::from(payer.address().0);
         let what = &call.what;
         let not_sent = |reason: String| TxError::NotSent { what: what.clone(), reason };
@@ -179,6 +194,7 @@ impl Chain {
                 }
                 Broadcast::Refused(message) => return Err(not_sent(message)),
             }
+            progress::report(Progress::Sent { tx: hash, what: what.clone() });
             signed.push((hash, gas_limit));
             match self.follow(call, from, nonce, &signed, guard).await? {
                 Followed::Mined(at, receipt) => {
@@ -190,9 +206,10 @@ impl Chain {
                 }
                 Followed::Landed(hash) => {
                     info!(tx = %hash, "{what}: landed, though no endpoint holds its receipt yet");
+                    progress::report(Progress::Mined { tx: hash });
                     return Ok(Sent::Landed(hash));
                 }
-                Followed::Replaced => {}
+                Followed::Replaced => progress::report(Progress::Replaced { tx: hash }),
             }
             if attempt == NONCE_ATTEMPTS {
                 return Err(not_sent(format!("another transaction from {from} took each nonce it was signed on")));
@@ -367,8 +384,10 @@ impl Chain {
         }
         if receipt.status() {
             info!(tx = %hash, block = receipt.block_number, gas_used = receipt.gas_used, "{}: mined", call.what);
+            progress::report(Progress::Mined { tx: hash });
             return Ok(receipt);
         }
+        progress::report(Progress::Reverted { tx: hash });
         let (reason, revert) = if receipt.gas_used >= gas_limit {
             (format!("it ran out of its {gas_limit} gas"), None)
         } else {

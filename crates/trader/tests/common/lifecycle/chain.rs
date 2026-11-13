@@ -88,6 +88,10 @@ pub struct Ledger {
     pub pinned: Vec<(String, Value)>,
     /// The hashes of the blocks it gave.
     pub served: Vec<B256>,
+    /// While set, each raw transaction waits in the pool unmined until `release`, the pending nonce
+    /// counting it; those waiting, in the order they came.
+    pub hold: bool,
+    pub held: Vec<Bytes>,
 }
 
 /// A running stand-in chain.
@@ -120,6 +124,16 @@ impl ChainStandIn {
     /// The transactions taken so far.
     pub fn sent(&self) -> Vec<Sent> {
         self.with(|l| l.sent.clone())
+    }
+
+    /// Mines the transactions waiting in the pool, in the order they came, and those that come next at once.
+    pub fn release(&self) {
+        self.with(|l| {
+            l.hold = false;
+            for raw in std::mem::take(&mut l.held) {
+                l.take(&raw).expect("a transaction held in the pool applies");
+            }
+        });
     }
 
     /// Waits until `count` transactions were taken; the last one.
@@ -180,7 +194,8 @@ impl Ledger {
             "eth_getTransactionCount" => {
                 self.pin(method, &params[1]);
                 let address: Address = serde_json::from_value(params[0].clone()).unwrap();
-                let pending = if params[1] == "pending" { self.pending } else { 0 };
+                let held = self.held.iter().filter(|raw| sender(raw).0 == address).count() as u64;
+                let pending = if params[1] == "pending" { self.pending + held } else { 0 };
                 Ok(quantity((self.nonces.get(&address).copied().unwrap_or_default() + pending).into()))
             }
             "eth_estimateGas" | "eth_call" => {
@@ -226,6 +241,13 @@ impl Ledger {
                         *next = (*next).max(nonce + 1);
                     }
                     return Err(json!({ "code": -32000, "message": message }));
+                }
+                if self.hold {
+                    let envelope = TxEnvelope::decode_2718(&mut &raw[..]).expect("a signed transaction");
+                    if !self.held.contains(&raw) {
+                        self.held.push(raw);
+                    }
+                    return Ok(json!(envelope.tx_hash()));
                 }
                 self.take(&raw)
             }

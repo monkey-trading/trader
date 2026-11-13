@@ -139,6 +139,7 @@ impl Runner {
                     assignment: first,
                     nonce,
                     expires_at,
+                    wanted: None,
                     outcome: node.close_all(&request, admission).await,
                 }
             }
