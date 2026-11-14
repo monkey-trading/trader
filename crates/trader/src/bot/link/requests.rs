@@ -255,3 +255,6 @@ fn answer(reply: Reply, result: Result<(), Refusal>) {
     }
     let _ = reply.send(result);
 }
+
+#[cfg(test)]
+mod tests;

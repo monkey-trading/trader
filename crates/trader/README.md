@@ -258,7 +258,8 @@ MONKEY, and withdraws, every payout going to the account's own address.
   again
 - `src/bot/link.rs`: the accounts' side of the console: their status, built from the fleet, and
   the runner's end of the console's requests
-- `src/bot/link/requests.rs`: the runner acting on the console's requests, and the flatten
+- `src/bot/link/requests.rs`: the runner acting on the console's requests, and the flatten;
+  `link/requests/tests.rs` tests a control queued before its account halted
 - `src/bot/link/saved.rs`: the controls the console set, saved per account; `link/tests.rs` tests
   them
 - `src/bot/warm.rs`: the warm-up of each series from the marks history
