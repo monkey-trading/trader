@@ -130,15 +130,20 @@ each account before the bot trades it, with `trader accounts` as [Funding an acc
 shows or from a wallet.
 
 On SIGINT or SIGTERM the bot cancels each account's resting orders and, with `close_on_stop`,
-closes its positions, which can take a minute or two, and longer with many accounts, so give it
-that long to stop. It exits non-zero when it halts, such as when an answer fails its signature
+closes its positions, which takes the log's wait of up to 45 seconds and then, for each account, about
+six requests (reads, a nonce, a cancel and a close) paced under the node's `[node.limits] per_ip`,
+50 a second by default. Give it that long to stop: 60 seconds plus six requests for each account
+over `per_second`, so 300 seconds for 1,000 accounts at the default, which the examples below use
+(a one-account stop ends at once, whatever the timeout). A kill in the middle of the stop leaves the
+accounts it had not reached with their resting orders and positions, and nothing reports which: read
+them with `trader accounts status` before the next start. It exits non-zero when it halts, such as when an answer fails its signature
 check, and leaves the accounts as they are for you to look at; a supervisor that restarts it on
 failure resumes trading without that look.
 
 ### Docker
 
 ```bash
-docker run --name trader --network host --user "$(id -u trader):$(id -g trader)" --stop-timeout 120 \
+docker run --name trader --network host --user "$(id -u trader):$(id -g trader)" --stop-timeout 300 \
   --volume /etc/trader:/config:ro --volume /var/lib/trader:/var/lib/trader \
   ghcr.io/monkey-trading/trader:<tag>
 ```
@@ -176,7 +181,7 @@ After=network-online.target
 User=trader
 StateDirectory=trader
 ExecStart=/usr/local/bin/trader run --config /etc/trader/trader.toml
-TimeoutStopSec=120
+TimeoutStopSec=300
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -226,7 +231,10 @@ trader accounts --config bot.toml withdraw --amount 250       # USDC to the acco
 An optional `[funding]` key pays the gas of claims and withdrawals for every account, and
 `deposit --from-funding` deposits from its wallet with the vault's `depositFor`; it never receives a
 payout. Without it, each account needs ether for its own gas. With `[claims]`, `trader run` claims
-each account's MONKEY once the unclaimed amount reaches a threshold.
+each account's MONKEY once the unclaimed amount reaches a threshold. `trader run` unlocks the funding
+key at startup with `[claims]`, or with both `[console]` and `[chain]`, and exits when it will not
+unlock, so its password must be in the bot's own environment or file, not only where `trader accounts`
+runs.
 
 `./scripts/dev-stack.sh --chain` adds a local Anvil chain, with the vault and a mock USDC deployed
 from the pinned engine commit's contracts and the house funded with 5,000,000 mock USDC, and

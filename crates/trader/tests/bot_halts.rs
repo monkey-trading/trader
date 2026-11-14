@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use common::{
     MINUTE, StandIn, T0, account, account_view, btc_usd, bucket, command, config, posted, prices, resting_order, run,
-    warm,
+    run_recording, warm,
 };
 use engine_core::command::{AdminCommand, Command};
 use engine_core::market::{MarketSpec, PriceRules, QuoteCurrency};
@@ -18,6 +18,7 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use trader::bot::Halt;
+use trader::metrics::Metrics;
 
 /// An applied listing's price rules take effect: with four sources needed, three venues give no
 /// mark and nothing is ordered; back at two, the crossover orders again. A rejected listing changes
@@ -191,7 +192,8 @@ async fn a_declined_close_is_an_incomplete_stop() {
 }
 
 /// A cancel or close the node refuses for its nonce, which another request of the account took, is
-/// signed again on the node's next nonce, and the stop completes.
+/// signed again on the node's next nonce, and the stop completes. The close counts as placed twice and
+/// declined once, in its market.
 #[tokio::test]
 async fn a_stop_signs_a_cancel_or_close_again_when_its_nonce_was_taken() {
     for (path, position, orders) in [
@@ -207,10 +209,20 @@ async fn a_stop_signs_a_cancel_or_close_again_when_its_nonce_was_taken() {
         });
         stand_in.tick(T0 + MINUTE);
         let dir = tempfile::tempdir().unwrap();
-        run(config(&stand_in, dir.path(), "1m"), async {}).await.unwrap();
+        let metrics = Arc::new(Metrics::new());
+        run_recording(config(&stand_in, dir.path(), "1m"), async {}, Arc::clone(&metrics)).await.unwrap();
         let posts = stand_in.with(|i| i.posts.clone());
         assert_eq!(posts.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), [path, path], "{path}");
         assert_eq!((&posts[0].1["auth"]["nonce"], &posts[1].1["auth"]["nonce"]), (&json!(7), &json!(8)), "{path}");
+        if path == "/v1/positions/close-all" {
+            let (text, labels) = (metrics.encode(), format!("account=\"{}\",market=\"BTC-USD\"", account()));
+            for line in [
+                format!("trader_orders_placed_total{{{labels}}} 2"),
+                format!("trader_orders_declined_total{{{labels}}} 1"),
+            ] {
+                assert!(text.lines().any(|l| l == line), "no {line} in\n{text}");
+            }
+        }
     }
 }
 

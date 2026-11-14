@@ -212,7 +212,8 @@ impl Runner {
     /// whose key the node refuses stops, an order refused for a nonce another request of the account
     /// took has its target decided again, and the node's refusal counts as declined in each market the
     /// request named. The engine's rejections count as the log gives them (`Fleet::apply_event`, or
-    /// `Fleet::count_rejections` as the stop reads past the last order), whether this answer came or not.
+    /// `Fleet::count_unfollowed` as the stop reads past the last order, and the expiry of a rejected
+    /// request), whether this answer came or not.
     /// Error cases:
     /// - an answer signed by another key than the signer
     pub(super) fn order_done(
@@ -261,6 +262,11 @@ impl Runner {
                 // no fill is to come from it, for any market it named.
                 if rejected && !answer.body.iter().any(|event| matches!(event, Event::Fill { .. })) {
                     unfence(&mut self.fleet, account, expires_at);
+                }
+                // The rejection is counted from the log, which a stop that began before it was read
+                // reads on for.
+                if rejected {
+                    self.fleet.counts_until = self.fleet.counts_until.max(expires_at);
                 }
                 if rejected { Nonce::Unknown } else { Nonce::Synced(nonce + 1) }
             }

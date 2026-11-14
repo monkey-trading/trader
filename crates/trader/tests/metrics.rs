@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::{
-    MINUTE, StandIn, T0, account, account_view, btc_usd, bucket, command, config, order, own_fill, prices, write_config,
+    MINUTE, StandIn, T0, account, account_view, btc_usd, bucket, command, config, order, own_fill, prices,
+    run_recording, warm, write_config,
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -114,6 +115,113 @@ async fn the_bot_records_its_orders_fills_equity_and_lag() {
     {
         assert!(text.lines().any(|l| l == line), "no {line} after the stop in\n{text}");
     }
+}
+
+/// The engine's rejection of an order out at the stop counts once as declined, whether the log
+/// message that carries it was read before the stop or comes after the order's answer.
+#[tokio::test]
+async fn the_rejection_of_an_order_out_at_the_stop_counts_once() {
+    for read_before_stop in [false, true] {
+        let rejected = json!([{ "type": "order_rejected", "account": account(), "client_id": T0 + 2 * MINUTE,
+            "reason": { "kind": "slippage", "quoted": "102", "live": "104", "slippage_bps": 97 } }]);
+        let (metrics, labels) = stop_with_an_order_out(read_before_stop, Some(rejected.clone()), |body| {
+            command(16, T0 + 2 * MINUTE + 10_000, body, rejected.clone())
+        })
+        .await;
+        let text = metrics.encode();
+        let line = format!("trader_orders_declined_total{{{labels}}} 1");
+        assert!(text.lines().any(|l| l == line), "read before the stop {read_before_stop}: no {line} in\n{text}");
+    }
+}
+
+/// The fill of an order out at the stop, which the log the stop reads gives, counts as a fill.
+#[tokio::test]
+async fn the_fill_of_an_order_out_at_the_stop_counts() {
+    for read_before_stop in [false, true] {
+        let (metrics, labels) =
+            stop_with_an_order_out(read_before_stop, None, |body| own_fill(16, T0 + 2 * MINUTE + 10_000, &body, "1"))
+                .await;
+        let text = metrics.encode();
+        let line = format!("trader_fills_total{{{labels}}} 1");
+        assert!(text.lines().any(|l| l == line), "read before the stop {read_before_stop}: no {line} in\n{text}");
+    }
+}
+
+/// The fill of the stop's final close, which no read of the log follows, counts as a fill, with the
+/// close as placed.
+#[tokio::test]
+async fn the_fill_of_the_final_close_counts() {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        let held = json!({ "1": { "qty": "1", "entry": "99" } });
+        i.accounts.insert(account().to_string(), account_view("1000", held, json!({})));
+        i.replies.push_back(json!([{ "type": "fill", "account": account(), "order_id": 1, "market": 1, "side": "sell",
+            "qty": "1", "price": "99", "index": "99", "spread_bps": 0, "realised_pnl": "0", "profit_fee": "0",
+            "position": "0", "liquidation": false }]));
+    });
+    stand_in.tick(T0 + MINUTE);
+    let dir = tempfile::tempdir().unwrap();
+    let metrics = Arc::new(Metrics::new());
+    run_recording(config(&stand_in, dir.path(), "1m"), async {}, Arc::clone(&metrics)).await.unwrap();
+    let text = metrics.encode();
+    let labels = format!("account=\"{}\",market=\"BTC-USD\"", account());
+    for line in [format!("trader_orders_placed_total{{{labels}}} 1"), format!("trader_fills_total{{{labels}}} 1")] {
+        assert!(text.lines().any(|l| l == line), "no {line} in\n{text}");
+    }
+}
+
+/// Runs the bot until it has an order out, answered with `answer` when given (and otherwise with
+/// nothing), and stops it. The log message of the order, built by `message` from the order's body,
+/// comes before the stop when `read_before_stop`, and otherwise after the stop has had the time to
+/// pass a log read that did not wait for it; the log then moves past the order's expiry. Returns the
+/// metrics once the bot has stopped, and the labels of the account's BTC-USD series.
+async fn stop_with_an_order_out(
+    read_before_stop: bool,
+    answer: Option<serde_json::Value>,
+    message: impl FnOnce(serde_json::Value) -> serde_json::Value,
+) -> (Arc<Metrics>, String) {
+    let stand_in = StandIn::start().await;
+    stand_in.with(|i| {
+        i.markets = json!([btc_usd(Some("99"))]);
+        i.accounts.insert(account().to_string(), account_view("1000", json!({}), json!({})));
+        i.head_seq = 10;
+        i.replies.extend(answer);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let metrics = Arc::new(Metrics::new());
+    let (stop, stopped) = oneshot::channel::<()>();
+    let bot = tokio::spawn(run_recording(
+        config(&stand_in, dir.path(), "1m"),
+        async {
+            _ = stopped.await;
+        },
+        Arc::clone(&metrics),
+    ));
+    warm(&stand_in).await;
+    // The order is signed at the node's time of minute 2 and 20 s, so it expires at minute 2 and 50 s.
+    stand_in.with(|i| {
+        i.time_ms = (T0 + 2 * MINUTE + 20_000) as u64;
+        i.frame_time = Some((T0 + 2 * MINUTE) as u64);
+    });
+    for (seq, ts, mid) in [(14, T0 + MINUTE, "101"), (15, T0 + 2 * MINUTE, "102")] {
+        stand_in.append((seq, 0), command(seq, ts, prices(1, mid, ts), json!([])));
+    }
+    let mut body = order(&stand_in, 1).await;
+    body["type"] = json!("place_order");
+    if read_before_stop {
+        stand_in.append((16, 0), message(body));
+        stand_in.applied((16, 0)).await;
+        stop.send(()).unwrap();
+    } else {
+        stop.send(()).unwrap();
+        // A stop that does not wait for the log has passed its read by now.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        stand_in.append((16, 0), message(body));
+    }
+    stand_in.tick(T0 + 2 * MINUTE + 51_000);
+    tokio::time::timeout(Duration::from_secs(20), bot).await.unwrap().unwrap().unwrap();
+    (metrics, format!("account=\"{}\",market=\"BTC-USD\"", account()))
 }
 
 /// The run serves the bot's metrics on the configured address while the bot trades, and refuses to

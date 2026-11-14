@@ -145,8 +145,10 @@ whole, and the bot refuses an account that holds a position in a market it does 
 ## `[chain]`
 
 Optional. The custody chain the vault is on, Arbitrum in production, for `trader accounts`
-(`status`, `deposit`, `claim` and `withdraw`) and `[claims]`. Without it the bot trades and
-declares, and the chain actions fail.
+(`status`, `deposit`, `claim` and `withdraw`), `[claims]` and the console's funding. Without it the
+bot trades and declares, and the chain actions fail. `trader run` with both `[console]` and `[chain]`
+unlocks the `[funding]` key at startup, as it does with `[claims]`, and exits when the key will not
+unlock, so a password variable set only for `trader accounts` is not enough.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
@@ -162,6 +164,8 @@ declares, and the chain actions fail.
 Optional. A key that pays the gas of every account's MONKEY claims and withdrawals, and that
 `trader accounts deposit --from-funding` deposits USDC from into each account (`Vault.depositFor`).
 It never receives a payout: the vault pays the account. Without it, each account pays its own gas.
+`trader run` unlocks it at startup, and exits when it will not unlock, with `[claims]` or with both
+`[console]` and `[chain]`.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
