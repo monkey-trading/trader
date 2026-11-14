@@ -112,6 +112,18 @@ impl OrderSeries {
         }
     }
 
+    /// Counts each fill among `events`, the engine's answer to a request this process signed, in the
+    /// market it names: for an answer no read of the log follows.
+    pub fn filled(&self, events: &[Event]) {
+        for event in events {
+            if let Event::Fill(fill) = event {
+                for series in self.of(&[fill.market]) {
+                    series.fills.inc();
+                }
+            }
+        }
+    }
+
     fn of<'a>(&'a self, markets: &'a [MarketId]) -> impl Iterator<Item = &'a MarketMetrics> {
         self.0.iter().filter(|(market, _)| markets.contains(market)).map(|(_, series)| series)
     }

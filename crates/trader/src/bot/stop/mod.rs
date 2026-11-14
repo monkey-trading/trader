@@ -169,14 +169,19 @@ impl Runner {
     }
 
     /// Reads the log until a command sequenced after the latest expiry an order signed before the
-    /// stop can carry, this process's or an earlier one's, for at most `MAX_EXPIRY_WAIT`. The log
+    /// stop can carry, this process's or an earlier one's, or that a rejected answer's request could
+    /// carry, whose rejection the log still gives, for at most `MAX_EXPIRY_WAIT`. The log
     /// holds only what is durable, so once it is past that expiry every such order is in it, and in
     /// the accounts a read then gives, or never will be. Returns whether the log got there.
     /// Error cases:
     /// - a frame signed by another key than the signer
     async fn wait_for_log_past(&mut self, stream: &mut Stream) -> Result<bool, Halt> {
-        let barrier =
-            self.fleet.assignments.iter().filter_map(|a| a.expires_at).fold(self.fleet.trading_from, Millis::max);
+        let barrier = self
+            .fleet
+            .assignments
+            .iter()
+            .filter_map(|a| a.expires_at)
+            .fold(self.fleet.trading_from.max(self.fleet.counts_until), Millis::max);
         if self.fleet.log_ts > barrier {
             return Ok(true);
         }
@@ -198,8 +203,8 @@ impl Runner {
                 .filter(|head| head.kind == "command")
                 .and_then(|_| serde_json::from_str::<CommandMessage<'_>>(&frame.msg).ok());
             if let Some(message) = message {
-                // The answer to an order out at the stop left its rejection to the log.
-                self.fleet.count_rejections(&message);
+                // The answer to an order out at the stop left its rejection and fills to the log.
+                self.fleet.count_unfollowed(&message);
                 self.fleet.log_ts = message.ts;
                 if message.ts > barrier {
                     return Ok(true);
@@ -427,9 +432,11 @@ impl Stop {
         match self.node.close_all(&request, admission).await {
             Ok(answer) => {
                 log_order_events(account, &answer.body);
-                // Beside the log, its rejections count as the log gives them; after it, as the answer does.
+                // Beside the log, its rejections and fills count as the log gives them; after it, as the
+                // answer does.
                 if self.report.is_none() {
                     self.series.rejected(&named, &answer.body);
+                    self.series.filled(&answer.body);
                 }
             }
             Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),

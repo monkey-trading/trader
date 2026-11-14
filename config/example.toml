@@ -133,8 +133,10 @@ slow = 20
 # fast = 5
 # slow = 20
 
-# The custody chain, for `trader accounts` (status, deposit, claim, withdraw) and [claims]: Arbitrum
-# in production. Leave the section out to only trade and declare.
+# The custody chain, for `trader accounts` (status, deposit, claim, withdraw), [claims] and the
+# console's funding: Arbitrum in production. Leave the section out to only trade and declare.
+# `trader run` with both [console] and [chain] unlocks the [funding] key at startup, and exits when
+# it will not unlock, so its password must be in the bot's own environment or file.
 [chain]
 # JSON-RPC endpoints, tried in order: a read moves to the next when one fails, and every transaction
 # is sent to each. https://, or, in a dev build, http:// on this machine. A provider's API key in a
@@ -153,7 +155,8 @@ max_fee_gwei = "1"
 
 # A key that pays the gas of every account's MONKEY claims and withdrawals, and that
 # `trader accounts deposit --from-funding` deposits USDC from into each account. It never receives a
-# payout: the vault pays the account. Without it, each account pays its own gas.
+# payout: the vault pays the account. Without it, each account pays its own gas. `trader run` unlocks
+# it at startup when it has [claims], or both [console] and [chain], and exits when it will not unlock.
 # [funding]
 # key = { type = "keystore", path = "keys/funding.json", password = { env = "TRADER_FUNDING_PASSWORD" } }
 

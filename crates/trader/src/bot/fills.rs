@@ -212,16 +212,26 @@ impl Fleet {
         }
     }
 
-    /// Counts the engine's rejections in `message` of requests this process signed, as `apply_event`
-    /// does, for a message the stop reads past without following it: the answer to an order out at
-    /// the stop leaves its rejection to the log. An event that cannot be read counts nothing.
-    pub(super) fn count_rejections(&self, message: &CommandMessage<'_>) {
+    /// Counts the engine's rejections of requests this process signed and the accounts' fills in
+    /// `message`, as `apply_event` does, for a message the stop reads past without following it: the answer to an
+    /// order out at the stop leaves both to the log. An event that cannot be read counts nothing.
+    pub(super) fn count_unfollowed(&self, message: &CommandMessage<'_>) {
         let Some(events) = message.events else { return };
         let _ = for_each_event(events, |event| {
             let head: EventHead<'_> = serde_json::from_str(event.get())?;
-            if let ("order_rejected", Some(account)) = (head.kind, head.account.and_then(|a| self.account_of(a))) {
-                // An unreadable event counts nothing; the stop reads on.
-                let _ = self.count_rejection(account, message, event);
+            let Some(account) = head.account.and_then(|a| self.account_of(a)) else { return Ok(()) };
+            // An unreadable event counts nothing; the stop reads on.
+            match head.kind {
+                "order_rejected" => _ = self.count_rejection(account, message, event),
+                "fill" => {
+                    if let Ok(fill) = serde_json::from_str::<FillRef<'_>>(event.get())
+                        && let Some(series) =
+                            self.assignment_of(account, fill.market).and_then(|a| self.metrics.markets.get(a as usize))
+                    {
+                        series.fills.inc();
+                    }
+                }
+                _ => {}
             }
             Ok(())
         });

@@ -184,7 +184,8 @@ MONKEY, and withdraws, every payout going to the account's own address.
   until it ends. The runner acts on each request, and the controls are saved in
   `data_dir/accounts/`, so a restart keeps a stop; a stop that cannot be saved holds, and says so. A
   parameter change builds the strategy afresh and warms its series up again from the node's marks
-  history, so the strategy decides nothing until it has. With `[chain]`, the funding routes
+  history, so the strategy decides nothing until it has. With `[chain]`, the bot unlocks the
+  `[funding]` key at startup, as with `[claims]`, and exits when it will not unlock, and the funding routes
   (`/api/funding`, and `declare`, `deposit`, `claim` and `withdraw` beneath it) read each account's
   funding and run each action for the accounts a request names, one background job per account that
   ends once its transactions land: a declaration is refused unless it carries the class's statement,
@@ -303,8 +304,8 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `tests/console_logs.rs`: that no log line carries the password
 - `tests/console_funding.rs`: the funding routes against the stand-in node and chain: every account
   with a key listed, a bot with none funded, a declaration's statement and signer, refusals that start
-  nothing, a selection of a fleet over 500 accounts, that no request names a destination, and the halt on an answer another
-  key signed
+  nothing, a selection of a fleet over 500 accounts, that no request names a destination, a funding key that will not unlock
+  stopping the bot, and the halt on an answer another key signed
 - `tests/console_funding_jobs.rs`: the funding jobs: a busy account, a failed job's reason and
   transactions, a deposit's transactions, jobs the funding key pays taking turns, a replaced
   transaction, a withdrawal left in the queue, and the jobs a stop or halt ends
@@ -324,7 +325,8 @@ MONKEY, and withdraws, every payout going to the account's own address.
 - `tests/common/attestation.rs`: the stand-in's attestations: a mock, and a quote the engine's
   stand-in vendor chain signs, with its release manifest and root
 - `tests/attestation.rs`: the bot against an attested stand-in, and the attestations that stop it
-- `tests/metrics.rs`: the bot's orders, fills, equity and lag in its metrics, and the run serving them
+- `tests/docs.rs`: that the README's Docker and systemd stop timeouts fit a stop of 1,000 accounts at the node's default rate
+- `tests/metrics.rs`: the bot's orders, fills, equity and lag in its metrics, the stop's rejections and fills, and the run serving them
 - `tests/node_answers.rs`, `tests/stream.rs`, `tests/bot.rs`: the binary against the stand-in
 - `tests/node_pacing.rs`: the pacer under the node's limit, retry-later answers, and the node's time
 - `tests/many_accounts.rs`: several accounts against the stand-in: one stream connection, each

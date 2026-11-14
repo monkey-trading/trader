@@ -279,6 +279,10 @@ pub struct Fleet {
     /// The latest expiry an order signed before this start can carry. Until the log passes it, an
     /// earlier process's order may still enter the log, and no order is placed.
     pub trading_from: Millis,
+    /// The latest expiry of a request this process signed whose answer carried the engine's rejection.
+    /// The rejection is in the log, which a stop that began first may not have read: it reads the log
+    /// past this expiry too, so the rejection counts once.
+    pub counts_until: Millis,
     /// The time of the last command read from the log.
     pub log_ts: Millis,
     /// When the accounts were last checked for a read they are due.
@@ -445,6 +449,7 @@ impl Fleet {
             market_slot,
             queue,
             trading_from,
+            counts_until: Millis::MIN,
             log_ts: Millis::MIN,
             next_scan: Millis::MIN,
             warm_requests: Vec::with_capacity(8),

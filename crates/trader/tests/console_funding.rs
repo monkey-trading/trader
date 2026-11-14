@@ -14,6 +14,7 @@ use hyper::Method;
 use serde_json::{Value, json};
 
 use common::console::{Running, SAME, seed, within};
+use common::lifecycle::chain::ChainStandIn;
 use common::lifecycle::funding::{CONSOLE, job_id, start, start_with};
 use common::lifecycle::{usdc, wallet};
 use common::{CHAIN_ID, StandIn, VAULT, address, config_many};
@@ -53,6 +54,23 @@ async fn without_a_chain_funding_is_off() {
     let refused =
         running.call(Method::POST, "/api/funding/claim", common::console::SAME, Some(&cookie), Some(body)).await;
     assert_eq!((refused.status, refused.body["code"].clone()), (409, json!("funding_off")));
+}
+
+/// With `[console]` and `[chain]` and no `[claims]`, the bot unlocks the funding key at startup and
+/// exits when it will not unlock, as the README and the example config say.
+#[tokio::test]
+async fn a_funding_key_that_will_not_unlock_stops_a_bot_with_a_console_and_a_chain() {
+    let node = StandIn::start().await;
+    let chain = ChainStandIn::start().await;
+    seed(&node);
+    let dir = tempfile::tempdir().unwrap();
+    let extra = format!(
+        "\n[chain]\nrpc = [\"{}\"]\n[funding]\nkey = {{ type = \"hex_file\", path = \"missing.hex\" }}\n{CONSOLE}",
+        chain.url()
+    );
+    let running = Running::start(config_many(&node, dir.path(), "1m", &[0], &extra)).await;
+    let err = tokio::time::timeout(Duration::from_secs(20), running.task).await.unwrap().unwrap().unwrap_err();
+    assert!(format!("{err:#}").contains("the funding key"), "{err:#}");
 }
 
 /// A declaration is refused unless it carries the class's own statement; with it, it is signed by the
