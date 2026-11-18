@@ -54,10 +54,14 @@ its executions, before each decision to trade, and every minute.
   execution from an order that this process did not sign means that someone else is trading the
   account. The bot then stops that account, and reports `account_shared`. The other accounts carry
   on.
-- **An account that cannot start.** An account whose key does not unlock, which the server has
-  never credited, whose balance is empty, or which holds a market that the bot cannot follow, is
-  reported as `account_failed` and stops alone. So does an account that the server refuses. The
-  other accounts carry on, and the run exits with a non-zero status when it ends.
+- **An account that cannot start.** The bot reports `account_failed` for the account, and stops
+  that account alone, in any of these cases:
+  - the account's key does not unlock;
+  - the server has never credited the account, or its balance is empty;
+  - the account holds a market that the bot cannot follow;
+  - the server refuses the account.
+
+  The other accounts carry on, and the run exits with a non-zero status when it ends.
 
 ## Requests, rate limits and nonces
 
@@ -115,19 +119,20 @@ of the account that matches the log, and they set or refuse the order as follows
 - **Trading hours.** The bot follows a market's hours as the engine prices it. A halt or a closure
   leaves no order, and the first bar after one is treated as a gap.
 
-A share split, or a corporate action that fails, in a traded market halts the bot. A warm-up starts
-after the last step in the history of 40% down or 67% up, which only a split produces. The bot does
-not detect a split smaller than two for one, or a split that happens while it is stopped.
+A share split in a traded market halts the bot, and so does a corporate action in a traded market
+that fails. A warm-up starts after the last step in the history of 40% down or 67% up, which only a
+split produces. The bot does not detect a split smaller than two for one, nor a split that happens
+while it is stopped.
 
 Orders are signed market orders toward each strategy's target, on the account's next nonce, quoted
 at the last reference price. When the server declines an order, the bot logs the server's reason
 and tries again on the next bar. When the engine refuses a reversal as a whole, the bot sends it
 again as a reduce-only close followed by an opening order.
 
-The bot does not send an order for a bar that is more than half a minute behind the server's time,
-whether by the time of the bar's stream message or by the server's time when the order would be
-sent. Nor does it send an order before the log has passed the expiry of the account's last order in
-that market, or of any order that an earlier process may have signed. An order's execution is
+The bot does not send an order for a bar that is more than half a minute behind the server's time.
+It measures that delay both by the time of the bar's stream message and by the server's time when
+the order would be sent. Nor does the bot send an order before the log has passed the expiry of the
+account's last order in that market, and of any order that an earlier process may have signed. An order's execution is
 therefore always in the position before the next decision. Orders expire 30 seconds after they are
 signed, and no order exceeds the engine's limit on a single instruction's size.
 
@@ -142,11 +147,11 @@ account with `close_on_stop`, it also closes the account's positions:
 - The server closes at most a billion units in one request. While a close leaves part of a position
   open, the bot closes again on a fresh nonce, for at most a minute.
 
-A stop that leaves a working order or a position behind, or that cannot confirm that it left none,
-raises an alert and exits with a non-zero status. The stop takes the wait for the log, then a few
-requests per account paced under the rate limits, and a second signal does not cut it short. A
-supervisor's grace period must therefore be longer than the stop, and longer still with many
-accounts. The [README](../README.md#stopping-the-bot) gives the figures.
+If the stop leaves a working order or a position behind, the bot raises an alert and exits with a
+non-zero status. It does the same when it cannot confirm that it left none. The stop takes the wait
+for the log, followed by a few requests for each account, paced under the rate limits. A second
+signal does not cut it short. A supervisor's grace period must therefore be longer than the stop,
+and longer still with many accounts. The [README](../README.md#stopping-the-bot) gives the figures.
 
 ## Halting
 
@@ -168,8 +173,8 @@ they are for their owners to inspect. It raises a Critical alert and exits with 
 - `declare --class <professional|eligible-client>` shows the statement for that class of client,
   and records it, signed by the account, only for an account that you confirm in the terminal or
   with `--confirm <address>`. It needs only the trading server, and no `[chain]` section.
-  Declarations are paced under the server's budget for new accounts, `[node.limits]
-  fresh_accounts`.
+  Declarations are paced under the server's budget for new accounts, which
+  `[node.limits] fresh_accounts` sets.
 - `deposit --amount <USDC>` approves the vault for the amount and deposits it from the account's
   wallet, through the vault's `deposit`. With `--from-funding`, it deposits from the funding key's
   wallet, through `depositFor`. It then waits for the server to credit the deposit, and reports a
@@ -184,8 +189,9 @@ they are for their owners to inspect. It raises a Critical alert and exits with 
   first-out queue, and the bot pays each part that the queue approves with the vault's `withdraw`
   as its authorisation arrives, until nothing more of the request remains in the queue. The bot
   asks for a new authorisation when one has expired unpaid, and asks again after a while if none
-  arrives. It waits for an authorisation that the vault refuses, because of the chain's time or the
-  signer, to be replaced. Without an amount, the command pays what has already been approved.
+  arrives. When the vault refuses an authorisation because of the chain's time or a change of
+  signer, the bot waits for the authorisation to be replaced. Without an amount, the command pays
+  what has already been approved.
 
 Every payout goes to the account's own address. The vault pays a claim or a withdrawal to the
 account it names, and the bot names only an account whose key it holds. The bot also checks that
