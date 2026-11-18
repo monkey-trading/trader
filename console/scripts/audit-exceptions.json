@@ -1,0 +1,10 @@
+{
+  "exceptions": [
+    {
+      "id": "GHSA-fc5q-39xc-vjpf",
+      "reason": "picomatch ReDoS through a crafted glob, with no patched release (every version through 4.0.7 is affected). GitHub withdrew the advisory on 2026-11-18, but npm audit still reports it. The attack needs an attacker-supplied glob. picomatch reaches the console only through development tools (vite and its React plugin, vitest, tinyglobby and typescript-eslint), which compile patterns from the console's own config files; none of them ships in the app the bot embeds, and the built app contains no picomatch code.",
+      "expires": "2026-12-18",
+      "issue": "monkey-trading/trader#89"
+    }
+  ]
+}

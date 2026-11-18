@@ -126,7 +126,11 @@ list.
   action's state in `use-funding-action.ts`.
   `stub/` is a stand-in console API with three accounts and their funding (`npm run stub`), and
   `browser-test/run.mjs` and `funding.mjs` the Playwright tests run against it or a bot's console from
-  outside the repository. Config:
+  outside the repository. `scripts/check-audit.mjs`, run by CI's `console` job: `npm audit` fails it
+  on every high or critical advisory except those an unexpired entry of `scripts/audit-exceptions.json`
+  (GHSA id, reason, expiry date, tracking issue) names, an entry covering a package only when every
+  high or critical advisory reaching it through `via` is excepted, and an expired entry failing the
+  job naming it; its test is `scripts/check-audit.test.mjs`. Config:
   `index.html`, `eslint.config.mjs`, `vite.config.ts`, `vitest.config.ts`, `tsconfig.json`;
   Node.js from `.nvmrc`, exact versions pinned by `.npmrc` and `package-lock.json`. `npm run build`
   writes the gitignored `dist/`, which the `trader` binary embeds when built after it.
@@ -258,7 +262,9 @@ Run from the repo root:
 - File line cap: `./scripts/check-file-loc.sh`; its test: `./scripts/check-file-loc-test.sh`
 - Supply chain: `cargo deny check` (CI runs it; install `cargo-deny` to run it locally)
 - Console, from `console/` (Node.js from `.nvmrc`): `npm ci`, then `npm run lint`,
-  `npm run typecheck`, `npm test`, `npm run build`; `npm audit --audit-level=high`; `npm run dev`
+  `npm run typecheck`, `npm test`, `npm run build`; `node scripts/check-audit.mjs` (`npm audit` less
+  the unexpired entries of `scripts/audit-exceptions.json`), its test
+  `node --test scripts/check-audit.test.mjs`; `npm run dev`
   serves it on loopback, `npm run stub` runs the stand-in API; the browser test:
   `CONSOLE_URL=… CONSOLE_PASSWORD=… PLAYWRIGHT_DIR=<scratch dir with playwright 1.64.0> node browser-test/run.mjs`,
   or against the real server: `PLAYWRIGHT_DIR=<scratch dir> ./scripts/dev-console.sh` (about five minutes);
