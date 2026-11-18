@@ -24,10 +24,14 @@ while IFS= read -r file; do
       areas+=" ci_scripts" ;;
     # The line cap is read by the Rust jobs, and its test by the CI scripts job.
     scripts/check-file-loc.sh) areas+=" rust ci_scripts" ;;
-    # The link checker, its test, the Markdown it reads, and the LICENSE the README links.
-    agents/* | AGENTS.md | CLAUDE.md | README.md | SECURITY.md | LICENSE | scripts/check-agent-links.sh \
+    # The link checker, its test, the Markdown it reads, the LICENSE the README links, and docs/,
+    # which the README links and whose headings the checker reads for a link's fragment.
+    agents/* | AGENTS.md | CLAUDE.md | SECURITY.md | LICENSE | docs/* | scripts/check-agent-links.sh \
       | scripts/check-agent-links-test.sh)
       areas+=" agent_docs" ;;
+    # The README: the link checker reads it, and the Rust tests check its stop timeouts
+    # (crates/trader/tests/docs.rs).
+    README.md) areas+=" rust agent_docs" ;;
     # Read by no build, test, or script.
     crates/*/README.md) ;;
     # The dev stack is read by the dev scenarios, the image's included, and tested by the CI scripts job.
