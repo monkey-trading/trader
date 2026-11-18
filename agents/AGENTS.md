@@ -35,7 +35,8 @@ list.
   `strategies/`), and the controls on an account's orders: sizing (`sizing/`), the risk limits and
   daily loss (`risk/`), equity and margin as the engine works them out (`margin/`), market hours
   (`hours/`), and `controls/`, which turns a target into an order or a reason for none; `tests/`
-  drives it from marks to orders. Its `README.md` lists every file.
+  drives it from marks to orders. Its `README.md` describes the strategies and a table of its
+  modules.
 - **crates/trader/** — `trader`, the binary (`main.rs` over `lib.rs`): `trader run --config` trades
   one or many accounts, each with its own markets and strategies, in one process; `trader addresses`
   prints their addresses. `config/` loads and checks the TOML config (`[[account]]`, `[[account_dir]]`,
@@ -106,10 +107,17 @@ list.
   (`refresh.rs`); and the embedded app (`assets.rs`), which `build.rs` lists from `console/dist`.
   `files.rs` writes files only the bot's user can read. The funding routes (`console/funding/`,
   with `[chain]`) declare, deposit, claim and withdraw for the accounts named (up to every account the bot has in one request), as jobs that hold one of four places only while they work, not while they wait for the node to credit or pay (`chain/idle.rs`), and read
-  their figures in the background while the console watches; no request names a destination. No route moves funds away from an account's own key or returns a key. Its `README.md` lists every file.
+  their figures in the background while the console watches; no request names a destination. No route moves funds away from an account's own key or returns a key. Its `README.md` lists the
+  commands, a table of its modules and the scenario scripts.
 - **config/** — `example.toml`, the bot's documented example config, with a `[console]` section and a
-  strategy's `bounds`, which the config tests load, and `README.md`, the config reference, which
-  documents every key.
+  strategy's `bounds`, which the config tests load, and `README.md`, which introduces the example
+  and its sections and links the full reference, `docs/configuration.md`.
+- **docs/** — pages the README links, written by [readme-writing](skills/readme-writing/SKILL.md):
+  `how-it-works.md` (the bot from start to stop: verification, accounts, pacing and nonces, bars and
+  warm-up, controls and orders, the stop and the halt, the funding commands, the chain, keys and
+  metrics), `configuration.md` (every config section and key, with defaults, limits and the values
+  only a development build accepts, the metrics and the environment) and `console.md` (the console's
+  sign-in, figures, controls, funding jobs, security, API and app).
 - **console/** — the Vite, React and TypeScript app. `src/main.tsx` mounts `App.tsx` (the page frame,
   login or the signed-in pages) over the stores it creates; `src/api/` holds the client with every
   route (`client.ts`), the parsers that check each body and feed message (`parsers.ts`,
@@ -145,9 +153,11 @@ list.
   (base images by digest, the musl standard library by SHA-256, `musl-tools` from a Debian
   snapshot through `docker/apt.conf`, downloads under `docker/retry`); `VARIANT=production` (the
   default) or `dev`, and a `binary` target for the binary alone.
-- **README.md**, **SECURITY.md**, **LICENSE** — the public introduction, the security policy (the
-  private reporting address, response times, disclosure, safe harbour, scope), and Apache License
-  2.0. `docs/security-model.md`, which the policy links, states what each part of the bot is trusted
+- **README.md**, **SECURITY.md**, **LICENSE** — the public introduction, written by
+  [readme-writing](skills/readme-writing/SKILL.md), whose Docker and systemd stop timeouts
+  `crates/trader/tests/docs.rs` checks; the security policy (the private reporting address,
+  response times, disclosure, safe harbour, scope); and Apache License 2.0.
+  `docs/security-model.md`, which the policy links, states what each part of the bot is trusted
   for and its known limits.
 - **.github/workflows/** — `ci.yaml`: fmt, the file line cap, clippy, tests, `cargo-deny`, the dev
   scenarios (`dev-scenarios`: `dev-trade-one`, `dev-trade-many` and `dev-console-api`, and
@@ -371,3 +381,4 @@ skills: section 15 of [development-checklist](rules/development-checklist.md) fo
 - [skills/agent-review-pr/SKILL.md](skills/agent-review-pr/SKILL.md) — review or re-review a GitHub PR via `agent-code-review` (multi-agent on request) and post its in-scope findings — Low confidence rechecked or dropped, points already in the discussion skipped or added as replies — as a PENDING review only after a yes to "Push the draft comments?"; a re-review runs the same flow and also rechecks your earlier threads; never submits; load for "review PR" / "draft review" / "review the PR but don't submit" / "re-check my review".
 - [skills/agent-address-pr-comments/SKILL.md](skills/agent-address-pr-comments/SKILL.md) — answer a PR's open threads and actionable comments: verify, agree the triage with the user, fix what is true and in scope, update the PR description, and post the approved replies as one `COMMENT` review; never approves, requests changes, or resolves; load for "address the PR comments" / "address review feedback" / "reply to the review".
 - [skills/agent-create-worktree/SKILL.md](skills/agent-create-worktree/SKILL.md) — create a worktree under the sibling `trader-worktrees/`, named after the branch, clearing a new branch's leftover fix notes; detached at the head SHA to review a PR; load for "create a worktree" / "spin up a working tree".
+- [skills/readme-writing/SKILL.md](skills/readme-writing/SKILL.md) — write or edit any README or `docs/` page, modelled on go-ethereum's README: one line of identity, status, the supported trading server, how it works today, getting it, what you get, running it case by case with commands run from a fresh clone, contributing, security and licence; crate and directory READMEs of 40–150 lines with a module table, never a file inventory; depth in linked `docs/` pages; complete formal sentences with context first and one condition per clause; no history, accretion, issue numbers, project process, unbacked claims or claims about a strategy's returns; load before writing or editing any README or `docs/` page.

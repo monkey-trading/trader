@@ -296,8 +296,10 @@ The accessibility bar is WCAG 2.2 AA.
 
 ## 16. Docs and indexes
 
-- Are the nearest `AGENTS.md`, README, and runbooks updated for changed commands, paths, env vars,
-  or behavior ([keep-agents-index-in-sync](keep-agents-index-in-sync.md))?
+- Are the nearest `AGENTS.md`, README and `docs/` page updated for changed commands, paths, env
+  vars, or behavior ([keep-agents-index-in-sync](keep-agents-index-in-sync.md))? A passage is
+  rewritten to describe the bot as it is, never extended with a sentence describing the change, by
+  [readme-writing](../skills/readme-writing/SKILL.md).
 
 ## 17. Workspace rules
 
