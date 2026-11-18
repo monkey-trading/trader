@@ -171,9 +171,14 @@ jobs:
       - name: Install from the lockfile
         working-directory: console
         run: npm ci
+      - name: Test the audit check
+        working-directory: console
+        run: node --test scripts/check-audit.test.mjs
+      # Fails on any high or critical advisory in the lockfile's tree, except those an unexpired
+      # entry of scripts/audit-exceptions.json names.
       - name: Audit
         working-directory: console
-        run: npm audit --audit-level=high
+        run: node scripts/check-audit.mjs
       - name: Lint
         working-directory: console
         run: npm run lint
