@@ -147,7 +147,8 @@ list.
   default) or `dev`, and a `binary` target for the binary alone.
 - **README.md**, **SECURITY.md**, **LICENSE** — the public introduction, the security policy (the
   private reporting address, response times, disclosure, safe harbour, scope), and Apache License
-  2.0.
+  2.0. `docs/security-model.md`, which the policy links, states what each part of the bot is trusted
+  for and its known limits.
 - **.github/workflows/** — `ci.yaml`: fmt, the file line cap, clippy, tests, `cargo-deny`, the dev
   scenarios (`dev-scenarios`: `dev-trade-one`, `dev-trade-many` and `dev-console-api`, and
   `dev-strategies`, which cache the engine's built binaries by the pinned commit, the console's
