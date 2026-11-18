@@ -40,8 +40,9 @@ check "a console file feeds the console job, the bot that embeds it and the imag
 check "the image's build, its check, its wrapper and its scenario" "image" \
   "$(areas Dockerfile .dockerignore docker/retry docker/apt.conf scripts/check-image-binary.sh scripts/docker-trader.sh \
     scripts/dev-attestation.sh)"
-check "the README, SECURITY.md and LICENSE feed the link checker" "agent_docs" \
-  "$(areas README.md SECURITY.md LICENSE)"
+check "SECURITY.md, LICENSE and docs/ feed the link checker" "agent_docs" \
+  "$(areas SECURITY.md LICENSE docs/configuration.md docs/guides/console.md)"
+check "the README feeds the link checker and the Rust tests that read it" "agent_docs rust" "$(areas README.md)"
 check "the agent docs and the link checker" "agent_docs" \
   "$(areas agents/AGENTS.md agents/rules/git-workflow.md scripts/check-agent-links.sh scripts/check-agent-links-test.sh)"
 check "the review-delta scripts feed their test and the link checker" "agent_docs agent_scripts" \
