@@ -127,7 +127,7 @@ which belong in module docs (`//!`) next to the code they describe.
   true.
 - **Inventories.** No list of every file, every test, every script, every alert or every config
   key. Name the few the reader needs and link the directory or the reference that has the rest.
-- **Internal references.** No issue numbers, decision ids (D5, #614), PR numbers, branch names,
+- **Internal references.** No issue numbers, decision ids (D5, #12), PR numbers, branch names,
   review rounds, finding ids or audit labels. If a fact matters, state the fact.
 - **How the project is run.** No waves, milestones, agent workflow, review loops or session notes.
   The few rules a contributor meets (CI must pass, a maintainer approves the merge) go in the
