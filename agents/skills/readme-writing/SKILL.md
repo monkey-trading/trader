@@ -58,7 +58,8 @@ In this order, leaving out a section that has nothing true to say:
    makes true.
 2. **Status.** One short paragraph or a small table: what runs for real, what runs against local
    stand-ins, what is not built yet, and whether it holds real funds. Present tense, no dates of
-   past work, no list of everything that ever landed.
+   past work, no list of everything that ever landed. Follow it, under its own heading, with the
+   engine commit the bot supports and what happens against a server built from another.
 3. **How it works.** The model a user needs to predict the bot's behaviour, in plain words: what
    it verifies before it acts, what it does with each bar, when it sends an order and when it
    refuses to, how it stops and when it halts. Use a table where the reader compares values
