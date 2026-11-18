@@ -151,8 +151,8 @@ npm run build
 
 `npm run build` writes `console/dist`. Build the bot after it, so that the bot embeds the app.
 
-To work on the app without a bot, run the stand-in API, which serves three accounts over plain
-HTTP on loopback and prints its address and password:
+To work on the app without a bot, run the stand-in API. It serves four sample accounts, one of
+whose keys would not unlock, over plain HTTP on loopback, and prints its address and password:
 
 ```shell
 npm run stub
