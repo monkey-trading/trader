@@ -408,9 +408,11 @@ change. Keep each new file's import grouping.
 
 ## README
 
-The root `README.md` is the public introduction, in prose; it names how to build the console
-(`npm ci`, `npm run build` in `console/`, with Node.js from `console/.nvmrc`) and run it against a
-bot (`npm run dev`). Keep those commands in step with `console/package.json`.
+The root `README.md` and `docs/console.md` are written by
+[readme-writing](../readme-writing/SKILL.md). Between them they name how to build the console
+(`npm ci`, `npm run build` in `console/`, with Node.js from `console/.nvmrc`), run it against a bot
+or the stand-in API (`npm run dev`, `npm run stub`), and what its pages and API do. Keep those
+commands in step with `console/package.json`.
 
 ## Build configuration
 
