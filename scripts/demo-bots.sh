@@ -138,7 +138,13 @@ for ((n = 0; n < count; n++)); do
     if [[ -n "$rpc" ]]; then
       printf '\n[chain]\nrpc = ["%s"]\nmax_fee_gwei = "100"\n' "$rpc"
     fi
+    # Every bot reaches the node from this machine's one address, which the node's per-address limits count
+    # together: each bot keeps fewer connections and paces its requests to a share of the default budget.
     cat <<CONFIG
+
+[node.limits]
+per_ip = { per_second = 8, burst = 20 }
+connections = 2
 
 [state]
 dir = "state"
