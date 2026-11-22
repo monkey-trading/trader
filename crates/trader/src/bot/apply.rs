@@ -100,10 +100,10 @@ impl Fleet {
         specs.iter().try_for_each(|spec| self.relist_market(ts, spec))
     }
 
-    /// A fast-path vote that raises a followed market's margin bands: the engine takes the stricter bands
-    /// into the market's listing at once, with no `AdminApplied`, so the margin the fleet checks is
-    /// below the one in force. The bot reads the listings when it starts, so the accounts that trade the
-    /// market stop.
+    /// A fast-path vote (which takes `UpsertMarket` and no batch) that raises a followed market's margin
+    /// bands: the engine takes the stricter bands into the market's listing at once, with no
+    /// `AdminApplied`, so the margin the fleet checks is below the one in force. The bot reads the
+    /// listings when it starts, so the accounts that trade the market stop.
     /// Error cases:
     /// - an event the bot cannot read
     fn restricted(&mut self, passed: &PassedProposal, message: &CommandMessage<'_>) -> anyhow::Result<()> {
