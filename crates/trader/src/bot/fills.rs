@@ -14,8 +14,8 @@ use crate::bot::Halt;
 use crate::bot::fleet::Fleet;
 use crate::stream::message::{CommandMessage, EventHead, FillRef, OrderRef, for_each_event};
 
-/// The events that move an account's cash without a fill, each naming the account. From `V80` a
-/// rollover's financing is one `financing_applied` that names no account (`FINANCING_APPLIED`).
+/// The events that move an account's cash without a fill, each naming the account. A rollover's
+/// financing is one `financing_applied` that names no account (`FINANCING_APPLIED`).
 const CASH_EVENTS: [&str; 9] = [
     "corporate_dividend",
     "corporate_cash_in_lieu",
@@ -28,8 +28,8 @@ const CASH_EVENTS: [&str; 9] = [
     "distribution_allocated",
 ];
 
-/// The event that carries a rollover's financing from `V80`: it names no account, so every account
-/// holding a position may have been charged.
+/// The event that carries a rollover's financing: it names no account, so every account holding a
+/// position may have been charged.
 const FINANCING_APPLIED: &str = "financing_applied";
 
 /// The kinds of event the pinned engine writes (`engine_core::event::Event`'s variants, in snake case),
@@ -336,8 +336,8 @@ mod tests {
         }
     }
 
-    /// Every variant of the pinned engine's `Event` is a kind the bot lists, so none takes the slow path
-    /// and none that moves cash goes unseen: serde names every variant in its error for an unknown one.
+    /// Every variant of the pinned engine's `Event` is a kind the bot lists, so none takes the slow path:
+    /// serde names every variant in its error for an unknown one.
     #[test]
     fn every_event_the_pinned_engine_writes_is_listed() {
         let unknown = serde_json::from_str::<Event>(r#"{"type":"no_such_event"}"#).unwrap_err().to_string();
@@ -348,6 +348,22 @@ mod tests {
             assert!(KNOWN_EVENTS.contains(kind), "{kind} is written by the pinned engine and not listed");
         }
         assert_eq!(variants.len(), KNOWN_EVENTS.len(), "a listed kind the engine does not write");
+    }
+
+    /// The engine names the account of a cash event `account`, where the bot reads it.
+    #[test]
+    fn the_engines_cash_events_name_their_account_as_the_bot_reads_it() {
+        let account = "0x0000000000000000000000000000000000000001";
+        for json in [
+            format!(r#"{{"type":"write_off_repaid","account":"{account}","amount":"1"}}"#),
+            format!(r#"{{"type":"financing","account":"{account}","market":1,"amount":"1"}}"#),
+            format!(r#"{{"type":"bad_debt","account":"{account}","amount":"1"}}"#),
+        ] {
+            serde_json::from_str::<Event>(&json).unwrap();
+            let head: crate::stream::message::EventHead<'_> = serde_json::from_str(&json).unwrap();
+            assert!(CASH_EVENTS.contains(&head.kind), "{}", head.kind);
+            assert_eq!(head.account, Some(account), "{}", head.kind);
+        }
     }
 
     /// Every kind the bot skips unread is a variant the pinned engine writes: the engine's reading of

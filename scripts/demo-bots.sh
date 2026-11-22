@@ -45,7 +45,7 @@ stop_bots() {
     [[ -n "$pid" ]] || continue
     # Only a process that is still the bot started with this config is signalled: a PID that has been
     # reused since is left alone.
-    command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    command="$(ps -ww -p "$pid" -o command= 2>/dev/null || true)"
     if [[ "$command" == *" run --config $dir/bot.toml" ]]; then
       kill "$pid" && echo "stopped $pid"
     else
@@ -72,7 +72,9 @@ base_port="${DEMO_BASE_PORT:-4101}"
 trader="${TRADER_BIN:-$root/target/debug/trader}"
 
 [[ "$count" =~ ^[1-6]$ ]] || die "DEMO_BOTS must be 1 to 6"
-[[ "$base_port" =~ ^[0-9]+$ && "$deposit" =~ ^[0-9]+$ ]] || die "DEMO_BASE_PORT and DEMO_DEPOSIT must be whole numbers"
+[[ "$base_port" =~ ^[1-9][0-9]{0,4}$ && "$deposit" =~ ^[0-9]+$ ]] \
+  || die "DEMO_BASE_PORT must be a port from 1 to 65535 and DEMO_DEPOSIT a whole number"
+(( base_port + count - 1 <= 65535 )) || die "DEMO_BASE_PORT and DEMO_BOTS name a port above 65535"
 [[ -x "$trader" ]] || die "no trader binary at $trader; run: cargo build -p trader"
 command -v curl > /dev/null && command -v jq > /dev/null && command -v python3 > /dev/null \
   || die "curl, jq and python3 are needed"
@@ -95,9 +97,9 @@ for ((n = 0; n < count; n++)); do
     || die "console port $port is in use"
 done
 
-# The directory is the script's own: a new one, which holds keys.
-[[ ! -e "$work" ]] || die "$work exists; name a directory that does not"
-mkdir -m 700 -p "$work"
+# The directory is the script's own: claimed here, new, and holding keys.
+mkdir -p "$(dirname "$work")"
+mkdir -m 700 "$work" 2> /dev/null || die "$work exists or cannot be made; name a directory that does not exist"
 
 # Strategy n: its name and its [[account.strategy]] parameters. Every bot trades both markets on
 # one-minute bars.

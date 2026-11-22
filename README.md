@@ -324,9 +324,11 @@ the `[chain]` section as well. `./scripts/dev-lifecycle.sh` takes three accounts
 declarations, deposits, trading, MONKEY claims through a funding key, and a withdrawal on that
 chain.
 
-`./scripts/demo-bots.sh` starts five bots on a development stack, each on its own strategy and its own
-console port, funded and declared, so that their figures can be watched side by side. Its header lists
-the settings it reads, and `DEMO_WORK_DIR=<directory> ./scripts/demo-bots.sh stop` ends them.
+`DEMO_WORK_DIR=<new directory> DEMO_NODE_FILE=<file> ./scripts/demo-bots.sh start` starts five bots on a
+development stack, each on its own strategy and its own console port, funded and declared, so that their
+figures can be watched side by side. The file holds the `[node]` section that `dev-stack.sh` prints, and
+the script's header lists the other settings it reads. `DEMO_WORK_DIR=<directory> ./scripts/demo-bots.sh
+stop` ends exactly those bots.
 
 ### The console
 

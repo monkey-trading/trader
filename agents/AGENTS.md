@@ -87,7 +87,7 @@ list.
   `ERC20` ABIs the bot uses. `tests/` runs it against a local stand-in node
   (`tests/common/`) that signs its answers and frames, enforces a per-address limit and injects
   faults, serves a mock or a test-signed attestation, and a stand-in chain (`tests/common/chain.rs`) that applies the bot's transactions,
-  drives the fleet directly (`tests/fleet.rs`), holds the hot path to two allocations a message
+  drives the fleet directly (`tests/fleet.rs`, and `tests/fleet_events.rs` for rollovers and listings), holds the hot path to two allocations a message
   (`tests/alloc.rs`), and holds an hour of a synthetic log through 1,000 accounts to time and memory
   budgets (`tests/hot_path.rs`). The accounts' side of the console is `bot/link.rs`: each account's
   status on a `watch` channel, built from the fleet (an account that could not start has a halted
