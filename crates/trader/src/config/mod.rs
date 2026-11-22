@@ -129,8 +129,8 @@ pub struct MinuteRateSection {
 }
 
 /// The node's limits on this bot, which the bot paces its requests under. Set them to the node's
-/// `api.per_ip`, to the rate at which it admits an account's signed requests (its `api.per_account`
-/// for an account never credited, its volume tier's rate otherwise) and to its
+/// `api.per_ip`, to the rate at which it admits an account's signed requests (a credited account's
+/// volume tier rate where its tier table names one, its `api.per_account` otherwise) and to its
 /// `api.fresh_accounts.per_client`; the defaults are the engine's development config.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -29,8 +29,8 @@ releases = ["engine-release.toml"]
 
 # The node's limits on this bot, which it paces its requests under so that a burst of orders queues
 # in bar order instead of failing with 429. Set them to the node's api.per_ip, to the rate at which it
-# admits an account's signed requests (api.per_account for an account never credited, and for a credited
-# account its volume tier's rate, 2 a second at tier 0 on the production settings) and to
+# admits an account's signed requests (a credited account's volume tier rate where the node's tier table
+# names one, 2 a second at tier 0 on the production settings, and api.per_account otherwise) and to
 # api.fresh_accounts.per_client, which declarations keep to (a production node allows at most 12 a
 # minute with a burst of 6); these are the engine's development config. `connections` is how many
 # HTTP connections to the node the bot keeps open, besides the one stream; the node caps
