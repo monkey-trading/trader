@@ -155,6 +155,8 @@ impl Runner {
             qty: intent.qty,
             kind: OrderKind::Market { quoted, max_slippage_bps: Some(asg.max_slippage_bps) },
             reduce_only: intent.reduce_only,
+            take_profit: None,
+            stop_loss: None,
             auth: None,
         };
         let signature = account.key.sign(&order_hash(&self.domain, &request, nonce, expires_at));

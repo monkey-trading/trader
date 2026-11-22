@@ -59,7 +59,7 @@ defaults are the engine's development config. Set each one to the server's own v
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `per_ip` | No, `{ per_second = 50, burst = 100 }` | The server's `api.per_ip` limit, which every request counts against. Both values above zero. |
-| `per_account` | No, `{ per_second = 10, burst = 20 }` | The server's `api.per_account` limit, which an account's orders and cancellations count against. Both values above zero. |
+| `per_account` | No, `{ per_second = 10, burst = 20 }` | The rate at which the server admits an account's signed requests. A server applies its `api.per_account` limit to an account that has never been credited, and to a credited account at the rate of its volume tier, which the account's `volume.requests_per_second` shows and which is 2 a second at tier 0 on the production settings. Set it to the rate that applies to the accounts the bot runs. Both values above zero. |
 | `fresh_accounts` | No, `{ per_minute = 600, burst = 20 }` | The server's `api.fresh_accounts.per_client` limit, under which `trader accounts declare` paces declarations. A production server allows at most 12 a minute, with a burst of 6. Both values above zero. |
 | `connections` | No, `4` | How many HTTP connections to the server the bot keeps open, in addition to the stream, from 1 to 16. The server limits connections per address with `api.max_connections_per_ip`. |
 

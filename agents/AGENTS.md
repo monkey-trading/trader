@@ -209,6 +209,9 @@ list.
   a tiny daily loss limit for fifteen minutes, checked against their limits and history;
   `dev-trade-many.sh`: twenty accounts in one process across BTC-USD and ETH-USD, checked for one
   stream connection, no request refused for rate, and each account's fills against its history;
+  `demo-bots.sh`, five bots on a running dev stack for watching, not a scenario: one key, config, strategy and
+  console port each (from 4101), funded through a vault deposit or the dev deposit and declared, run in the
+  background with their PIDs recorded for its `stop`;
   `dev-attestation.sh`, the production build refusing the dev stack's config and the `attestation`
   tests; `docker-trader.sh`, which runs the image as `TRADER_BIN` for a scenario;
   `check-image-binary.sh`, which checks an image's binary is static for its platform and runs;

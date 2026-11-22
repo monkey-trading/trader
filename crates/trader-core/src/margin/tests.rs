@@ -1,5 +1,6 @@
 use engine_core::market::{FinancingSpec, PriceRules, Tier};
 use engine_core::session::Schedule;
+use engine_core::spread_tier::SpreadTier;
 use engine_core::types::AssetClass;
 
 use super::*;
@@ -18,7 +19,7 @@ pub(crate) fn spec(id: MarketId) -> MarketSpec {
         quote_currency: QuoteCurrency::Usd,
         schedule: Schedule::AlwaysOpen,
         margin_tiers: vec![Tier { up_to: Some(fx("2000")), bps: 100 }, Tier { up_to: None, bps: 500 }],
-        spread_tiers: vec![Tier { up_to: None, bps: 0 }],
+        spread_tiers: vec![SpreadTier::bps(None, 0)],
         price_rules: PriceRules { max_age_ms: 1_000, max_divergence_bps: 25, min_sources: 2 },
         max_slippage_bps: 100,
         financing: FinancingSpec { benchmark: "SOFR".into(), markup_bps: 500, day_basis: 360 },
@@ -26,6 +27,9 @@ pub(crate) fn spec(id: MarketId) -> MarketSpec {
         min_order_notional: Fixed::ZERO,
         house_cap_floor: Fixed::ZERO,
         contracts: Vec::new(),
+        markout_floor_bps: None,
+        weekend_margin_bps: 0,
+        min_level_distance_bps: None,
     }
 }
 

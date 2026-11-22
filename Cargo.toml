@@ -14,9 +14,9 @@ trader-core = { path = "crates/trader-core", version = "0.1.0" }
 # The engine's crates, pinned to one commit so the bot signs and verifies exactly what that node
 # release checks, and verifies its attestation as the engine does. A bump moves all three together
 # and names the node releases it supports in the README.
-engine-core = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721b0062e48ee944ab063205f3dbccb01ae6", version = "0.1.0" }
-engine-verify = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721b0062e48ee944ab063205f3dbccb01ae6", version = "0.1.0" }
-engine-wire = { git = "https://github.com/monkey-trading/engine", rev = "ed8f721b0062e48ee944ab063205f3dbccb01ae6", version = "0.1.0" }
+engine-core = { git = "https://github.com/monkey-trading/engine", rev = "d50c99ebe9c512192f1a736f88abf532e972a6db", version = "0.1.0" }
+engine-verify = { git = "https://github.com/monkey-trading/engine", rev = "d50c99ebe9c512192f1a736f88abf532e972a6db", version = "0.1.0" }
+engine-wire = { git = "https://github.com/monkey-trading/engine", rev = "d50c99ebe9c512192f1a736f88abf532e972a6db", version = "0.1.0" }
 
 # The custody chain: transactions, their signing hashes and encoding, and JSON-RPC over reqwest,
 # whose TLS is configured here on ring alone.

@@ -33,7 +33,7 @@ while IFS= read -r file; do
     # (crates/trader/tests/docs.rs).
     README.md) areas+=" rust agent_docs" ;;
     # Read by no build, test, or script.
-    crates/*/README.md) ;;
+    crates/*/README.md | scripts/demo-bots.sh) ;;
     # The dev stack is read by the dev scenarios, the image's included, and tested by the CI scripts job.
     scripts/dev-stack.sh) areas+=" rust image ci_scripts" ;;
     # The Rust jobs, and the image, which builds the crates and runs the many-accounts scenario.
