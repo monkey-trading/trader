@@ -129,15 +129,16 @@ pub struct MinuteRateSection {
 }
 
 /// The node's limits on this bot, which the bot paces its requests under. Set them to the node's
-/// `api.per_ip`, `api.per_account` and `api.fresh_accounts.per_client`; the defaults are the
-/// engine's development config.
+/// `api.per_ip`, to the rate at which it admits an account's signed requests (its `api.per_account`
+/// for an account never credited, its volume tier's rate otherwise) and to its
+/// `api.fresh_accounts.per_client`; the defaults are the engine's development config.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsSection {
     /// Every request the bot makes counts against this bucket.
     #[serde(default = "default_per_ip")]
     pub per_ip: RateSection,
-    /// Orders and cancels count against their account's bucket.
+    /// An account's signed requests (orders, cancels and closes) count against its bucket.
     #[serde(default = "default_per_account")]
     pub per_account: RateSection,
     /// Declarations count against this bucket as well: the node's budget for one client's setup

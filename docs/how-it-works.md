@@ -119,6 +119,9 @@ of the account that matches the log, and they set or refuse the order as follows
 - **Trading hours.** The bot follows a market's hours as the engine prices it. A halt or a closure
   leaves no order, and the first bar after one is treated as a gap.
 
+A listing that gives a traded market a weekend margin also halts the bot, because the bot's margin
+requirement does not follow the weekend margin, which rises as a market's weekend gap nears.
+
 A share split in a traded market halts the bot, and so does a corporate action in a traded market
 that fails. A warm-up starts after the last step in the history of 40% down or 67% up, which only a
 split produces. The bot does not detect a split smaller than two for one, nor a split that happens

@@ -102,7 +102,7 @@ whose private keys this repository publishes for development.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `market` | Yes | The market's symbol, such as `BTC-USD`. The market must be quoted in US dollars and priced from spot quotes. A market with trading hours is traded only while it is open. |
+| `market` | Yes | The market's symbol, such as `BTC-USD`. The market must be quoted in US dollars, priced from spot quotes and without a weekend margin. A market with trading hours is traded only while it is open. |
 | `bar` | Yes | The bar length, in whole minutes from `"1m"` to `"1d"`, aligned to the Unix epoch. |
 | `max_slippage_bps` | Yes | How far from the quoted price a market order may be executed, in bps, from 0 to 10,000. |
 | `kind` | Yes | The strategy, with its parameters measured in bars of `bar`. A parameter of another kind is refused. Accounts that run the same strategy, with the same parameters, in the same market and bar length share one run of it. |

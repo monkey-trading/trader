@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 use engine_core::command::{AdminCommand, Command};
 use engine_core::event::Event;
+use engine_core::market::MarketSpec;
 use engine_core::types::Millis;
 use serde_json::value::RawValue;
 use tracing::{error, info};
@@ -55,7 +56,7 @@ impl Fleet {
                         .map_err(unreadable)?;
                 }
             }
-            ("admin" | "signed_admin", _) => {
+            ("admin" | "signed_admin" | "apply_proposal", _) => {
                 self.relist(message.ts, &message.command().map_err(unreadable)?, &message).map_err(unreadable)?;
             }
             _ => {}
@@ -71,22 +72,37 @@ impl Fleet {
         Ok(())
     }
 
-    /// Takes the rules and hours of a listing that an applied admin command at `ts` sets, for a
-    /// market the fleet follows.
+    /// Takes the rules and hours of each listing that an applied admin command at `ts` sets, for the
+    /// markets the fleet follows: one market's (`UpsertMarket`) or several at once (`RelistMarkets`), whether
+    /// the operator signed the command or a passed vote applied it.
     /// Error cases:
-    /// - the new listing is one the bot cannot follow; a bar length that no longer fits its hours or a
+    /// - a new listing is one the bot cannot follow; a bar length that no longer fits its hours or a
     ///   sizing an account's controls refuse stops only the accounts it concerns
     fn relist(&mut self, ts: Millis, command: &Command, message: &CommandMessage<'_>) -> anyhow::Result<()> {
         let admin = match command {
             Command::Admin(admin) => admin,
             Command::SignedAdmin(request) => &request.command,
+            Command::ApplyProposal(voted) => &voted.command,
             _ => return Ok(()),
         };
-        let AdminCommand::UpsertMarket(spec) = admin else { return Ok(()) };
-        let Some(&slot) = self.market_slot.get(&spec.id) else { return Ok(()) };
-        if !message.events()?.contains(&Event::AdminApplied) {
+        let specs = match admin {
+            AdminCommand::UpsertMarket(spec) => std::slice::from_ref(spec),
+            AdminCommand::RelistMarkets { specs } => specs.as_slice(),
+            _ => return Ok(()),
+        };
+        if !specs.iter().any(|spec| self.market_slot.contains_key(&spec.id))
+            || !message.events()?.contains(&Event::AdminApplied)
+        {
             return Ok(());
         }
+        specs.iter().try_for_each(|spec| self.relist_market(ts, spec))
+    }
+
+    /// Takes the rules and hours of `spec`, an applied listing at `ts`, if the fleet follows its market.
+    /// Error cases:
+    /// - see `relist`
+    fn relist_market(&mut self, ts: Millis, spec: &MarketSpec) -> anyhow::Result<()> {
+        let Some(&slot) = self.market_slot.get(&spec.id) else { return Ok(()) };
         supported(spec)?;
         // What an account cannot follow stops that account; the log stays followable for the others.
         let mut refused = Vec::new();

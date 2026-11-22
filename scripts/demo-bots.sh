@@ -7,7 +7,8 @@
 #   scripts/demo-bots.sh stop    stops exactly the bots `start` started, by the PIDs it recorded
 #
 # Settings, as environment variables:
-#   DEMO_WORK_DIR      required: where the keys, configs, logs and PIDs go (created, mode 700)
+#   DEMO_WORK_DIR      required: a new directory, created here with mode 700, for the keys, configs, logs
+#                      and PIDs
 #   DEMO_NODE_FILE     required: a file holding the [node] section a dev stack prints
 #                      (`scripts/dev-stack.sh` prints it); a [chain] section in it is ignored
 #   DEMO_RPC           the chain's JSON-RPC URL; without it the stack has mock custody and each
@@ -38,16 +39,17 @@ work="${DEMO_WORK_DIR:-}"
 [[ "$work" == /* ]] || die "DEMO_WORK_DIR must be an absolute path"
 
 stop_bots() {
-  local pids="$work/pids" pid command
+  local pids="$work/pids" pid dir command
   [[ -f "$pids" ]] || die "no $pids: nothing was started from this work directory"
-  while read -r pid; do
+  while IFS='|' read -r pid dir; do
     [[ -n "$pid" ]] || continue
-    # Only a process that is still a trader started from this directory is signalled.
+    # Only a process that is still the bot started with this config is signalled: a PID that has been
+    # reused since is left alone.
     command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-    if [[ "$command" == *"trader"*"$work"* ]]; then
+    if [[ "$command" == *" run --config $dir/bot.toml" ]]; then
       kill "$pid" && echo "stopped $pid"
     else
-      echo "skipped $pid: not a bot of $work"
+      echo "skipped $pid: not the bot of $dir"
     fi
   done < "$pids"
 }
@@ -93,9 +95,9 @@ for ((n = 0; n < count; n++)); do
     || die "console port $port is in use"
 done
 
-if [[ -e "$work/pids" ]]; then die "$work already holds a run; stop it and use a new directory"; fi
-mkdir -p "$work"
-chmod 700 "$work"
+# The directory is the script's own: a new one, which holds keys.
+[[ ! -e "$work" ]] || die "$work exists; name a directory that does not"
+mkdir -m 700 -p "$work"
 
 # Strategy n: its name and its [[account.strategy]] parameters. Every bot trades both markets on
 # one-minute bars.
@@ -223,19 +225,35 @@ done
 
 : > "$work/pids"
 chmod 600 "$work/pids"
+pid_of=()
 while IFS='|' read -r id port name dir; do
   [[ -n "$id" ]] || continue
   # The config's relative paths are read from its own directory, so no cd is needed, and $! is the bot.
   nohup "$trader" run --config "$dir/bot.toml" < /dev/null > "$dir/bot.log" 2>&1 &
-  echo $! >> "$work/pids"
-  password=""
-  for _ in $(seq 1 40); do
-    password="$(sed -n 's/^console password.*login\.argon2: //p' "$dir/bot.log")"
-    [[ -z "$password" ]] || break
+  pid_of[id]=$!
+  echo "${pid_of[id]}|$dir" >> "$work/pids"
+done <<< "$summary"
+
+# A bot is up once its accounts have started and its console listens; one that exits first is reported.
+failed=0
+while IFS='|' read -r id port name dir; do
+  [[ -n "$id" ]] || continue
+  up=0
+  for _ in $(seq 1 240); do
+    if grep -q 'started accounts=[1-9]' "$dir/bot.log" && grep -q 'console listening' "$dir/bot.log"; then up=1; break; fi
+    kill -0 "${pid_of[id]}" 2> /dev/null || break
     sleep 0.25
   done
-  echo "bot $id: $name on BTC-USD and ETH-USD, console https://127.0.0.1:$port, password ${password:-(see $dir/bot.log)}"
+  if (( up )); then
+    password="$(sed -n 's/^console password.*login\.argon2: //p' "$dir/bot.log")"
+    echo "bot $id: $name on BTC-USD and ETH-USD, console https://127.0.0.1:$port, password $password"
+  else
+    failed=1
+    echo "bot $id ($name) did not come up; its log, $dir/bot.log, ends:" >&2
+    tail -n 5 "$dir/bot.log" >&2
+  fi
 done <<< "$summary"
 
 echo "Each console uses a self-signed certificate; the bot's log holds its fingerprint."
 echo "Stop them with: DEMO_WORK_DIR=$work $0 stop"
+exit "$failed"

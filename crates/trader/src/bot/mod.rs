@@ -274,14 +274,21 @@ fn signed_elsewhere(e: &anyhow::Error) -> bool {
     matches!(e.downcast_ref::<CallError>(), Some(CallError::WrongSigner { .. }))
 }
 
-/// Checks the bot can follow `spec`'s index from the log: a market quoted in USD and priced from spot
-/// quotes, which may keep trading hours.
+/// Checks the bot can follow `spec`'s index and margin from the log: a market quoted in USD and priced
+/// from spot quotes, which may keep trading hours, and which asks no weekend margin, a requirement
+/// that rises with the clock and that the bot's margin checks do not follow.
 /// Error cases:
 /// - another quote currency, or futures contracts
+/// - a weekend margin
 pub(crate) fn supported(spec: &MarketSpec) -> anyhow::Result<()> {
     anyhow::ensure!(
         spec.quote_currency == QuoteCurrency::Usd && spec.contracts.is_empty(),
         "{} is not a USD market priced from spot quotes, the only markets the bot trades",
+        spec.symbol
+    );
+    anyhow::ensure!(
+        spec.weekend_margin_bps == 0,
+        "{} asks a weekend margin, which the bot's margin checks do not follow",
         spec.symbol
     );
     Ok(())

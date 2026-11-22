@@ -14,23 +14,29 @@ use crate::bot::Halt;
 use crate::bot::fleet::Fleet;
 use crate::stream::message::{CommandMessage, EventHead, FillRef, OrderRef, for_each_event};
 
-/// The events that move an account's cash without a fill, each naming the account.
-const CASH_EVENTS: [&str; 8] = [
+/// The events that move an account's cash without a fill, each naming the account. From `V80` a
+/// rollover's financing is one `financing_applied` that names no account (`FINANCING_APPLIED`).
+const CASH_EVENTS: [&str; 9] = [
     "corporate_dividend",
     "corporate_cash_in_lieu",
     "deposited",
     "withdrawal_approved",
     "close_out",
     "bad_debt",
+    "write_off_repaid",
     "financing",
     "distribution_allocated",
 ];
+
+/// The event that carries a rollover's financing from `V80`: it names no account, so every account
+/// holding a position may have been charged.
+const FINANCING_APPLIED: &str = "financing_applied";
 
 /// The kinds of event the pinned engine writes (`engine_core::event::Event`'s variants, in snake case),
 /// which are skipped without being read. A kind not listed is read as the pinned engine's `Event`,
 /// which refuses one the pinned engine does not write: the bot halts on a log of another version.
 /// A bump of the engine's `rev` that adds a kind needs it listed here to keep the fast path.
-const KNOWN_EVENTS: [&str; 55] = [
+const KNOWN_EVENTS: [&str; 73] = [
     "corporate_action_scheduled",
     "corporate_entitlements_captured",
     "corporate_dividend",
@@ -55,9 +61,14 @@ const KNOWN_EVENTS: [&str; 55] = [
     "order_rejected",
     "order_cancelled",
     "fill",
+    "position_levels_set",
+    "position_level_triggered",
+    "position_levels_removed",
     "close_out",
     "bad_debt",
+    "write_off_repaid",
     "financing",
+    "financing_applied",
     "benchmark_rate_missing",
     "benchmark_rate_undated",
     "benchmark_rate_observed",
@@ -65,6 +76,7 @@ const KNOWN_EVENTS: [&str; 55] = [
     "market_closed",
     "market_rolled",
     "stress_changed",
+    "house_loss_changed",
     "prices_rejected",
     "admin_applied",
     "admin_rejected",
@@ -76,12 +88,24 @@ const KNOWN_EVENTS: [&str; 55] = [
     "staking_rejected",
     "distribution_allocated",
     "operator_share_allocated",
+    "operator_share_withheld",
     "distribution_epoch_closed",
     "distribution_epochs_skipped",
     "rotation_switched",
     "operator_elected",
     "operator_installed",
     "election_rejected",
+    "rotation_set_adopted",
+    "turn_assigned",
+    "turn_refused",
+    "operator_fault_proven",
+    "operator_fault_refused",
+    "turn_taken",
+    "turn_taken_rejected",
+    "proposal_scheduled",
+    "restriction_applied",
+    "proposal_refused",
+    "restriction_lapsed",
     "session_key_registered",
     "session_key_revoked",
     "session_key_rejected",
@@ -101,14 +125,18 @@ impl Fleet {
             return self.corporate_action(message, event);
         }
         if let (true, Some(address)) = (CASH_EVENTS.contains(&head.kind), head.account) {
-            // Cash moves without a fill: the balance held is not the account's, and nothing is valued from
-            // it, or ordered on it, until a read agrees.
             if let Some(account) = self.account_of(address) {
-                let (log_ts, entry) = (self.log_ts, &mut self.accounts[account as usize]);
-                entry.epoch += 1;
-                entry.behind = true;
-                entry.read_after = log_ts;
-                self.want_read(account);
+                self.cash_moved(account);
+            }
+            return Ok(());
+        }
+        if head.kind == FINANCING_APPLIED {
+            // The rollover names no account: each one holding a position may have been charged.
+            for account in 0..self.accounts.len() as u32 {
+                let mut held = self.accounts[account as usize].assignments.clone();
+                if held.any(|a| !self.assignments[a as usize].position.is_zero()) {
+                    self.cash_moved(account);
+                }
             }
             return Ok(());
         }
@@ -182,6 +210,16 @@ impl Fleet {
             }
         }
         Ok(())
+    }
+
+    /// Cash moved without a fill: the balance held is not the account's, and nothing is valued from it,
+    /// or ordered on it, until a read agrees.
+    fn cash_moved(&mut self, account: u32) {
+        let (log_ts, entry) = (self.log_ts, &mut self.accounts[account as usize]);
+        entry.epoch += 1;
+        entry.behind = true;
+        entry.read_after = log_ts;
+        self.want_read(account);
     }
 
     /// A corporate action on a market the fleet trades. A split changes the units of every price the
@@ -296,6 +334,20 @@ mod tests {
         for kind in CASH_EVENTS {
             assert!(KNOWN_EVENTS.contains(&kind), "{kind}");
         }
+    }
+
+    /// Every variant of the pinned engine's `Event` is a kind the bot lists, so none takes the slow path
+    /// and none that moves cash goes unseen: serde names every variant in its error for an unknown one.
+    #[test]
+    fn every_event_the_pinned_engine_writes_is_listed() {
+        let unknown = serde_json::from_str::<Event>(r#"{"type":"no_such_event"}"#).unwrap_err().to_string();
+        let (_, variants) = unknown.split_once("expected one of ").expect("serde lists the variants");
+        let variants: Vec<&str> = variants.split(", ").map(|v| v.split('`').nth(1).expect("quoted")).collect();
+        assert!(variants.len() > 60, "{variants:?}");
+        for kind in &variants {
+            assert!(KNOWN_EVENTS.contains(kind), "{kind} is written by the pinned engine and not listed");
+        }
+        assert_eq!(variants.len(), KNOWN_EVENTS.len(), "a listed kind the engine does not write");
     }
 
     /// Every kind the bot skips unread is a variant the pinned engine writes: the engine's reading of
