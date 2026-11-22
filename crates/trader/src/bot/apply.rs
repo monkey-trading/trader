@@ -8,12 +8,14 @@ use std::time::SystemTime;
 
 use engine_core::command::{AdminCommand, Command};
 use engine_core::event::Event;
+use engine_core::governance::PassedProposal;
+use engine_core::market::MarketSpec;
 use engine_core::types::Millis;
 use serde_json::value::RawValue;
 use tracing::{error, info};
 
 use crate::bot::fleet::{Fleet, Warm};
-use crate::bot::{Halt, bar_fits, supported};
+use crate::bot::{Halt, bar_fits, margin_followed, supported};
 use crate::metrics::{FleetMetrics, Metrics, OrderSeries, lag_seconds};
 use crate::stream::message::{CommandMessage, Envelope, Offset, for_each_event, store_prices};
 
@@ -55,7 +57,7 @@ impl Fleet {
                         .map_err(unreadable)?;
                 }
             }
-            ("admin" | "signed_admin", _) => {
+            ("admin" | "signed_admin" | "apply_proposal" | "pass_proposal", _) => {
                 self.relist(message.ts, &message.command().map_err(unreadable)?, &message).map_err(unreadable)?;
             }
             _ => {}
@@ -71,26 +73,72 @@ impl Fleet {
         Ok(())
     }
 
-    /// Takes the rules and hours of a listing that an applied admin command at `ts` sets, for a
-    /// market the fleet follows.
+    /// Takes the rules and hours of each listing that an applied admin command at `ts` sets, for the
+    /// markets the fleet follows: one market's (`UpsertMarket`) or several at once (`RelistMarkets`), whether
+    /// the operator signed the command or a passed vote applied it.
     /// Error cases:
-    /// - the new listing is one the bot cannot follow; a bar length that no longer fits its hours or a
+    /// - a new listing is one the bot cannot follow; a bar length that no longer fits its hours or a
     ///   sizing an account's controls refuse stops only the accounts it concerns
     fn relist(&mut self, ts: Millis, command: &Command, message: &CommandMessage<'_>) -> anyhow::Result<()> {
         let admin = match command {
             Command::Admin(admin) => admin,
             Command::SignedAdmin(request) => &request.command,
+            Command::ApplyProposal(voted) => &voted.command,
+            Command::PassProposal(passed) => return self.restricted(passed, message),
             _ => return Ok(()),
         };
-        let AdminCommand::UpsertMarket(spec) = admin else { return Ok(()) };
-        let Some(&slot) = self.market_slot.get(&spec.id) else { return Ok(()) };
-        if !message.events()?.contains(&Event::AdminApplied) {
+        let specs = match admin {
+            AdminCommand::UpsertMarket(spec) => std::slice::from_ref(spec),
+            AdminCommand::RelistMarkets { specs } => specs.as_slice(),
+            _ => return Ok(()),
+        };
+        if !specs.iter().any(|spec| self.market_slot.contains_key(&spec.id))
+            || !message.events()?.contains(&Event::AdminApplied)
+        {
             return Ok(());
         }
+        specs.iter().try_for_each(|spec| self.relist_market(ts, spec))
+    }
+
+    /// A fast-path vote (which takes `UpsertMarket` and no batch) that raises a followed market's margin
+    /// bands: the engine takes the stricter bands into the market's listing at once, with no
+    /// `AdminApplied`, so the margin the fleet checks is below the one in force. The bot reads the
+    /// listings when it starts, so the accounts that trade the market stop.
+    /// Error cases:
+    /// - an event the bot cannot read
+    fn restricted(&mut self, passed: &PassedProposal, message: &CommandMessage<'_>) -> anyhow::Result<()> {
+        let Some(AdminCommand::UpsertMarket(spec)) = &passed.command else { return Ok(()) };
+        let Some(&slot) = self.market_slot.get(&spec.id) else { return Ok(()) };
+        if !passed.fast
+            || spec.margin_tiers == self.markets[slot as usize].spec.margin_tiers
+            || !message.events()?.iter().any(|event| matches!(event, Event::RestrictionApplied { .. }))
+        {
+            return Ok(());
+        }
+        let reason = format!(
+            "a vote restricted {} to stricter margin bands, which the bot reads when it starts and does not follow",
+            spec.symbol
+        );
+        let accounts: Vec<u32> =
+            self.markets[slot as usize].assignments.iter().map(|&a| self.assignments[a as usize].account).collect();
+        for account in accounts {
+            self.fail(account, reason.clone());
+        }
+        Ok(())
+    }
+
+    /// Takes the rules and hours of `spec`, an applied listing at `ts`, if the fleet follows its market.
+    /// Error cases:
+    /// - see `relist`
+    fn relist_market(&mut self, ts: Millis, spec: &MarketSpec) -> anyhow::Result<()> {
+        let Some(&slot) = self.market_slot.get(&spec.id) else { return Ok(()) };
         supported(spec)?;
         // What an account cannot follow stops that account; the log stays followable for the others.
         let mut refused = Vec::new();
         let feed = &self.markets[slot as usize];
+        if let Err(e) = margin_followed(spec) {
+            refused.extend(feed.assignments.iter().map(|&a| (self.assignments[a as usize].account, e.to_string())));
+        }
         for &series in &feed.series {
             if let Err(e) = bar_fits(spec, self.series[series as usize].length, ts) {
                 let state = &self.series[series as usize];

@@ -22,7 +22,7 @@ use trader_core::margin::Holding;
 use crate::bot::day::{Saved, SavedPosition, StateFile};
 use crate::bot::fleet::{AccountIn, EXPIRES_IN_MS, Fleet, MarketIn, StrategyIn};
 use crate::bot::link::{self, Kept, Saved as ConsoleSaved, StartFailure};
-use crate::bot::{bar_fits, supported};
+use crate::bot::{bar_fits, margin_followed, supported};
 use crate::config::{AccountPlan, Config, KeySource};
 use crate::keys::AccountKey;
 use crate::metrics::Metrics;
@@ -126,6 +126,7 @@ pub(super) async fn start(
         usable.entry(symbol.clone()).or_insert_with(|| match listed.iter().find(|m| &m.spec.symbol == symbol) {
             None => Err(format!("the node lists no market {symbol}")),
             Some(m) => supported(&m.spec)
+                .and_then(|()| margin_followed(&m.spec))
                 .map(|()| MarketIn { spec: m.spec.clone(), mark: m.mark })
                 .map_err(|e| format!("{e:#}")),
         });

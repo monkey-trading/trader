@@ -109,6 +109,11 @@ The scenario scripts run the bot against a development trading server. Each need
 
 Each script ends with a line that begins `PASS:`.
 
+`scripts/demo-bots.sh` is not a scenario. It starts several bots on one development stack, each on its own
+strategy and console port, so that their figures can be watched side by side: `start` writes a key and a config
+for each bot, funds and declares its account, and runs the bots in the background, and `stop` ends exactly those
+bots. Its header lists the environment variables it reads.
+
 ## License
 
 Apache License 2.0; see [`LICENSE`](../../LICENSE).

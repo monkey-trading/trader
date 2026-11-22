@@ -59,7 +59,7 @@ defaults are the engine's development config. Set each one to the server's own v
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `per_ip` | No, `{ per_second = 50, burst = 100 }` | The server's `api.per_ip` limit, which every request counts against. Both values above zero. |
-| `per_account` | No, `{ per_second = 10, burst = 20 }` | The server's `api.per_account` limit, which an account's orders and cancellations count against. Both values above zero. |
+| `per_account` | No, `{ per_second = 10, burst = 20 }` | The rate at which the server admits an account's signed requests, which orders, cancellations, closes, declarations and withdrawals count against. The server admits a credited account at the rate that its tier table names for the account's volume tier, which the account's `volume.requests_per_second` shows and which is 2 a second at tier 0 on the production settings. Where the tier table names no rate, and for an account that has never been credited, the server admits the account at its own `api.per_account` rate. When the bot's accounts are admitted at different rates, set `per_second` to the lowest of them. For a tier rate, set `burst` to that rate times the seconds that the server's `api.request_bursts` allows, which is 2 on the production template. For the `api.per_account` rate, copy its burst. Both values above zero. |
 | `fresh_accounts` | No, `{ per_minute = 600, burst = 20 }` | The server's `api.fresh_accounts.per_client` limit, under which `trader accounts declare` paces declarations. A production server allows at most 12 a minute, with a burst of 6. Both values above zero. |
 | `connections` | No, `4` | How many HTTP connections to the server the bot keeps open, in addition to the stream, from 1 to 16. The server limits connections per address with `api.max_connections_per_ip`. |
 
@@ -102,7 +102,7 @@ whose private keys this repository publishes for development.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `market` | Yes | The market's symbol, such as `BTC-USD`. The market must be quoted in US dollars and priced from spot quotes. A market with trading hours is traded only while it is open. |
+| `market` | Yes | The market's symbol, such as `BTC-USD`. The market must be quoted in US dollars, priced from spot quotes and without a weekend margin. A market with trading hours is traded only while it is open. |
 | `bar` | Yes | The bar length, in whole minutes from `"1m"` to `"1d"`, aligned to the Unix epoch. |
 | `max_slippage_bps` | Yes | How far from the quoted price a market order may be executed, in bps, from 0 to 10,000. |
 | `kind` | Yes | The strategy, with its parameters measured in bars of `bar`. A parameter of another kind is refused. Accounts that run the same strategy, with the same parameters, in the same market and bar length share one run of it. |
@@ -145,7 +145,7 @@ How large a new position is, for every account that does not set its own `sizing
 | `by` | Yes | `"fixed_notional"` opens a position of `notional` US dollars. `"equity_fraction"` opens a position of `bps` of the account's equity. A position already on the strategy's side keeps its size. |
 | `notional` | With `fixed_notional` | The position's notional value in US dollars, above 0 and at most 1,000,000,000. |
 | `bps` | With `equity_fraction` | The position's notional value in bps of equity, from 1 to 100,000. |
-| `max_leverage` | Yes | The most leverage the account takes on, as notional value over equity. It must be above 0, at most 1,000, and below the market's own maximum leverage, which the market's first margin band sets. |
+| `max_leverage` | Yes | The most leverage the account takes on, as notional value over equity. It must be above 0, at most 1,000, and below the market's own maximum leverage, which the market's first margin band sets. The server also holds an account to the margin floor of its volume tier, which on the production settings limits a position to 20 times leverage at tier 0 and 50 times at tier 1, and declines an order above it with `insufficient_margin`, so set it below the account's `max_leverage` in the server's account read. |
 
 ## `[risk]`
 

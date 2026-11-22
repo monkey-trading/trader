@@ -287,6 +287,19 @@ pub(crate) fn supported(spec: &MarketSpec) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Checks the bot's margin checks follow `spec`'s requirement: a weekend margin rises with the clock,
+/// which they do not follow.
+/// Error cases:
+/// - a weekend margin
+pub(crate) fn margin_followed(spec: &MarketSpec) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        spec.weekend_margin_bps == 0,
+        "{} asks a weekend margin, which the bot's margin checks do not follow",
+        spec.symbol
+    );
+    Ok(())
+}
+
 /// Checks a bar length can trade in the market's weekly hours: some bar is decided while the market is
 /// open and is no gap, in every clock regime a search from `from` reaches. A bar of a day, or any other that always spans a closure, would be
 /// refused for ever.

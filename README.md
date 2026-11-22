@@ -24,8 +24,8 @@ The bot has not been released, and has never held real funds.
 ## Supported trading server
 
 The bot is built against the engine at commit
-[`ed8f721`](https://github.com/monkey-trading/engine/commit/ed8f721b0062e48ee944ab063205f3dbccb01ae6),
-which runs protocol version V49, and it supports trading servers built from that commit. The
+[`d50c99e`](https://github.com/monkey-trading/engine/commit/d50c99ebe9c512192f1a736f88abf532e972a6db),
+which runs protocol version V86, and it supports trading servers built from that commit. The
 engine has no tagged releases yet.
 
 The bot uses that commit's own code to verify the server's attestation, to sign its requests, and to
@@ -323,6 +323,12 @@ from the pinned engine commit's contracts, and the house funded with 5,000,000 m
 the `[chain]` section as well. `./scripts/dev-lifecycle.sh` takes three accounts through their
 declarations, deposits, trading, MONKEY claims through a funding key, and a withdrawal on that
 chain.
+
+`DEMO_WORK_DIR=<new directory> DEMO_NODE_FILE=<file> ./scripts/demo-bots.sh start` starts five bots on a
+development stack, each on its own strategy and its own console port, funded and declared, so that their
+figures can be watched side by side. The file holds the `[node]` section that `dev-stack.sh` prints, and
+the script's header lists the other settings it reads. `DEMO_WORK_DIR=<directory> ./scripts/demo-bots.sh
+stop` ends exactly those bots.
 
 ### The console
 

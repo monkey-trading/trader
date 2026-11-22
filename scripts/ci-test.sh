@@ -35,6 +35,7 @@ check "the dev stack feeds the dev scenarios and its test" "ci_scripts image rus
 check "the dev stack's test" "ci_scripts" "$(areas scripts/dev-stack-test.sh)"
 check "the line cap feeds the Rust jobs and its test" "ci_scripts rust" "$(areas scripts/check-file-loc.sh)"
 check "a crate README reads nothing" "" "$(areas crates/trader/README.md)"
+check "the demo bots script reads nothing" "" "$(areas scripts/demo-bots.sh)"
 check "a console file feeds the console job, the bot that embeds it and the image" "console image rust" \
   "$(areas console/src/App.tsx console/package-lock.json)"
 check "the image's build, its check, its wrapper and its scenario" "image" \
