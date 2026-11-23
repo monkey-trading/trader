@@ -156,6 +156,8 @@ account with `close_on_stop`, it also closes the account's positions:
   reference price, which the bot reads again once its reading is two seconds old.
 - The server closes at most a billion units in one request. While a close leaves part of a position
   open, the bot closes again on a fresh nonce, for at most a minute.
+- A cancel or close that the server refuses for its nonce, or answers with a request to try again later,
+  is signed again once the server's hold has passed, up to three times in all.
 
 If the stop leaves a working order or a position behind, the bot raises an alert and exits with a
 non-zero status. It does the same when it cannot confirm that it left none. The stop takes the wait
