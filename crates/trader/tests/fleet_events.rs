@@ -90,30 +90,39 @@ fn a_listing_with_a_weekend_margin_stops_the_accounts_that_trade_the_market() {
     assert!(fleet.accounts[1].failed.is_none(), "the other account goes on");
 }
 
+/// The passed proposal for `spec` a fast-path vote carries, `fast` or not, in the command a node logs.
+fn vote(spec: MarketSpec, fast: bool) -> String {
+    let passed = PassedProposal {
+        proposal: 4,
+        fast,
+        command_hash: engine_core::eip712::B256::ZERO,
+        command: Some(AdminCommand::UpsertMarket(spec)),
+        block: 9,
+        chain_ref: "0x01:0".into(),
+    };
+    serde_json::to_string(&Command::PassProposal(Box::new(passed))).unwrap()
+}
+
+/// Two accounts, one per market, warmed up, and the log's next sequence number.
+fn two_markets() -> (Fleet, u64) {
+    let accounts = vec![account(0, vec![strategy(1, MINUTE)]), account(1, vec![strategy(2, MINUTE)])];
+    let mut fleet = Fleet::new(&markets(2), accounts, T0).unwrap();
+    let seq = warm(&mut fleet, &[1, 2], "100");
+    (fleet, seq)
+}
+
+const APPLIED: &str = r#"[{"type":"restriction_applied","proposal":4,"expires_at":99}]"#;
+
 /// A fast-path vote puts stricter margin bands into a market's listing with no `admin_applied`, so the
 /// bands the fleet checks fall below the ones in force: the accounts that trade the market stop, and a
 /// vote that leaves the bands as they are stops none.
 #[test]
 fn a_fast_vote_that_raises_the_margin_bands_stops_the_accounts_that_trade_the_market() {
-    let restriction = |spec: MarketSpec| {
-        let passed = PassedProposal {
-            proposal: 4,
-            fast: true,
-            command_hash: engine_core::eip712::B256::ZERO,
-            command: Some(AdminCommand::UpsertMarket(spec)),
-            block: 9,
-            chain_ref: "0x01:0".into(),
-        };
-        serde_json::to_string(&Command::PassProposal(Box::new(passed))).unwrap()
-    };
-    let events = r#"[{"type":"restriction_applied","proposal":4,"expires_at":99}]"#;
-    let accounts = vec![account(0, vec![strategy(1, MINUTE)]), account(1, vec![strategy(2, MINUTE)])];
-    let mut fleet = Fleet::new(&markets(2), accounts, T0).unwrap();
-    let seq = warm(&mut fleet, &[1, 2], "100");
+    let (mut fleet, seq) = two_markets();
     let ts = T0 + 1_000;
-    apply(&mut fleet, seq, ts, &command(seq, ts, &restriction(spec(1)), events));
+    apply(&mut fleet, seq, ts, &command(seq, ts, &vote(spec(1), true), APPLIED));
     assert!(fleet.accounts.iter().all(|a| a.failed.is_none()), "bands as they are stop nobody");
-    apply(&mut fleet, seq + 1, ts + 1, &command(seq + 1, ts + 1, &restriction(stricter()), events));
+    apply(&mut fleet, seq + 1, ts + 1, &command(seq + 1, ts + 1, &vote(stricter(), true), APPLIED));
     let reason = fleet.accounts[0].failed.as_deref().expect("the account that trades the market stops");
     assert!(reason.contains("stricter margin bands"), "{reason}");
     assert!(fleet.accounts[1].failed.is_none(), "the other account goes on");
@@ -159,5 +168,22 @@ fn a_relisting_below_the_held_margin_bands_stops_the_accounts_that_trade_the_mar
             assert!(reason.contains("below the ones the bot holds"), "{name}: {reason}");
         }
         assert!(fleet.accounts[1].failed.is_none(), "{name}: the account that trades another market goes on");
+    }
+}
+
+/// A vote the engine applies in full is a listing like any other, followed as one, and a vote it refuses
+/// puts nothing into force: neither stops an account, whatever bands its command carries.
+#[test]
+fn a_vote_that_is_not_a_restriction_stops_nobody() {
+    let refused = r#"[{"type":"proposal_refused","proposal":4,"reason":"no"}]"#;
+    let votes = [
+        ("a vote that is not fast-path", vote(stricter(), false), APPLIED),
+        ("a refused fast-path vote", vote(stricter(), true), refused),
+    ];
+    for (name, vote, events) in votes {
+        let (mut fleet, seq) = two_markets();
+        let ts = T0 + 1_000;
+        apply(&mut fleet, seq, ts, &command(seq, ts, &vote, events));
+        assert!(fleet.accounts.iter().all(|a| a.failed.is_none()), "{name}: stops nobody");
     }
 }

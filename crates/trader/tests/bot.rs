@@ -144,6 +144,23 @@ async fn startup_refusals() {
     assert!(stand_in.with(|i| i.posts.is_empty()));
 }
 
+/// Startup refuses a market that asks a weekend margin, which the bot's margin checks do not follow, and
+/// names it in the account's failure.
+#[tokio::test]
+async fn startup_refuses_a_market_with_a_weekend_margin() {
+    let stand_in = StandIn::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    stand_in.with(|i| {
+        i.accounts.insert(account().to_string(), account_view("5", json!({}), json!({})));
+        let mut weekend = btc_usd(Some("100"));
+        weekend["weekend_margin_bps"] = json!(500);
+        i.markets = json!([weekend]);
+    });
+    let err = run(config(&stand_in, dir.path(), "1m"), async {}).await.unwrap_err();
+    assert!(err.to_string().contains("BTC-USD asks a weekend margin"), "{err:#}");
+    assert!(stand_in.with(|i| i.posts.is_empty()));
+}
+
 /// Bars the stream replays from history, more than half a minute behind the node's time, update
 /// the strategy but place no order; the first bar closed live does.
 #[tokio::test]
