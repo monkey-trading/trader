@@ -15,7 +15,7 @@ use serde_json::value::RawValue;
 use tracing::{error, info};
 
 use crate::bot::fleet::{Fleet, Warm};
-use crate::bot::{Halt, bar_fits, margin_followed, supported};
+use crate::bot::{Halt, bands_held, bar_fits, margin_followed, supported};
 use crate::metrics::{FleetMetrics, Metrics, OrderSeries, lag_seconds};
 use crate::stream::message::{CommandMessage, Envelope, Offset, for_each_event, store_prices};
 
@@ -137,6 +137,9 @@ impl Fleet {
         let mut refused = Vec::new();
         let feed = &self.markets[slot as usize];
         if let Err(e) = margin_followed(spec) {
+            refused.extend(feed.assignments.iter().map(|&a| (self.assignments[a as usize].account, e.to_string())));
+        }
+        if let Err(e) = bands_held(spec, &feed.spec) {
             refused.extend(feed.assignments.iter().map(|&a| (self.assignments[a as usize].account, e.to_string())));
         }
         for &series in &feed.series {

@@ -24,9 +24,11 @@ pub(crate) use startup::{UNLOCKS_AT_ONCE, label};
 mod stop;
 mod warm;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::bail;
+use engine_core::Fixed;
 use engine_core::market::{MarketSpec, QuoteCurrency};
 use engine_core::types::{AccountId, Millis};
 use tokio::sync::oneshot;
@@ -295,6 +297,29 @@ pub(crate) fn margin_followed(spec: &MarketSpec) -> anyhow::Result<()> {
     anyhow::ensure!(
         spec.weekend_margin_bps == 0,
         "{} asks a weekend margin, which the bot's margin checks do not follow",
+        spec.symbol
+    );
+    Ok(())
+}
+
+/// Checks a relisting's margin bands charge at least the rate of the bands the bot holds on every slice of
+/// notional. A vote's restriction keeps stricter bands in the engine's listing across a relisting, whose
+/// command carries only the baseline, and the bot reads the bands in force only when it starts; so bands
+/// below the held ones may not be the ones in force, while bands at or above them are.
+/// Error cases:
+/// - bands below the held ones on some slice
+pub(crate) fn bands_held(spec: &MarketSpec, held: &MarketSpec) -> anyhow::Result<()> {
+    let rate_at = |spec: &MarketSpec, up_to: Option<Fixed>| {
+        spec.margin_tiers
+            .iter()
+            .find(|tier| tier.up_to.is_none_or(|hi| up_to.is_some_and(|at| at <= hi)))
+            .map(|t| t.bps)
+    };
+    let bounds: BTreeSet<Fixed> = spec.margin_tiers.iter().chain(&held.margin_tiers).filter_map(|t| t.up_to).collect();
+    let below = bounds.into_iter().map(Some).chain([None]).any(|up_to| rate_at(spec, up_to) < rate_at(held, up_to));
+    anyhow::ensure!(
+        !below,
+        "{} is relisted with margin bands below the ones the bot holds, which a vote's restriction may keep in force",
         spec.symbol
     );
     Ok(())
