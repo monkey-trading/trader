@@ -226,6 +226,39 @@ async fn a_stop_signs_a_cancel_or_close_again_when_its_nonce_was_taken() {
     }
 }
 
+/// A cancel or close the node answers with retry-later, as its per-address limit does to bots that stop
+/// together, is signed again once the node's hold has passed, and the stop completes. The close counts as
+/// placed twice and declined never, as the node did not refuse it.
+#[tokio::test]
+async fn a_stop_signs_a_cancel_or_close_again_after_a_retry_later_answer() {
+    for (path, position, orders) in [
+        ("/v1/orders/cancel-all", json!({}), json!({ "9": resting_order(9) })),
+        ("/v1/positions/close-all", json!({ "1": { "qty": "1", "entry": "99" } }), json!({})),
+    ] {
+        let stand_in = StandIn::start().await;
+        stand_in.with(|i| {
+            i.markets = json!([btc_usd(Some("99"))]);
+            i.accounts.insert(account().to_string(), account_view("1000", position, orders));
+            i.nonce = 7;
+            i.statuses.push_back(429);
+        });
+        stand_in.tick(T0 + MINUTE);
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = Arc::new(Metrics::new());
+        run_recording(config(&stand_in, dir.path(), "1m"), async {}, Arc::clone(&metrics)).await.unwrap();
+        let posts = stand_in.with(|i| i.posts.clone());
+        assert_eq!(posts.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), [path, path], "{path}");
+        if path == "/v1/positions/close-all" {
+            let (text, labels) = (metrics.encode(), format!("account=\"{}\",market=\"BTC-USD\"", account()));
+            assert!(text.lines().any(|l| l == format!("trader_orders_placed_total{{{labels}}} 2")), "{text}");
+            assert!(
+                text.lines().all(|l| !l.starts_with("trader_orders_declined_total{") || l.ends_with(" 0")),
+                "{text}"
+            );
+        }
+    }
+}
+
 /// A position larger than one close takes, long or short, is closed by further reduce-only closes on
 /// fresh nonces until none is left, each quoted at the node's mark.
 #[tokio::test]

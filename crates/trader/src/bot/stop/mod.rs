@@ -5,10 +5,11 @@
 //! stop does not hold back the others, and a signer that is not the node's ends them all at once.
 
 mod quotes;
+mod reads;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use engine_core::Fixed;
@@ -46,9 +47,11 @@ const MAX_EXPIRY_WAIT: Duration = Duration::from_millis(EXPIRES_IN_MS as u64 + 5
 const QUOTE_AGE: Duration = Duration::from_secs(2);
 /// How many times a close reads the marks again after waiting too long to be admitted.
 const QUOTE_ATTEMPTS: u32 = 3;
-/// How many times a cancel or close the node refused for its nonce, which another request of the
-/// account took (such as the console's withdrawal), is signed again on the next nonce.
-const NONCE_ATTEMPTS: u32 = 3;
+/// How many times a cancel or close is signed in all: again on the next nonce when the node refused
+/// it for its nonce, which another request of the account took (such as the console's withdrawal),
+/// and again once the node's hold has passed when it answered retry-later, as its per-address limit
+/// does to several bots stopping at once.
+const STOP_ATTEMPTS: u32 = 3;
 
 /// A close an account's flatten signed, reported before it is sent: the account's slot, the
 /// signature, and the expiry until which the close may still enter the log.
@@ -332,10 +335,10 @@ impl Stop {
     }
 
     /// Signs and sends a cancel of every resting order, on the account's next nonce, once the node's
-    /// limits let it go, and again on the next nonce when the node refuses it for its nonce. A failed
+    /// limits let it go, and again when the node refuses it for its nonce or answers retry-later. A failed
     /// cancel is logged: the account read that follows shows what it did.
     async fn cancel(&self, account: AccountId) -> Result<(), Failed> {
-        for attempt in 1..=NONCE_ATTEMPTS {
+        for attempt in 1..=STOP_ATTEMPTS {
             self.check_halt()?;
             let Some(nonce) = self.nonce(account).await? else { return Ok(()) };
             let admission = self.admit(account).await?;
@@ -345,8 +348,11 @@ impl Stop {
             match self.node.cancel_all(&CancelAllRequest { account, auth }, admission).await {
                 Ok(answer) => log_order_events(account, &answer.body),
                 Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
-                Err(e @ CallError::Refused { status: 409, .. }) if attempt < NONCE_ATTEMPTS => {
-                    info!(%account, "the cancel's nonce was taken by another request of the account; signing again: {e}");
+                // The nonce was taken by another request of the account, or the node asked it to wait.
+                Err(e @ (CallError::Refused { status: 409, .. } | CallError::RetryLater { .. }))
+                    if attempt < STOP_ATTEMPTS =>
+                {
+                    info!(%account, "the cancel did not go; signing again: {e}");
                     continue;
                 }
                 Err(e) => warn!(%account, "the cancel failed: {e}"),
@@ -359,7 +365,7 @@ impl Stop {
     /// Signs and sends the closes of the positions in `held`: one request for the markets that share
     /// a slippage bound, each market quoted at the node's mark as it was read no more than
     /// `QUOTE_AGE` before the request was admitted, which is when it is signed, and bounded as its
-    /// strategy sets; again on the next nonce when the node refuses one for its nonce. A failed close
+    /// strategy sets; again when the node refuses one for its nonce or answers retry-later. A failed close
     /// is logged: the account read that follows shows what it did.
     async fn close(&self, account: AccountId, held: &[(MarketId, Fixed, i64)]) -> Result<(), Failed> {
         let mut by_slippage: BTreeMap<i64, Vec<(MarketId, Fixed)>> = BTreeMap::new();
@@ -367,8 +373,8 @@ impl Stop {
             by_slippage.entry(*slippage).or_default().push((*market, *qty));
         }
         for (slippage, markets) in by_slippage {
-            for attempt in 1..=NONCE_ATTEMPTS {
-                if !self.close_group(account, slippage, &markets, attempt == NONCE_ATTEMPTS).await? {
+            for attempt in 1..=STOP_ATTEMPTS {
+                if !self.close_group(account, slippage, &markets, attempt == STOP_ATTEMPTS).await? {
                     break;
                 }
             }
@@ -440,9 +446,12 @@ impl Stop {
                 }
             }
             Err(CallError::WrongSigner { .. }) => return Err(Failed::WrongSigner),
-            Err(e @ CallError::Refused { status: 409, .. }) if !last => {
-                self.series.declined(&named);
-                info!(%account, "the close's nonce was taken by another request of the account; signing again: {e}");
+            // The nonce was taken by another request of the account, or the node asked it to wait.
+            Err(e @ (CallError::Refused { status: 409, .. } | CallError::RetryLater { .. })) if !last => {
+                if matches!(e, CallError::Refused { .. }) {
+                    self.series.declined(&named);
+                }
+                info!(%account, "the close did not go; signing again: {e}");
                 return Ok(true);
             }
             Err(e) => {
@@ -453,48 +462,5 @@ impl Stop {
             }
         }
         Ok(false)
-    }
-
-    /// Ends the stop of an account that has stopped trading since it began, before anything more is signed.
-    /// Error cases:
-    /// - the account halted
-    fn check_halt(&self) -> Result<(), Failed> {
-        match &self.halt {
-            Some(halt) if halt.load(Ordering::Relaxed) => {
-                Err(Failed::Incomplete("the account halted: nothing more was signed for it".into()))
-            }
-            _ => Ok(()),
-        }
-    }
-
-    /// The expiry for a request signed now: the node's time as the bot last verified it, counted on,
-    /// plus the window. `None`, with a warning, before any answer.
-    fn expiry(&self) -> Option<Millis> {
-        let now = self.node.latest_time_ms().and_then(|ms| Millis::try_from(ms).ok());
-        if now.is_none() {
-            warn!("the node's time is not known: nothing is signed");
-        }
-        now.map(|now| now.saturating_add(EXPIRES_IN_MS))
-    }
-
-    /// The account, verified.
-    async fn read(&self, account: AccountId) -> Result<crate::node::api::AccountView, Failed> {
-        match self.node.account(account).await {
-            Ok(answer) => Ok(answer.body),
-            Err(CallError::WrongSigner { .. }) => Err(Failed::WrongSigner),
-            Err(e) => Err(Failed::Incomplete(e.to_string())),
-        }
-    }
-
-    /// The account's next nonce, or `None`, with a warning, when the node gives no answer to rely on.
-    async fn nonce(&self, account: AccountId) -> Result<Option<u64>, Failed> {
-        match self.node.nonce(account).await {
-            Ok(answer) => Ok(Some(answer.body.next_nonce)),
-            Err(CallError::WrongSigner { .. }) => Err(Failed::WrongSigner),
-            Err(e) => {
-                warn!(%account, "no nonce to sign with: {e}");
-                Ok(None)
-            }
-        }
     }
 }
