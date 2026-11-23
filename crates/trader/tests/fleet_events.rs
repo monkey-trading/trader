@@ -4,10 +4,11 @@
 #[path = "support/log.rs"]
 mod log;
 
+use engine_core::Fixed;
 use engine_core::command::{AdminCommand, Command};
 use engine_core::governance::{PassedProposal, VotedChange};
 use engine_core::market::{MarketSpec, Tier};
-use trader::bot::fleet::Fleet;
+use trader::bot::fleet::{Fleet, MarketIn};
 
 use log::*;
 
@@ -116,4 +117,47 @@ fn a_fast_vote_that_raises_the_margin_bands_stops_the_accounts_that_trade_the_ma
     let reason = fleet.accounts[0].failed.as_deref().expect("the account that trades the market stops");
     assert!(reason.contains("stricter margin bands"), "{reason}");
     assert!(fleet.accounts[1].failed.is_none(), "the other account goes on");
+}
+
+/// `spec(1)` with margin bands of `bands`, each an upper bound in whole units (none for the last) and a rate.
+fn banded(bands: &[(Option<i64>, i64)]) -> MarketSpec {
+    let margin_tiers = bands.iter().map(|&(up_to, bps)| Tier { up_to: up_to.map(Fixed::from_int), bps }).collect();
+    MarketSpec { margin_tiers, ..spec(1) }
+}
+
+/// A relisting carries the baseline bands, while the engine keeps the stricter ones a vote's restriction
+/// holds, and the bot read those when it started. Bands below the held ones on any slice of notional may
+/// not be the ones in force, so the accounts that trade the market stop; bands at or above them on every
+/// slice are in force, and stop nobody.
+#[test]
+fn a_relisting_below_the_held_margin_bands_stops_the_accounts_that_trade_the_market() {
+    let held = [(Some(1_000_000), 100), (None, 150)];
+    let relistings = [
+        ("a baseline below every band", vec![(None, 100)], true),
+        ("bands lower on one slice only", vec![(Some(500_000), 100), (None, 120)], true),
+        ("bands lower on the last slice only", vec![(Some(1_000_000), 110), (None, 140)], true),
+        ("the same bands", held.to_vec(), false),
+        (
+            "bands cut at other bounds and never lower",
+            vec![(Some(500_000), 100), (Some(2_000_000), 150), (None, 190)],
+            false,
+        ),
+        ("higher bands", vec![(None, 190)], false),
+    ];
+    for (name, bands, stops) in relistings {
+        let listed =
+            |id| MarketIn { spec: MarketSpec { id, symbol: format!("M{id}-USD"), ..banded(&held) }, mark: None };
+        let accounts = vec![account(0, vec![strategy(1, MINUTE)]), account(1, vec![strategy(2, MINUTE)])];
+        let mut fleet = Fleet::new(&[listed(1), listed(2)], accounts, T0).unwrap();
+        let seq = warm(&mut fleet, &[1, 2], "100");
+        let cmd = serde_json::to_string(&Command::Admin(AdminCommand::UpsertMarket(banded(&bands)))).unwrap();
+        let ts = T0 + 1_000;
+        apply(&mut fleet, seq, ts, &command(seq, ts, &cmd, r#"[{"type":"admin_applied"}]"#));
+        let reason = fleet.accounts[0].failed.as_deref();
+        assert_eq!(reason.is_some(), stops, "{name}: {reason:?}");
+        if let Some(reason) = reason {
+            assert!(reason.contains("below the ones the bot holds"), "{name}: {reason}");
+        }
+        assert!(fleet.accounts[1].failed.is_none(), "{name}: the account that trades another market goes on");
+    }
 }

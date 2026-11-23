@@ -124,7 +124,10 @@ bands, stops the accounts that trade that market and leaves the others trading. 
 requirement does not follow a weekend margin, which rises as a market's weekend gap nears. A
 fast-path vote puts its stricter bands into the market's listing at once, with no listing for the bot
 to follow, and the bot reads a market's bands only when it starts. A vote that the engine applies in
-full is a listing like any other, which the bot follows.
+full is a listing like any other, which the bot follows. A relisting that sets margin bands below the
+ones the bot holds, on any slice of notional, also stops the accounts that trade the market, because the
+engine keeps a restriction's stricter bands across a relisting and the bot cannot tell whether one is still in
+force.
 
 A share split in a traded market halts the bot, and so does a corporate action in a traded market
 that fails. A warm-up starts after the last step in the history of 40% down or 67% up, which only a
